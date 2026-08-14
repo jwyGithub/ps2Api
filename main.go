@@ -6,16 +6,16 @@ import (
 	"os"
 	"strings"
 
-	"postman2api-go/internal/api"
-	"postman2api-go/internal/store"
+	"ps2api/internal/api"
+	"ps2api/internal/store"
 )
 
 func main() {
-	// 端口只用专属变量 POSTMAN2API_PORT，避免通用 PORT 环境变量被其他程序占用时
+	// 端口只用专属变量 GATEWAY_PORT，避免通用 PORT 环境变量被其他程序占用时
 	// 把服务代理到别的地方。
-	port := env("POSTMAN2API_PORT", "1930")
-	path := env("DATABASE_PATH", "./data/postman2api.db")
-	key := env("API_KEY", "postman2api-secret-key")
+	port := env("GATEWAY_PORT", "1930")
+	path := env("DATABASE_PATH", "./data/gateway.db")
+	key := env("API_KEY", "your-secret-key")
 
 	s, err := store.Open(path)
 	if err != nil {
@@ -28,7 +28,7 @@ func main() {
 	server.Register(mux)
 
 	addr := ":" + port
-	log.Printf("postman2api-go listening on http://localhost:%s", port)
+	log.Printf("ps2api listening on http://localhost:%s", port)
 	log.Printf("OpenAI: http://localhost:%s/v1/chat/completions", port)
 	log.Printf("Anthropic: http://localhost:%s/v1/messages", port)
 	if err := http.ListenAndServe(addr, logging(mux)); err != nil {

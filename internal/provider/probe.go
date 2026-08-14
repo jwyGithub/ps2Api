@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"postman2api-go/internal/store"
+	"ps2api/internal/store"
 )
 
 // ProbeTimeout 单账号额度探测的请求超时（远小于正常对话的 300s）。

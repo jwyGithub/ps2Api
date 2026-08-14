@@ -10,8 +10,8 @@ import (
 
 func TestTraceWritesJSONLAndRedactsSecrets(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("POSTMAN2API_TRACE_LOG", "1")
-	t.Setenv("POSTMAN2API_TRACE_DIR", dir)
+	t.Setenv("GATEWAY_TRACE_LOG", "1")
+	t.Setenv("GATEWAY_TRACE_DIR", dir)
 	ctx, id := NewTraceContext(context.Background())
 	if id == "" {
 		t.Fatal("trace id was not created")
@@ -43,7 +43,7 @@ func TestTraceWritesJSONLAndRedactsSecrets(t *testing.T) {
 }
 
 func TestTraceDisabledDoesNotCreateID(t *testing.T) {
-	t.Setenv("POSTMAN2API_TRACE_LOG", "0")
+	t.Setenv("GATEWAY_TRACE_LOG", "0")
 	_, id := NewTraceContext(context.Background())
 	if id != "" {
 		t.Fatalf("disabled trace created id %q", id)
@@ -52,8 +52,8 @@ func TestTraceDisabledDoesNotCreateID(t *testing.T) {
 
 func TestEachTraceUsesItsOwnFile(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("POSTMAN2API_TRACE_LOG", "1")
-	t.Setenv("POSTMAN2API_TRACE_DIR", dir)
+	t.Setenv("GATEWAY_TRACE_LOG", "1")
+	t.Setenv("GATEWAY_TRACE_DIR", dir)
 	ctx1, id1 := NewTraceContext(context.Background())
 	ctx2, id2 := NewTraceContext(context.Background())
 	Trace(ctx1, "first", nil)

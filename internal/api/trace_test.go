@@ -11,8 +11,8 @@ import (
 
 func TestTraceChatConnectsRequestAndResponse(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("POSTMAN2API_TRACE_LOG", "1")
-	t.Setenv("POSTMAN2API_TRACE_DIR", dir)
+	t.Setenv("GATEWAY_TRACE_LOG", "1")
+	t.Setenv("GATEWAY_TRACE_DIR", dir)
 	handler := traceChat(func(w http.ResponseWriter, r *http.Request) {
 		jsonWrite(w, 200, map[string]bool{"ok": true})
 	})

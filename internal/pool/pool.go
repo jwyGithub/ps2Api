@@ -5,7 +5,7 @@ import (
 	"strings"
 	"sync"
 
-	"postman2api-go/internal/store"
+	"ps2api/internal/store"
 )
 
 type Pool struct {

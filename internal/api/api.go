@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"postman2api-go/internal/dashboard"
-	"postman2api-go/internal/provider"
-	"postman2api-go/internal/router"
-	"postman2api-go/internal/store"
+	"ps2api/internal/dashboard"
+	"ps2api/internal/provider"
+	"ps2api/internal/router"
+	"ps2api/internal/store"
 )
 
 type Server struct {

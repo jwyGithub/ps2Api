@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"postman2api-go/internal/pool"
-	"postman2api-go/internal/provider"
-	"postman2api-go/internal/store"
+	"ps2api/internal/pool"
+	"ps2api/internal/provider"
+	"ps2api/internal/store"
 )
 
 type Router struct {

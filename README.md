@@ -1,6 +1,6 @@
 # ps2Api
 
-将 **Postman Agent Chat** 账号聚合成一个本地网关，对外暴露 **OpenAI 兼容**（`/v1/chat/completions`）与 **Anthropic 兼容**（`/v1/messages`）接口。多账号自动轮询、故障切换、真实额度同步，附带一个实时数据面板。以 **Docker** 运行（无界面、纯静态二进制）。
+将上游 AI 账号聚合成一个本地网关，对外暴露 **OpenAI 兼容**（`/v1/chat/completions`）与 **Anthropic 兼容**（`/v1/messages`）接口。多账号自动轮询、故障切换、真实额度同步，附带一个实时数据面板。以 **Docker** 运行（无界面、纯静态二进制）。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) ![Go](https://img.shields.io/badge/Go-1.26+-00ADD8.svg) ![Docker](https://img.shields.io/badge/Docker-ready-2496ED.svg)
 
@@ -24,7 +24,7 @@
 
 - **双协议兼容** — 同时提供 OpenAI `chat/completions`（流式 / 非流式）与 Anthropic `messages` 接口，现有 SDK 无需改造即可接入。
 - **多账号号池** — 轮询 + 最少在途请求调度；账号额度耗尽 / 认证失败 / 瞬时错误时自动切换到下一个可用账号。
-- **真实额度同步** — 每次聊天写入 Postman 返回的真实 `limit / usage / overage`，面板「余量 / 总量」为真实数据。
+- **真实额度同步** — 每次聊天写入上游返回的真实 `limit / usage / overage`，面板「余量 / 总量」为真实数据。
 - **账号导入 / 导出** — 通过 `account.json` 一次性批量导入多个账号，也支持导出备份。
 - **实时数据面板** — 请求量、延迟 P95、成本估算、错误率、模型分布、账号排行、热力图等，全部由真实请求日志聚合，无任何 Mock。
 - **容器化部署** — 纯静态二进制（`CGO_ENABLED=0`，SQLite 用纯 Go 实现，无需 cgo），镜像小、无系统依赖。
@@ -32,15 +32,15 @@
 ## 工作原理
 
 ```text
-┌──────────┐   OpenAI/Anthropic 协议    ┌──────────────────────────┐   gateway.postman.com/chat
-│ 客户端     │ ─────────────────────────► │  Postman2API 网关（容器）   │ ──────────────────────►
+┌──────────┐   OpenAI/Anthropic 协议    ┌──────────────────────────┐   上游服务
+│ 客户端     │ ─────────────────────────► │  ps2Api 网关（容器）        │ ──────────────────────►
 │ (SDK/Curl)│ ◄───────────────────────── │  账号池 轮询+最少在途        │ ◄──────────────────────
-└──────────┘   流式 / 非流式             │  失败自动切换  ·  真实额度    │    x-access-token / sid
+└──────────┘   流式 / 非流式             │  失败自动切换  ·  真实额度    │
                                          │  SQLite 日志/统计/设置/告警   │
                                          └──────────────────────────┘
 ```
 
-客户端以标准 OpenAI / Anthropic 协议请求本网关；网关从账号池挑选账号，把请求转换为 Postman 上游协议转发到 `gateway.postman.com`，再将上游 SSE 流回写为客户端协议。全过程的请求量、延迟、成本、错误与额度写入 SQLite，面板实时读取。
+客户端以标准 OpenAI / Anthropic 协议请求本网关；网关从账号池挑选账号，把请求转换为上游协议转发，再将上游 SSE 流回写为客户端协议。全过程的请求量、延迟、成本、错误与额度写入 SQLite，面板实时读取。
 
 ## 快速开始
 
@@ -57,12 +57,12 @@ docker compose down           # 停止
 ### docker 命令
 
 ```bash
-docker build -t postman2api-go .
-docker run -d --name postman2api \
+docker build -t ps2api .
+docker run -d --name ps2api \
   -p 1930:1930 \
   -v "$(pwd)/data:/data" \
-  -e API_KEY=postman2api-secret-key \
-  postman2api-go
+  -e API_KEY=your-secret-key \
+  ps2api
 ```
 
 启动后：
@@ -75,7 +75,7 @@ docker run -d --name postman2api \
 
 ## 账号接入
 
-网关本身不注册账号，需要导入已登录的 Postman Agent Chat 账号凭据。两种方式：
+网关本身不注册账号，需要导入已登录的上游账号凭据。两种方式：
 
 1. **批量导入（推荐）** — 面板「号池管理 → 导入」上传 `account.json`，或 `POST /api/accounts/import`。
 2. **手动添加单个** — 面板「添加账号」，或 `POST /api/accounts`。
@@ -101,8 +101,8 @@ docker run -d --name postman2api \
 }
 ```
 
-- **桌面端账号**用 `access_token`（需同时提供 `workspace_subdomain`）。
-- **Web 端账号**用 `postman_sid` 代替 `access_token`（此时 `workspace_subdomain` 可省略）。
+- **令牌型账号**用 `access_token`（需同时提供 `workspace_subdomain`）。
+- **会话型账号**用 `sid` 代替 `access_token`（此时 `workspace_subdomain` 可省略）。
 - `user_id` 与 `workspace_id` 均为必填。
 
 ## 核心用法
@@ -111,7 +111,7 @@ docker run -d --name postman2api \
 
 ```bash
 curl http://127.0.0.1:1930/v1/chat/completions \
-  -H "Authorization: Bearer postman2api-secret-key" \
+  -H "Authorization: Bearer your-secret-key" \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-5.6-luna","messages":[{"role":"user","content":"你好"}],"stream":true}'
 ```
@@ -121,7 +121,7 @@ curl http://127.0.0.1:1930/v1/chat/completions \
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://127.0.0.1:1930/v1", api_key="postman2api-secret-key")
+client = OpenAI(base_url="http://127.0.0.1:1930/v1", api_key="your-secret-key")
 resp = client.chat.completions.create(
     model="claude-opus-4-8",
     messages=[{"role": "user", "content": "写一句 Go 的 Hello World"}],
@@ -133,7 +133,7 @@ print(resp.choices[0].message.content)
 
 ```bash
 curl http://127.0.0.1:1930/v1/messages \
-  -H "Authorization: Bearer postman2api-secret-key" \
+  -H "Authorization: Bearer your-secret-key" \
   -H "Content-Type: application/json" \
   -d '{"model":"claude-opus-4-8","max_tokens":1024,"messages":[{"role":"user","content":"你好"}]}'
 ```
@@ -150,13 +150,13 @@ curl http://127.0.0.1:1930/v1/messages \
 
 | 环境变量                | 默认                             | 说明                                                              |
 | ----------------------- | -------------------------------- | ----------------------------------------------------------------- |
-| `API_KEY`               | `postman2api-secret-key`         | 客户端 Bearer Key；设为空字符串则关闭鉴权                         |
-| `POSTMAN2API_PORT`      | `1930`                           | 监听端口                                                          |
-| `DATABASE_PATH`         | `/data/postman2api.db`（镜像内） | SQLite 路径                                                       |
-| `POSTMAN2API_TRACE_LOG` | `0`                              | 设为 `1` 记录客户端请求、路由、上游请求 / SSE 与响应，供故障排查  |
-| `POSTMAN2API_TRACE_DIR` | `./data/traces`                  | 追踪日志根目录；按日期分目录，每个请求单独生成 `<trace_id>.jsonl` |
+| `API_KEY`               | `your-secret-key`                | 客户端 Bearer Key；设为空字符串则关闭鉴权                         |
+| `GATEWAY_PORT`          | `1930`                           | 监听端口                                                          |
+| `DATABASE_PATH`         | `/data/gateway.db`（镜像内）     | SQLite 路径                                                       |
+| `GATEWAY_TRACE_LOG`     | `0`                              | 设为 `1` 记录客户端请求、路由、上游请求 / SSE 与响应，供故障排查  |
+| `GATEWAY_TRACE_DIR`     | `./data/traces`                  | 追踪日志根目录；按日期分目录，每个请求单独生成 `<trace_id>.jsonl` |
 
-> 追踪日志默认关闭。开启后 `Authorization`、`Cookie`、密码、API Key、access token、`postman.sid` 会自动脱敏，但日志仍含对话正文与工具结果，排查后应关闭并妥善处理。响应头 `X-Postman2API-Trace-ID` 对应该次请求的日志文件名。
+> 追踪日志默认关闭。开启后 `Authorization`、`Cookie`、密码、API Key、access token、会话 token 会自动脱敏，但日志仍含对话正文与工具结果，排查后应关闭并妥善处理。响应头 `X-Postman2API-Trace-ID` 对应该次请求的日志文件名。
 
 ## API 参考
 
@@ -200,7 +200,7 @@ CGO_ENABLED=0 go build ./...                          # 编译（纯静态，无
 go vet ./...                                          # 静态检查
 go test ./...                                         # 单元测试
 node --check internal/dashboard/static/dashboard.js   # 前端语法检查
-docker build -t postman2api-go .                      # 构建镜像
+docker build -t ps2api .                              # 构建镜像
 ```
 
 CI（`.github/workflows/ci.yml`）：Linux 全量测试 + Docker 构建与容器冒烟。贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
@@ -212,17 +212,14 @@ main.go                      # 入口：裸 HTTP 服务
 Dockerfile / docker-compose.yml / .dockerignore   # 容器构建与编排
 internal/
   api/                       # HTTP 路由、账号导入、面板 API
-  provider/                  # Postman 上游协议（桌面/Web）、SSE 解析、token 估算
+  provider/                  # 上游协议（令牌 / 会话）、SSE 解析、token 估算
   pool/                      # 账号池调度与状态
   router/                    # 请求路由、重试、用量持久化、全量日志
   store/                     # SQLite：账号/日志/设置/告警 + 聚合统计
   dashboard/static/          # 面板前端（独立，无构建步骤）
-docs/                        # 逆向协议笔记
+docs/                        # 协议笔记
 ```
 
 ## 许可
 
-- 代码以 **MIT License** 开源（见 [LICENSE](LICENSE)），**不包含** Postman 任何源代码。
-- 「Postman」名称与火箭图标为 Postman, Inc. 的注册商标，仓库内置图标仅作本地使用；**公开分发时请替换为自有图标**。
-- 上游协议的逆向描述见 `docs/`，仅用于技术说明。
-
+代码以 **MIT License** 开源，见 [LICENSE](LICENSE)。

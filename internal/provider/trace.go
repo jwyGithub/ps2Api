@@ -19,7 +19,7 @@ type traceContextKey struct{}
 var traceMu sync.Mutex
 
 func TraceEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("POSTMAN2API_TRACE_LOG"))) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GATEWAY_TRACE_LOG"))) {
 	case "1", "true", "yes", "on":
 		return true
 	default:
@@ -54,7 +54,7 @@ func Trace(ctx context.Context, event string, data interface{}) {
 	if err != nil {
 		return
 	}
-	dir := strings.TrimSpace(os.Getenv("POSTMAN2API_TRACE_DIR"))
+	dir := strings.TrimSpace(os.Getenv("GATEWAY_TRACE_DIR"))
 	if dir == "" {
 		dir = "./data/traces"
 	}

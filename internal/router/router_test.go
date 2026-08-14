@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"postman2api-go/internal/provider"
-	"postman2api-go/internal/store"
+	"ps2api/internal/provider"
+	"ps2api/internal/store"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

@@ -1,4 +1,4 @@
-module postman2api-go
+module ps2api
 
 go 1.26.2
 

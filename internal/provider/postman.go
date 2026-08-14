@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"postman2api-go/internal/store"
+	"ps2api/internal/store"
 )
 
 const (

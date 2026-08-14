@@ -4,13 +4,13 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /postman2api-go .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /ps2api .
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 WORKDIR /app
-COPY --from=build /postman2api-go /app/postman2api-go
-ENV DATABASE_PATH=/data/postman2api.db
+COPY --from=build /ps2api /app/ps2api
+ENV DATABASE_PATH=/data/gateway.db
 VOLUME /data
 EXPOSE 1930
-ENTRYPOINT ["/app/postman2api-go"]
+ENTRYPOINT ["/app/ps2api"]
