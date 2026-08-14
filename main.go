@@ -17,7 +17,6 @@ func main() {
 	// 把服务代理到别的地方。
 	port := env("GATEWAY_PORT", "1930")
 	path := env("DATABASE_PATH", "./data/gateway.db")
-	key := env("API_KEY", "your-secret-key")
 
 	s, err := store.Open(path)
 	if err != nil {
@@ -25,7 +24,8 @@ func main() {
 	}
 	defer s.Close()
 
-	server := api.New(s, key)
+	// API Key 不再来自环境变量：改为面板设置并持久化到 SQLite，auth() 每次从库读取。
+	server := api.New(s)
 	mux := http.NewServeMux()
 	server.Register(mux)
 

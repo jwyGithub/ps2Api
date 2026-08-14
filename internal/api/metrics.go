@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -51,18 +52,14 @@ func (s *Server) allSettings() map[string]string {
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	settings := s.allSettings()
-	apiKey := "未设置"
-	if s.APIKey != "" {
-		if len(s.APIKey) > 8 {
-			apiKey = s.APIKey[:8] + "****"
-		} else {
-			apiKey = "****"
-		}
-	}
+	// 返回真实 API Key：面板初始化时读取并缓存到本地，之后每个请求带上它。
+	// 面板本身是本机只读入口，与账号 token 同一信任边界。
+	key := s.apiKey()
 	jsonWrite(w, 200, map[string]interface{}{
 		"settings": settings,
 		"defs":     settingDefs,
-		"apiKey":   apiKey,
+		"apiKey":   key,
+		"apiKeySet": key != "",
 	})
 }
 
@@ -72,10 +69,18 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	var q struct {
 		Settings map[string]string `json:"settings"`
+		// APIKey 用指针区分「未提供」(nil) 与「清空以关闭鉴权」("")。
+		APIKey *string `json:"apiKey"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&q); err != nil {
 		jsonError(w, 400, err.Error(), "invalid_request")
 		return
+	}
+	if q.APIKey != nil {
+		if err := s.Store.SetSetting("api_key", strings.TrimSpace(*q.APIKey)); err != nil {
+			jsonError(w, 500, err.Error(), "internal_error")
+			return
+		}
 	}
 	valid := map[string]bool{}
 	for _, d := range settingDefs {

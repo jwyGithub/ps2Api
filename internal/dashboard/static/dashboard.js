@@ -35,7 +35,7 @@
     });
   }
 
-  function key() { return localStorage.getItem('postman2api_api_key') || 'your-secret-key'; }
+  function key() { return localStorage.getItem('ps2api_api_key') || ''; }
   function esc(value) { return String(value == null ? '' : value).replace(/[&<>"']/g, function (c) { return ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[c]; }); }
   function fmt(value) { return Number(value || 0).toLocaleString('zh-CN'); }
   function ago(value) {
@@ -127,6 +127,8 @@
       state.settings = data.settings || {};
       state.settingsDefs = data.defs || [];
       state.apiKey = data.apiKey || '';
+      // 初始化时把服务端存的 API Key 缓存到本地，之后每个请求都带上它。
+      if (data.apiKey) localStorage.setItem('ps2api_api_key', data.apiKey);
     }); },
     alerts: function () { return api('/api/alerts').then(function (data) {
       state.alerts = data.data || [];
@@ -380,7 +382,7 @@
     var host2 = document.getElementById('settingsHost2');
     if (host2) host2.textContent = window.location.protocol + '//' + window.location.host;
     var auth = document.getElementById('settingsApiKey');
-    if (auth) auth.textContent = state.apiKey || '未设置';
+    if (auth && document.activeElement !== auth) auth.value = state.apiKey || '';
     var form = document.getElementById('settingsForm');
     if (form) {
       form.innerHTML = state.settingsDefs.map(function (d) {
@@ -531,6 +533,16 @@
   };
   window.resolveAlert = function (id) { api('/api/alerts/'+id+'/resolve', {method:'POST',body:'{}'}).then(function(){toast('告警已处理');return loadAll();}).catch(function(e){toast(e.message);}); };
   window.resolveAllAlerts = function () { if (!confirm('确定处理全部未处理告警？')) return; api('/api/alerts/resolve-all', {method:'POST',body:'{}'}).then(function(){toast('全部告警已处理');return loadAll();}).catch(function(e){toast(e.message);}); };
+  window.saveApiKey = function () {
+    var el = document.getElementById('settingsApiKey');
+    var val = el ? el.value.trim() : '';
+    // 先写本地再 PUT：改 key 后本次 PUT 请求就带新 key，避免改完立刻 401。
+    localStorage.setItem('ps2api_api_key', val);
+    api('/api/settings', {method:'PUT', body:JSON.stringify({apiKey:val})}).then(function(){
+      toast(val ? 'API Key 已保存并生效' : 'API Key 已清空（鉴权已关闭）');
+      return loadAll();
+    }).catch(function(e){toast(e.message);});
+  };
   window.saveSettings = function () {
     var payload = {};
     document.querySelectorAll('#settingsForm [data-key]').forEach(function (el) {

@@ -22,11 +22,10 @@ import (
 type Server struct {
 	Store  *store.Store
 	Router *router.Router
-	APIKey string
 }
 
-func New(s *store.Store, key string) *Server {
-	srv := &Server{Store: s, Router: router.New(s), APIKey: key}
+func New(s *store.Store) *Server {
+	srv := &Server{Store: s, Router: router.New(s)}
 	// 后台告警评估器：基于真实日志/额度统计定期落告警（见 metrics.go）
 	go srv.runAlertEvaluator()
 	return srv
@@ -124,15 +123,22 @@ func (w *traceResponseWriter) Flush() {
 	}
 }
 func (s *Server) auth(w http.ResponseWriter, r *http.Request) bool {
-	if s.APIKey == "" {
+	key := s.apiKey()
+	// 未设置 API Key 时不鉴权（首次进面板设置前的引导态）。
+	if key == "" {
 		return true
 	}
-	got := r.Header.Get("Authorization")
-	if got != "Bearer "+s.APIKey {
+	if r.Header.Get("Authorization") != "Bearer "+key {
 		jsonError(w, 401, "Invalid API key", "invalid_api_key")
 		return false
 	}
 	return true
+}
+
+// apiKey 从 SQLite settings 读取当前生效的客户端 Bearer Key（面板可动态修改，改后立即生效）。
+func (s *Server) apiKey() string {
+	v, _ := s.Store.GetSetting("api_key")
+	return strings.TrimSpace(v)
 }
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	jsonWrite(w, 200, map[string]interface{}{"status": "ok"})

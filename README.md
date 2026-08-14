@@ -61,7 +61,6 @@ docker build -t ps2api .
 docker run -d --name ps2api \
   -p 1930:1930 \
   -v "$(pwd)/data:/data" \
-  -e API_KEY=your-secret-key \
   ps2api
 ```
 
@@ -150,11 +149,12 @@ curl http://127.0.0.1:1930/v1/messages \
 
 | 环境变量                | 默认                             | 说明                                                              |
 | ----------------------- | -------------------------------- | ----------------------------------------------------------------- |
-| `API_KEY`               | `your-secret-key`                | 客户端 Bearer Key；设为空字符串则关闭鉴权                         |
 | `GATEWAY_PORT`          | `1930`                           | 监听端口                                                          |
 | `DATABASE_PATH`         | `/data/gateway.db`（镜像内）     | SQLite 路径                                                       |
 | `GATEWAY_TRACE_LOG`     | `0`                              | 设为 `1` 记录客户端请求、路由、上游请求 / SSE 与响应，供故障排查  |
 | `GATEWAY_TRACE_DIR`     | `./data/traces`                  | 追踪日志根目录；按日期分目录，每个请求单独生成 `<trace_id>.jsonl` |
+
+> **API Key** 不再通过环境变量配置：首次启动后在面板「系统设置 → 安全与认证」填入并保存，写入 SQLite 后立即生效，面板会自动缓存。留空则关闭鉴权。
 
 > 追踪日志默认关闭。开启后 `Authorization`、`Cookie`、密码、API Key、access token、会话 token 会自动脱敏，但日志仍含对话正文与工具结果，排查后应关闭并妥善处理。响应头 `X-Postman2API-Trace-ID` 对应该次请求的日志文件名。
 

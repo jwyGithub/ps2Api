@@ -50,17 +50,18 @@
             <h3 class="font-display text-[20px] font-medium mb-1">安全与认证</h3>
             <p class="text-[12px] mb-5" style="color: var(--muted);">访问控制说明</p>
             <div class="space-y-3">
-              <div class="flex items-center justify-between p-3 rounded-lg" style="background: var(--bg);">
-                <div>
-                  <div class="text-[13px] font-semibold">API Key</div>
-                  <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">服务端实际生效的 Bearer Key（由启动环境变量 API_KEY 决定）</div>
+              <div class="p-3 rounded-lg" style="background: var(--bg);">
+                <div class="text-[13px] font-semibold">API Key</div>
+                <div class="text-[12px] mt-0.5 mb-2" style="color: var(--fg-2);">客户端 Bearer Key，存入数据库并立即生效；面板会自动缓存。留空则关闭鉴权</div>
+                <div class="flex items-center gap-2">
+                  <input class="input font-mono" id="settingsApiKey" placeholder="未设置" style="flex:1">
+                  <button class="btn btn-primary" onclick="saveApiKey()">保存</button>
                 </div>
-                <span class="tag tag-blue font-mono" id="settingsApiKey">—</span>
               </div>
               <div class="flex items-center justify-between p-3 rounded-lg" style="background: var(--bg);">
                 <div>
                   <div class="text-[13px] font-semibold">/v1/* 接口鉴权</div>
-                  <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">chat/completions、messages、models 需 Authorization: Bearer &lt;API_KEY&gt;</div>
+                  <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">chat/completions、messages、models 需 Authorization: Bearer &lt;API_KEY&gt;（未设置 Key 时关闭鉴权）</div>
                 </div>
                 <span class="tag tag-green">已启用</span>
               </div>
@@ -123,7 +124,7 @@
               </div>
               <div class="p-4 rounded-lg" style="background: var(--bg);">
                 <div class="text-[13px] font-semibold mb-2">鉴权</div>
-                <div class="font-mono text-[12px] p-2 rounded" style="background: var(--card); border: 1px solid var(--border);">Authorization: Bearer postman2api-secret-key</div>
+                <div class="font-mono text-[12px] p-2 rounded" style="background: var(--card); border: 1px solid var(--border);">Authorization: Bearer &lt;API_KEY&gt;</div>
               </div>
             </div>
           </div><div class="card p-6" id="set-about">
