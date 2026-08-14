@@ -1,0 +1,116 @@
+<section class="page" id="page-pools">
+    <div class="p-8">
+      <div class="flex items-end justify-between mb-8 gap-6 flex-wrap">
+        <div>
+          <div class="text-[11px] font-semibold tracking-wider uppercase mb-2" style="color: var(--muted);">Pool Management</div>
+          <h1 class="hero-title">号池 <em>管理</em></h1>
+          <p class="mt-2 text-[14px]" style="color: var(--fg-2);">统一管理所有上游账号，监控健康度与配额。</p>
+        </div>
+        <div class="flex items-center gap-2 flex-wrap justify-end">
+          <input id="accountImportFile" type="file" accept="application/json,.json" class="hidden" onchange="importAccountsFile(this)">
+          <button class="btn btn-ghost" onclick="document.getElementById('accountImportFile').click()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 8 5-5 5 5"/><path d="M5 21h14"/></svg>
+            导入
+          </button>
+          <button class="btn btn-ghost" onclick="exportAccounts()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+            导出
+          </button>
+          <button class="btn btn-ghost" onclick="syncStatus()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>
+            同步状态
+          </button>
+          <button class="btn btn-primary" onclick="openDrawer()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+            添加账号
+          </button>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <div class="card p-5 flex items-center gap-4">
+          <div class="ring-stat">
+            <svg width="80" height="80"><circle cx="40" cy="40" r="32" stroke="var(--bg-2)" stroke-width="6" fill="none"/><circle cx="40" cy="40" r="32" stroke="var(--success)" stroke-width="6" fill="none" stroke-dasharray="201" stroke-dashoffset="20" stroke-linecap="round"/></svg>
+            <div class="value">38</div>
+          </div>
+          <div>
+            <div class="text-[11px] uppercase tracking-wider" style="color: var(--muted);">在线</div>
+            <div class="font-display text-[20px] font-medium mt-1">—</div>
+            <div class="text-[11px]" style="color: var(--success);">实时统计</div>
+          </div>
+        </div>
+        <div class="card p-5 flex items-center gap-4">
+          <div class="ring-stat">
+            <svg width="80" height="80"><circle cx="40" cy="40" r="32" stroke="var(--bg-2)" stroke-width="6" fill="none"/><circle cx="40" cy="40" r="32" stroke="var(--warning)" stroke-width="6" fill="none" stroke-dasharray="201" stroke-dashoffset="170" stroke-linecap="round"/></svg>
+            <div class="value">3</div>
+          </div>
+          <div>
+            <div class="text-[11px] uppercase tracking-wider" style="color: var(--muted);">冷却中</div>
+            <div class="font-display text-[20px] font-medium mt-1">—</div>
+            <div class="text-[11px]" style="color: var(--warning);">实时统计</div>
+          </div>
+        </div>
+        <div class="card p-5 flex items-center gap-4">
+          <div class="ring-stat">
+            <svg width="80" height="80"><circle cx="40" cy="40" r="32" stroke="var(--bg-2)" stroke-width="6" fill="none"/><circle cx="40" cy="40" r="32" stroke="var(--danger)" stroke-width="6" fill="none" stroke-dasharray="201" stroke-dashoffset="186" stroke-linecap="round"/></svg>
+            <div class="value">1</div>
+          </div>
+          <div>
+            <div class="text-[11px] uppercase tracking-wider" style="color: var(--muted);">异常</div>
+            <div class="font-display text-[20px] font-medium mt-1">—</div>
+            <div class="text-[11px]" style="color: var(--danger);">实时统计</div>
+          </div>
+        </div>
+        <div class="card p-5 flex items-center gap-4">
+          <div class="ring-stat">
+            <svg width="80" height="80"><circle cx="40" cy="40" r="32" stroke="var(--bg-2)" stroke-width="6" fill="none"/><circle cx="40" cy="40" r="32" stroke="var(--muted)" stroke-width="6" fill="none" stroke-dasharray="201" stroke-dashoffset="201" stroke-linecap="round"/></svg>
+            <div class="value">0</div>
+          </div>
+          <div>
+            <div class="text-[11px] uppercase tracking-wider" style="color: var(--muted);">已停用</div>
+            <div class="font-display text-[20px] font-medium mt-1">—</div>
+            <div class="text-[11px]" style="color: var(--muted);">实时统计</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card p-4 mb-4">
+        <div class="flex items-center gap-3 flex-wrap">
+          <input class="input flex-1 min-w-[200px]" placeholder="搜索账号邮箱、来源..." style="height: 36px;" id="poolSearch">
+          <select class="input select w-40" style="height: 36px;" id="poolStatus">
+            <option value="ALL">所有状态</option>
+            <option value="active">在线</option>
+            <option value="exhausted">额度耗尽</option>
+            <option value="error">异常</option>
+            <option value="disabled">停用</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="card overflow-hidden">
+        <div class="overflow-x-auto">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th style="width: 40px;"><input type="checkbox"></th>
+                <th>账号</th><th>渠道</th><th>状态</th><th>套餐</th>
+                <th>余量 / 总量</th><th>今日调用</th><th>最后活跃</th><th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="poolsBody"></tbody>
+          </table>
+        </div>
+        <div class="flex items-center justify-between px-6 py-4" style="border-top: 1px solid var(--border);">
+          <div class="text-[12px]" style="color: var(--muted);" id="poolCount">共 0 条</div>
+          <div class="flex items-center gap-1">
+            <button class="icon-btn" disabled style="opacity:0.4;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></button>
+            <button class="icon-btn" style="background: var(--accent); color: white;">1</button>
+            <button class="icon-btn">2</button>
+            <button class="icon-btn">3</button>
+            <button class="icon-btn">4</button>
+            <button class="icon-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>

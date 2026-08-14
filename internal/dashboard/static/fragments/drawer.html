@@ -1,0 +1,37 @@
+<div class="drawer-backdrop" id="drawerBackdrop" onclick="closeDrawer()"></div>
+<aside class="drawer" id="drawer">
+  <div class="flex items-center justify-between p-6" style="border-bottom: 1px solid var(--border);">
+    <div>
+      <div class="text-[11px] uppercase tracking-wider" style="color: var(--muted);">新建</div>
+      <h2 class="font-display text-[24px] font-medium">添加账号到号池</h2>
+    </div>
+    <button class="icon-btn" onclick="closeDrawer()">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+  <div class="flex-1 overflow-y-auto p-6">
+    <div class="space-y-4">
+      <div>
+        <label class="text-[12.5px] font-semibold block mb-1.5">邮箱标识</label>
+        <input class="input" placeholder="account@example.com">
+      </div>
+      <div>
+        <label class="text-[12.5px] font-semibold block mb-1.5">Postman token（桌面版 access_token；web 版 postman.sid）</label>
+        <input class="input font-mono" placeholder="token / postman.sid" type="password">
+      </div>
+      <div>
+        <label class="text-[12.5px] font-semibold block mb-1.5">workspace_id（= 登录态 teamId，桌面导入可留空）</label>
+        <input class="input font-mono" placeholder="workspace UUID">
+      </div>
+      <div>
+        <label class="text-[12.5px] font-semibold block mb-1.5">workspace_subdomain（web 版必填，如 abc123）</label>
+        <input class="input font-mono" placeholder="如 abc123">
+      </div>
+      <p class="text-[12px]" style="color: var(--muted);">web 版获取：F12 → Application → Cookies 复制 postman.sid；Console 执行 fetch('https://god.postman.co/api/users/me',{credentials:'include'}).then(r=>r.json()).then(m=>console.log(m.id,(m.user_organizations||{}).organizations)) 得 user_id / workspace_id（orgs[0].id）/ subdomain（m.username 小写）。token 只写入服务端 SQLite，不会回显。</p>
+    </div>
+  </div>
+  <div class="p-6 flex items-center gap-2" style="border-top: 1px solid var(--border);">
+    <button class="btn btn-ghost flex-1" onclick="closeDrawer()">取消</button>
+    <button class="btn btn-primary flex-1" onclick="submitAccount()">创建账号</button>
+  </div>
+</aside>

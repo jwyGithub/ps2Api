@@ -1,0 +1,22 @@
+# ── 凭证与运行时数据（账号/token，勿入库）──
+account.json
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# ── Build artifacts ──
+*.exe
+*.log
+
+# ── Dependencies ──
+node_modules/
+
+# ── 工具 / 编辑器状态 ──
+.codegraph/
+.freebuff/
+.zcode/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

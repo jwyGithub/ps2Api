@@ -1,0 +1,627 @@
+/* Postman2API dashboard adapter. All numbers and actions come from the Go
+   service API — no static shells or mock values:
+   - /api/stats       真实计数（累计请求/成功率/平均延迟/P95/成本/错误率）
+   - /api/accounts    号池管理（真实账号 + source/plan/今日调用）
+   - /api/logs        真实请求日志流
+   - /api/analytics   日/时序列、模型分布、渠道对比、账号排行、活跃热力图
+   - /api/settings    配置项真实读写（重试/故障切换/告警阈值）
+   - /api/alerts      真实告警记录（未处理/解决/MTTR）
+*/
+(function () {
+  'use strict';
+
+  var state = {
+    stats: {}, accounts: [], logs: [],
+    analytics: {}, settings: {}, settingsDefs: [], apiKey: '',
+    alerts: [], alertSummary: {},
+    days: 14, page: 'overview', paused: false, filter: 'ALL', query: '', poolQuery: '', poolStatus: 'ALL', alertTab: 'open'
+  };
+  var charts = {};
+  var providerModels = ['gpt-5.6-luna','gpt-5.6-sol','gpt-5.6-terra','gpt-5.5','gpt-5.4','gpt-5.2','claude-opus-4-8','claude-sonnet-4-6','claude-haiku-4-5','auto'];
+
+  function loadFragment(path) {
+    return fetch('/dashboard/' + path).then(function (r) {
+      if (!r.ok) throw new Error('无法加载前端片段：' + path);
+      return r.text();
+    });
+  }
+
+  function bootstrapDashboard() {
+    var names = ['fragments/topnav.html', 'fragments/sidebar.html', 'fragments/page-overview.html', 'fragments/page-stats.html', 'fragments/page-logs.html', 'fragments/page-pools.html', 'fragments/page-quota.html', 'fragments/page-routing.html', 'fragments/page-alerts.html', 'fragments/page-settings.html', 'fragments/drawer.html'];
+    return Promise.all(names.map(loadFragment)).then(function (parts) {
+      var app = document.getElementById('dashboard-app');
+      if (!app) return;
+      app.innerHTML = parts[0] + '<div class="pt-16 flex">' + parts[1] + '<main class="ml-60 flex-1 min-h-[calc(100vh-4rem)]">' + parts.slice(2, 10).join('\n') + '</main></div>' + parts[10];
+    });
+  }
+
+  function key() { return localStorage.getItem('postman2api_api_key') || 'postman2api-secret-key'; }
+  function esc(value) { return String(value == null ? '' : value).replace(/[&<>"']/g, function (c) { return ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[c]; }); }
+  function fmt(value) { return Number(value || 0).toLocaleString('zh-CN'); }
+  function ago(value) {
+    if (!value) return '-';
+    var n = Date.now() - new Date(value).getTime();
+    if (!isFinite(n) || n < 0) return '刚刚';
+    if (n < 60000) return Math.floor(n / 1000) + ' 秒前';
+    if (n < 3600000) return Math.floor(n / 60000) + ' 分钟前';
+    if (n < 86400000) return Math.floor(n / 3600000) + ' 小时前';
+    return Math.floor(n / 86400000) + ' 天前';
+  }
+  function fmtMs(ms) {
+    var v = Number(ms || 0);
+    if (v <= 0) return '-';
+    if (v >= 1000) return (v / 1000).toFixed(2) + 's';
+    return Math.round(v) + 'ms';
+  }
+  function fmtCost(c) {
+    var v = Number(c || 0);
+    return '$' + (v >= 1000 ? v.toLocaleString('en-US', { maximumFractionDigits: 2 }) : v.toFixed(4));
+  }
+  function pct(r) { return (Number(r || 0) * 100).toFixed(2) + '%'; }
+  function api(path, options) {
+    options = options || {};
+    options.headers = Object.assign({ 'Authorization': 'Bearer ' + key(), 'Content-Type': 'application/json' }, options.headers || {});
+    return fetch(path, options).then(function (r) {
+      return r.text().then(function (text) {
+        var data = {}; try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { raw: text }; }
+        if (!r.ok) throw new Error(data.error && data.error.message || data.message || 'HTTP ' + r.status);
+        return data;
+      });
+    });
+  }
+  function toast(message) { if (typeof window.showToast === 'function') window.showToast(message); else window.alert(message); }
+  function setText(selector, value) { var el = document.querySelector(selector); if (el) el.textContent = value; }
+  function download(name, content) {
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([content], { type: 'application/json' }));
+    a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+  }
+  function sourceName(src) {
+    return { 'manual': '手动添加', 'local': '本地导入', 'detect-web': '浏览器注册', 'browser': '浏览器登录' }[src] || (src ? src : 'Postman Desktop');
+  }
+  function todayCalls(accountId) { return (state.analytics.todayCalls || {})[accountId] || 0; }
+
+  window.showToast = function (message) {
+    var el = document.getElementById('toast');
+    if (!el) { window.alert(message); return; }
+    el.textContent = message;
+    el.classList.add('show');
+    clearTimeout(window.__postmanToastTimer);
+    window.__postmanToastTimer = setTimeout(function () { el.classList.remove('show'); }, 2500);
+  };
+  window.closeDrawer = function () {
+    var drawer = document.getElementById('drawer');
+    var backdrop = document.getElementById('drawerBackdrop');
+    if (drawer) drawer.classList.remove('show');
+    if (backdrop) backdrop.classList.remove('show');
+  };
+  window.switchPage = function (page) {
+    state.page = page;
+    document.querySelectorAll('.page').forEach(function (el) { el.classList.toggle('active', el.id === 'page-' + page); });
+    document.querySelectorAll('.sidebar-item[data-page]').forEach(function (el) { el.classList.toggle('active', el.dataset.page === page); });
+    var names = { overview:'概览', stats:'统计分析', logs:'实时日志', pools:'号池管理', quota:'额度管理', routing:'路由策略', alerts:'告警中心', settings:'系统设置' };
+    setText('#crumb', names[page] || page);
+    if (page === 'pools') renderPoolsReal();
+    if (page === 'quota') renderQuotaReal();
+    if (page === 'logs') renderLogsReal();
+    if (page === 'alerts') renderAlertsReal();
+    if (page === 'routing') renderRoutingReal();
+    if (page === 'settings') renderSettingsReal();
+    refreshCurrentPage();
+  };
+
+  function statusInfo(status) {
+    if (status === 'active') return { dot: 'dot-online', tag: 'tag-green', label: '在线' };
+    if (status === 'exhausted') return { dot: 'dot-idle', tag: 'tag-amber', label: '额度耗尽' };
+    if (status === 'error') return { dot: 'dot-error', tag: 'tag-red', label: '异常' };
+    return { dot: 'dot-offline', tag: 'tag-gray', label: status || '停用' };
+  }
+
+  var resourceLoaders = {
+    stats: function () { return api('/api/stats').then(function (data) { state.stats = data || {}; }); },
+    accounts: function () { return api('/api/accounts').then(function (data) { state.accounts = data.data || []; }); },
+    logs: function () { return api('/api/logs').then(function (data) { state.logs = data.data || []; }); },
+    analytics: function () { return api('/api/analytics?days=' + state.days).then(function (data) { state.analytics = data || {}; }); },
+    settings: function () { return api('/api/settings').then(function (data) {
+      state.settings = data.settings || {};
+      state.settingsDefs = data.defs || [];
+      state.apiKey = data.apiKey || '';
+    }); },
+    alerts: function () { return api('/api/alerts').then(function (data) {
+      state.alerts = data.data || [];
+      state.alertSummary = data.summary || {};
+    }); }
+  };
+
+  function loadResources(names) {
+    return Promise.all(names.map(function (name) { return resourceLoaders[name](); })).then(function () {
+      renderAll();
+    }).catch(function (err) { toast('加载数据失败：' + err.message); });
+  }
+
+  function loadAll() {
+    return loadResources(['stats', 'accounts', 'logs', 'analytics', 'settings', 'alerts']);
+  }
+
+  function refreshCurrentPage() {
+    var pages = {
+      overview: ['stats', 'accounts', 'logs', 'analytics', 'alerts'],
+      stats: ['stats', 'analytics'],
+      logs: ['logs'],
+      pools: ['accounts', 'analytics'],
+      quota: ['accounts', 'analytics', 'settings', 'alerts'],
+      routing: ['settings'],
+      alerts: ['alerts'],
+      settings: ['settings']
+    };
+    var resources = pages[state.page] || ['stats'];
+    return resources.length ? loadResources(resources) : Promise.resolve();
+  }
+
+  function renderAll() {
+    renderRealData(); renderStatsReal(); renderChartsReal(); renderTopAccounts();
+    renderPoolsReal(); renderQuotaReal(); renderLogsReal(); renderAlertsReal();
+    renderRoutingReal(); renderSettingsReal(); renderOverviewActivity(); renderSidebarBadges();
+  }
+
+  function renderSidebarBadges() {
+    var lb = document.querySelector('.sidebar-item[data-page="logs"] .badge');
+    if (lb) lb.textContent = state.logs.length;
+    var pb = document.querySelector('.sidebar-item[data-page="pools"] .badge');
+    if (pb) pb.textContent = state.accounts.length;
+    var ab = document.querySelector('.sidebar-item[data-page="alerts"] .badge');
+    if (ab) ab.textContent = state.alertSummary.open || 0;
+    var nd = document.querySelector('.notif-dot');
+    if (nd) nd.style.display = (state.alertSummary.open || 0) > 0 ? '' : 'none';
+  }
+
+  function renderRealData() {
+    var s = state.stats;
+    setText('body .hero-title em', fmt(s.totalRequests));
+    var kpis = document.querySelectorAll('#page-overview .kpi-value');
+    if (kpis[0]) kpis[0].textContent = fmt(s.todayRequests); // 今日请求（真实当日计数）
+    if (kpis[1]) kpis[1].innerHTML = (s.activeAccounts || 0) + '<span class="text-[20px]" style="color:var(--muted)">/' + (s.totalAccounts || 0) + '</span>';
+    if (kpis[2]) kpis[2].innerHTML = fmtMs(s.avgLatencyMs) + '<span class="text-[20px]" style="color:var(--muted)"> ' + (s.avgLatencyMs >= 1000 ? '' : 'ms') + '</span>';
+    if (kpis[3]) kpis[3].innerHTML = (s.totalRequests ? ((s.successRequests / s.totalRequests) * 100).toFixed(2) : '0.00') + '<span class="text-[20px]" style="color:var(--muted)">%</span>';
+    setText('#kpiErrors', (s.errorRequests || 0) + ' 次失败');
+    var usage = document.getElementById('sidebarUsage');
+    if (usage) usage.innerHTML = '<div class="flex items-center justify-between mb-3"><div class="text-[11px] font-semibold tracking-wider uppercase" style="color: var(--muted);">累计调用</div><span class="text-[11px] font-mono" style="color: var(--accent);">'+fmt(s.totalRequests)+'</span></div><div class="progress mb-3"><div class="progress-fill" style="width: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2));"></div></div><div class="flex items-baseline gap-1.5 mb-1"><span class="font-display text-[22px] font-medium leading-none">'+fmt(s.totalRequests)+'</span><span class="text-[11px]" style="color: var(--muted);">次请求</span></div><div class="text-[11px]" style="color: var(--muted);">成功 '+fmt(s.successRequests)+' · 失败 '+fmt(s.errorRequests)+' · Token '+fmt(s.totalTokens)+'</div>';
+    setText('#sysHost', window.location.host);
+    setText('#sysAccounts', fmt(s.totalAccounts));
+    setText('#sysActive', fmt(s.activeAccounts));
+    var tag = document.querySelector('#page-overview .hero-title + *');
+    var ok = document.querySelector('#page-overview .tag-green');
+    if (ok) ok.textContent = state.accounts.length ? '系统正常' : '等待账号';
+  }
+
+  // ─── 号池管理 ───────────────────────────────────────────────
+  function renderPoolsReal() {
+    var body = document.getElementById('poolsBody'); if (!body) return;
+    var list = state.accounts.filter(function (a) {
+      var st = !a.enabled ? 'disabled' : (a.status === 'active' ? 'active' : a.status === 'exhausted' ? 'exhausted' : 'error');
+      if (state.poolStatus !== 'ALL' && st !== state.poolStatus) return false;
+      if (state.poolQuery && (a.email + ' ' + (a.source || '')).toLowerCase().indexOf(state.poolQuery.toLowerCase()) < 0) return false;
+      return true;
+    });
+    body.innerHTML = list.length ? list.map(function (a) {
+      var s = statusInfo(a.status), total = Number(a.quotaLimit || 0), remain = Number(a.quotaRemaining || 0);
+      var pct = total > 0 ? Math.max(0, Math.min(100, (remain / total) * 100)) : 0;
+      var color = pct < 20 ? 'var(--danger)' : pct < 50 ? 'var(--warning)' : 'var(--accent)';
+      return '<tr><td><input type="checkbox"></td><td><div class="flex items-center gap-3"><span class="dot '+s.dot+'"></span><div><div class="font-mono font-semibold">'+esc(a.email)+'</div><div class="text-[11px]" style="color:var(--muted)">ID '+a.id+'</div></div></div></td><td><span class="tag tag-gray">'+esc(sourceName(a.source))+'</span></td><td><span class="tag '+s.tag+'">'+s.label+'</span></td><td>'+esc(a.plan || 'FREE_USER')+'</td><td><div class="w-32"><div class="flex items-center justify-between text-[11px] mb-1"><span class="font-mono">'+fmt(remain)+' / '+fmt(total)+'</span><span class="font-mono" style="color:'+color+'">'+(total ? pct.toFixed(1)+'%' : '-')+'</span></div><div class="progress" style="height:4px"><div class="progress-fill" style="width:'+pct+'%;background:'+color+'"></div></div></div></td><td class="font-mono">'+fmt(todayCalls(a.id))+'</td><td class="text-[12px]" style="color:var(--fg-2)">'+ago(a.lastUsedAt)+'</td><td><div class="flex items-center gap-1"><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px" onclick="toggleAccount('+a.id+','+(!a.enabled)+')">'+(a.enabled?'停用':'启用')+'</button><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px;color:var(--danger)" onclick="deleteAccount('+a.id+')">删除</button></div></td></tr>';
+    }).join('') : '<tr><td colspan="9" style="text-align:center;padding:40px;color:var(--muted)">'+(state.accounts.length ? '没有匹配的账号' : '暂无账号，请点击"添加账号"或通过"导入"上传 account.json')+'</td></tr>';
+    var counts = { active:0, exhausted:0, error:0, disabled:0 };
+    state.accounts.forEach(function (a) { if (!a.enabled) counts.disabled++; else if (counts[a.status] !== undefined) counts[a.status]++; });
+    var rings = document.querySelectorAll('#page-pools .ring-stat .value');
+    if (rings[0]) rings[0].textContent = counts.active; if (rings[1]) rings[1].textContent = counts.exhausted; if (rings[2]) rings[2].textContent = counts.error; if (rings[3]) rings[3].textContent = counts.disabled;
+    var cnt = document.getElementById('poolCount');
+    if (cnt) cnt.textContent = '共 ' + state.accounts.length + ' 条';
+  }
+
+  // ─── 额度管理（真实账号额度 + 配置规则读写）─────────────────
+  function renderQuotaReal() {
+    var total = state.accounts.reduce(function (n,a) { return n + Number(a.quotaLimit || 0); }, 0);
+    var remain = state.accounts.reduce(function (n,a) { return n + Number(a.quotaRemaining || 0); }, 0);
+    var used = Math.max(0, total - remain), usedPct = total ? used / total * 100 : 0;
+    var nums = document.querySelectorAll('#page-quota .font-display');
+    if (nums[0]) nums[0].textContent = fmt(total);
+    if (nums[1]) nums[1].textContent = fmt(used);
+    if (nums[2]) nums[2].textContent = fmt(remain);
+    var dayOfMonth = new Date().getDate();
+    if (nums[3]) nums[3].textContent = total ? fmt(Math.round(used / Math.max(1, dayOfMonth))) : '0';
+    if (nums[4]) nums[4].textContent = total ? fmt(Math.round(used + (used / Math.max(1, dayOfMonth)) * Math.max(0, 30 - dayOfMonth))) : '0';
+    var bar = document.querySelector('#page-quota .progress-fill');
+    if (bar) bar.style.width = usedPct.toFixed(1) + '%';
+    var progressText = document.getElementById('quotaProgressText');
+    if (progressText) progressText.textContent = fmt(used);
+    var progressTotal = document.getElementById('quotaProgressTotal');
+    if (progressTotal) progressTotal.textContent = fmt(total);
+    var channels = document.getElementById('quotaChannels');
+    if (channels) channels.innerHTML = (state.analytics.channels && state.analytics.channels.length ? state.analytics.channels.map(function (c) {
+      var cUsed = c.calls, cTotal = c.calls; // 调用次数即渠道消耗
+      var cp = Math.min(100, c.calls && total ? (c.calls / Math.max(1, total) * 100) : 0);
+      return '<div><div class="flex justify-between mb-1"><span>'+esc(c.channel)+'</span><span class="font-mono">'+fmt(c.calls)+' 次调用 · '+fmtCost(c.cost)+'</span></div><div class="progress"><div class="progress-fill" style="width:'+cp+'%;background:var(--accent)"></div></div><div class="text-[11px] mt-1" style="color:var(--muted)">成功率 '+pct(c.successRate)+' · 平均延迟 '+fmtMs(c.avgLatencyMs)+'</div></div>';
+    }).join('') : '<div class="text-[12px]" style="color:var(--muted)">暂无调用数据，渠道配额按实际调用统计。</div>');
+    var projects = document.getElementById('quotaProjects');
+    if (projects) projects.innerHTML = state.accounts.map(function (a) {
+      var ql = Number(a.quotaLimit || 0), qr = Number(a.quotaRemaining || 0);
+      var ap = ql > 0 ? Math.min(100, Math.max(0, (ql - qr) / ql * 100)) : 0;
+      return '<div><div class="flex justify-between mb-1"><span class="font-mono">'+esc(a.email)+'</span><span class="font-mono">'+fmt(ql - qr)+' / '+fmt(ql)+'</span></div><div class="progress"><div class="progress-fill" style="width:'+ap+'%;background:var(--accent-2)"></div></div></div>';
+    }).join('') || '<div class="text-[12px]" style="color:var(--muted)">暂无账号</div>';
+    var near = document.getElementById('quotaNear');
+    if (near) near.textContent = usedPct >= 90 ? '已用 ' + usedPct.toFixed(1) + '% · 注意' : usedPct >= 70 ? '已用 ' + usedPct.toFixed(1) + '%' : '已用 ' + usedPct.toFixed(1) + '% · 充足';
+    var reset = document.getElementById('quotaReset');
+    if (reset) reset.textContent = '按账号 Postman AI 月度额度统计';
+    var rules = document.getElementById('quotaRules');
+    if (rules) {
+      var th = state.settings['alert_quota'] || '0.2';
+      var quotaAlerts = state.alerts.filter(function (a) { return a.alertType === 'low_quota' || a.alertType === 'quota_exhausted'; });
+      var thPct = (Number(th) * 100).toFixed(0);
+      var rows = [
+        { name: '额度不足告警', cond: '剩余额度低于总配额 ' + thPct + '%', notify: '面板告警中心', status: '已启用', recent: quotaAlerts.filter(function(a){return a.alertType==='low_quota';})[0] },
+        { name: '额度耗尽告警', cond: 'Postman 返回 QUOTA_EXCEEDED / usageState=EXCEEDED', notify: '面板告警中心', status: '已启用', recent: quotaAlerts.filter(function(a){return a.alertType==='quota_exhausted';})[0] }
+      ];
+      rules.innerHTML = rows.map(function (row) {
+        return '<tr><td class="font-semibold">'+row.name+'</td><td>'+row.cond+'</td><td>'+row.notify+'</td><td><span class="tag tag-green">'+row.status+'</span></td><td class="font-mono text-[12px]">'+(row.recent ? ago(row.recent.createdAt) : '—')+'</td><td><span class="text-[12px]" style="color:var(--muted)">阈值可在系统设置修改</span></td></tr>';
+      }).join('');
+    }
+  }
+
+  // ─── 统计分析页 ─────────────────────────────────────────────
+  function renderStatsReal() {
+    var s = state.stats;
+    var values = document.querySelectorAll('#page-stats .font-display');
+    if (values[0]) values[0].textContent = fmt(s.totalRequests);
+    if (values[1]) values[1].textContent = fmt(s.totalTokens);
+    if (values[2]) values[2].textContent = fmtCost(s.estimatedCost);
+    if (values[3]) values[3].textContent = fmtMs(s.p95LatencyMs);
+    if (values[4]) values[4].textContent = pct(s.errorRate);
+    setText('#statCostNote', '按模型单价估算');
+    setText('#statP95Note', '来自真实请求日志');
+    setText('#statErrNote', (s.totalRequests ? (s.successRequests / s.totalRequests * 100).toFixed(2) : '0') + '% 成功');
+  }
+
+  function renderTopAccounts() {
+    var top = document.getElementById('topAccountsBody');
+    if (!top) return;
+    var list = state.analytics.topAccounts || [];
+    top.innerHTML = list.map(function (a, i) {
+      return '<tr><td>'+ (i + 1) +'</td><td class="font-mono">'+esc(a.email)+'</td><td><span class="tag tag-gray">'+esc(sourceName(a.source))+'</span></td><td class="font-mono">'+fmt(a.calls)+'</td><td class="font-mono">'+fmt(a.tokens)+'</td><td class="font-mono">'+fmtMs(a.avgLatencyMs)+'</td><td><span class="font-mono" style="color:'+(a.successRate >= 0.9 ? 'var(--success)' : a.successRate >= 0.7 ? 'var(--warning)' : 'var(--danger)')+'">'+pct(a.successRate)+'</span></td><td><span class="font-mono font-semibold" style="color:var(--accent)">'+Number(a.score || 0).toFixed(1)+'</span></td></tr>';
+    }).join('') || '<tr><td colspan="8" style="text-align:center;padding:24px;color:var(--muted)">暂无账号数据</td></tr>';
+  }
+
+  function renderOverviewActivity() {
+    var timeline = document.querySelector('#page-overview .timeline-item') && document.querySelector('#page-overview .timeline-item').parentElement;
+    if (!timeline) return;
+    timeline.innerHTML = state.logs.slice(0, 5).map(function (l) {
+      var label = l.status === 'success' ? '请求成功' : '请求失败';
+      var detail = l.model || l.errorMessage || '未知请求';
+      return '<div class="timeline-item"><div class="flex items-start justify-between gap-3"><div><div class="text-[13px] font-semibold">'+label+' <span class="font-mono" style="color:var(--accent)">'+esc(detail)+'</span></div><div class="text-[12px] mt-0.5" style="color:var(--fg-2)">账号 #'+(l.accountId || '-')+' · '+(l.totalTokens || 0)+' tokens · '+(l.durationMs || 0)+'ms</div></div><span class="text-[11px] font-mono whitespace-nowrap" style="color:var(--muted)">'+ago(l.createdAt)+'</span></div></div>';
+    }).join('') || '<div style="padding:20px;color:var(--muted)">暂无活动</div>';
+  }
+
+  // ─── 实时日志 ───────────────────────────────────────────────
+  function endpointLabel(ep) {
+    return ep === 'anthropic' ? 'Anthropic' : ep === 'openai' ? 'OpenAI' : '—';
+  }
+  function renderLogsReal() {
+    var stream = document.getElementById('logStream'); if (!stream) return;
+    var rows = state.logs.filter(function (l) {
+      var lv = l.status === 'success' ? 'SUCCESS' : 'ERROR';
+      if (state.filter !== 'ALL' && lv !== state.filter) return false;
+      if (!state.query) return true;
+      var q = state.query.toLowerCase();
+      return (l.model || '').toLowerCase().indexOf(q) >= 0
+        || (l.errorMessage || '').toLowerCase().indexOf(q) >= 0
+        || (l.endpoint || '').toLowerCase().indexOf(q) >= 0
+        || (l.accountId || '').toString().indexOf(q) >= 0;
+    });
+    var count = document.getElementById('logCount');
+    if (count) count.textContent = rows.length + ' 条';
+    stream.innerHTML = rows.map(function (l) {
+      var level = l.status === 'success' ? 'SUCCESS' : 'ERROR';
+      var ep = endpointLabel(l.endpoint);
+      return '<div class="log-line"><span class="log-time">'+new Date(l.createdAt).toLocaleTimeString()+'</span><span class="log-level '+level+'">'+level+'</span><span class="log-tag log-tag-ep">'+ep+'</span><span class="log-msg" style="flex:1">'+esc((l.model || '-')+' · '+(l.errorMessage || (l.totalTokens || 0)+' tokens · '+(l.durationMs || 0)+'ms'))+'</span></div>';
+    }).join('') || '<div style="padding:30px;color:var(--muted);text-align:center">暂无请求日志</div>';
+  }
+
+  // ─── 告警中心（真实告警记录）───────────────────────────────
+  function renderAlertsReal() {
+    var body = document.getElementById('alertsBody'); if (!body) return;
+    var sum = state.alertSummary || {};
+    var k = document.querySelectorAll('#page-alerts .font-display');
+    if (k[0]) k[0].textContent = sum.severe || 0;
+    if (k[1]) k[1].textContent = sum.warning || 0;
+    if (k[2]) k[2].textContent = sum.info || 0;
+    if (k[3]) k[3].textContent = sum.mttrMin ? Math.round(sum.mttrMin) + 'm' : '—';
+    var list = state.alerts.filter(function (a) { return state.alertTab === 'all' || a.status === 'open'; });
+    body.innerHTML = list.map(function (a) {
+      var levelTag = a.level === 'severe' ? 'tag-red' : a.level === 'info' ? 'tag-blue' : 'tag-amber';
+      var levelName = a.level === 'severe' ? '严重' : a.level === 'info' ? '信息' : '警告';
+      var btn = a.status === 'open' ? '<button class="btn btn-ghost" onclick="resolveAlert('+a.id+')">处理</button>' : '<span class="tag tag-gray">已解决</span>';
+      return '<tr><td><span class="tag '+levelTag+'">'+levelName+'</span></td><td><b>'+esc(a.title)+'</b><div class="text-[12px] mt-0.5" style="color:var(--fg-2)">'+esc(a.message)+'</div></td><td class="font-mono text-[12px]">'+(a.sourceType === 'account' && a.sourceId ? 'account #'+a.sourceId : 'system')+'</td><td class="text-[12px]">'+ago(a.createdAt)+'</td><td>'+(a.status === 'open' ? '<span class="tag tag-amber">未处理</span>' : '<span class="tag tag-green">已解决</span>')+'</td><td>'+btn+'</td></tr>';
+    }).join('') || '<tr><td colspan="6" style="text-align:center;padding:30px;color:var(--muted)">暂无告警</td></tr>';
+    var openTab = document.querySelector('#page-alerts .tab.active');
+    var tabs = document.querySelectorAll('#page-alerts .tab');
+    if (tabs[0]) tabs[0].classList.toggle('active', state.alertTab === 'open');
+    if (tabs[1]) tabs[1].classList.toggle('active', state.alertTab === 'all');
+    var resolveAllBtn = document.getElementById('resolveAllBtn');
+    if (resolveAllBtn) resolveAllBtn.style.display = (sum.open || 0) > 0 ? '' : 'none';
+  }
+
+  // ─── 路由策略（真实配置读写）────────────────────────────────
+  function renderRoutingReal() {
+    var el = document.getElementById('routingWeights'); if (!el) return;
+    var active = state.accounts.filter(function (a) { return a.enabled && a.status === 'active'; }).length;
+    var channels = state.analytics.channels || [];
+    var maxCalls = Math.max.apply(null, channels.map(function (c) { return c.calls; }).concat([1]));
+    el.innerHTML = (channels.length ? channels.map(function (c) {
+      var w = c.calls ? (c.calls / maxCalls * 100) : 0;
+      return '<div class="flex items-center justify-between"><span>'+esc(c.channel)+'</span><span class="font-mono">'+fmt(c.calls)+' 次调用 · '+pct(c.successRate)+'</span></div><div class="progress"><div class="progress-fill" style="width:'+w+'%;background:var(--accent)"></div></div>';
+    }).join('') : '<div class="text-[12px]" style="color:var(--muted)">暂无调用数据</div>') + '<p class="text-[12px] mt-3" style="color:var(--muted)">当前 ' + active + ' 个活跃账号 · 策略：轮询 + 最少在途，失败自动切换（重试 ' + (state.settings['retry_count'] || '3') + ' 次）。</p>';
+    var retry = document.getElementById('routingRetry');
+    if (retry) retry.value = state.settings['retry_count'] || '3';
+    var failover = document.getElementById('routingFailover');
+    if (failover) failover.checked = (state.settings['failover_enabled'] === 'false') ? false : true;
+    var fvOn = (state.settings['failover_enabled'] === 'false') ? false : true;
+    var rc = state.settings['retry_count'] || '3';
+    var rTag = document.getElementById('fvRetryTag');
+    if (rTag) { rTag.textContent = fvOn ? '重试 ' + rc + ' 次' : '不重试'; rTag.className = 'tag ' + (fvOn ? 'tag-green' : 'tag-gray'); }
+    var rTitle = document.getElementById('fvRetryTitle');
+    if (rTitle) rTitle.textContent = '请求重试 ' + rc + ' 次';
+  }
+
+  // ─── 系统设置（真实读写）────────────────────────────────────
+  function renderSettingsReal() {
+    var modelBox = document.getElementById('settingsModels');
+    if (modelBox) modelBox.innerHTML = providerModels.map(function (m) { return '<span class="tag tag-blue font-mono">'+esc(m)+'</span>'; }).join(' ');
+    var host = document.getElementById('settingsHost');
+    if (host) host.textContent = window.location.protocol + '//' + window.location.host;
+    var host2 = document.getElementById('settingsHost2');
+    if (host2) host2.textContent = window.location.protocol + '//' + window.location.host;
+    var auth = document.getElementById('settingsApiKey');
+    if (auth) auth.textContent = state.apiKey || '未设置';
+    var form = document.getElementById('settingsForm');
+    if (form) {
+      form.innerHTML = state.settingsDefs.map(function (d) {
+        var val = state.settings[d.key] != null ? state.settings[d.key] : d.default;
+        var input = d.type === 'bool'
+          ? '<label class="switch"><input type="checkbox" data-key="'+d.key+'" '+(val === 'true' ? 'checked' : '')+'><div class="slider"></div></label>'
+          : '<input class="input font-mono" data-key="'+d.key+'" value="'+esc(val)+'" style="max-width:220px">';
+        return '<div class="flex items-center justify-between p-3 rounded-lg" style="background:var(--bg)"><div><div class="text-[13px] font-semibold">'+esc(d.label)+'</div><div class="text-[12px] mt-0.5" style="color:var(--fg-2)">'+esc(d.description)+'</div></div>'+input+'</div>';
+      }).join('') + '<div class="pt-2"><button class="btn btn-primary" onclick="saveSettings()">保存配置</button></div>';
+    }
+  }
+
+  // ─── 图表（全部真实聚合数据）────────────────────────────────
+  function destroyChart(name) { if (charts[name]) { charts[name].destroy(); delete charts[name]; } }
+  function drawChart(id, cfg) {
+    var c = document.getElementById(id);
+    if (!c) return;
+    if (charts[id]) charts[id].destroy();
+    try { charts[id] = new Chart(c, cfg); } catch (e) { /* canvas 未就绪 */ }
+  }
+
+  function renderChartsReal() {
+    if (typeof Chart === 'undefined') return;
+    renderTrafficChart();
+    renderPoolChart();
+    renderHourlyChart();
+    renderModelChart();
+    renderChannelChart();
+    renderHeatmap();
+  }
+
+  function renderTrafficChart() {
+    var daily = state.analytics.daily || [];
+    var labels = daily.map(function (p) { var d = p.label || ''; return d ? d.slice(5) : ''; });
+    var total = daily.reduce(function (n, p) { return n + (p.total || 0); }, 0);
+    setText('#trafficTotal', fmt(total));
+    // 更新范围 tab 激活态
+    document.querySelectorAll('#page-overview [data-range]').forEach(function (t) {
+      t.classList.toggle('active', t.dataset.range === state.days + 'd');
+    });
+    drawChart('chartTraffic', { type: 'line', data: {
+      labels: labels,
+      datasets: [
+        { label: '成功请求', data: daily.map(function (p) { return p.success || 0; }), borderColor: '#0B3D2E', backgroundColor: 'rgba(11,61,46,0.08)', fill: true, tension: .35, pointRadius: 2 },
+        { label: '失败请求', data: daily.map(function (p) { return p.error || 0; }), borderColor: '#C2410C', backgroundColor: 'rgba(194,65,12,0.08)', fill: true, tension: .35, pointRadius: 2 }
+      ]
+    }, options: { responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false }, plugins: { legend: { display: false } }, scales: { x: { ticks: { maxTicksLimit: 8, color: '#8A8F96' } }, y: { beginAtZero: true, ticks: { color: '#8A8F96' } } } } });
+  }
+
+  function renderPoolChart() {
+    var active = state.accounts.filter(function (a) { return a.status === 'active' && a.enabled; }).length;
+    var exhausted = state.accounts.filter(function (a) { return a.status === 'exhausted'; }).length;
+    var error = state.accounts.filter(function (a) { return a.status === 'error'; }).length;
+    var disabled = state.accounts.filter(function (a) { return !a.enabled; }).length;
+    drawChart('chartPool', { type: 'doughnut', data: { labels: ['在线', '额度耗尽', '异常', '停用'], datasets: [{ data: [active, exhausted, error, disabled], backgroundColor: ['#15803D', '#B45309', '#B91C1C', '#8A8F96'] }] }, options: { responsive: true, maintainAspectRatio: false, cutout: '62%', plugins: { legend: { display: false } } } });
+    setText('#poolLegendActive', active); setText('#poolLegendExhausted', exhausted); setText('#poolLegendError', error); setText('#poolLegendDisabled', disabled);
+  }
+
+  function renderHourlyChart() {
+    var hourly = state.analytics.hourly || [];
+    var labels = hourly.map(function (p) { var h = (p.label || '').split(' ')[1] || ''; return h ? h.slice(0, 5) : ''; });
+    drawChart('chartHourly', { type: 'bar', data: { labels: labels, datasets: [{ label: '调用量', data: hourly.map(function (p) { return p.total || 0; }), backgroundColor: 'rgba(11,61,46,0.75)', borderRadius: 3 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { ticks: { maxTicksLimit: 12, color: '#8A8F96' } }, y: { beginAtZero: true, ticks: { color: '#8A8F96' } } } } });
+  }
+
+  function renderModelChart() {
+    var models = state.analytics.models || [];
+    var colors = ['#0B3D2E', '#C2410C', '#1D4ED8', '#B45309', '#6D28D9', '#15803D', '#0E7490', '#BE185D', '#4D7C0F', '#52525B'];
+    drawChart('chartModel', { type: 'doughnut', data: { labels: models.map(function (m) { return m.model; }), datasets: [{ data: models.map(function (m) { return m.count; }), backgroundColor: colors.slice(0, models.length) }] }, options: { responsive: true, maintainAspectRatio: false, cutout: '55%', plugins: { legend: { position: 'bottom' } } } });
+  }
+
+  function renderChannelChart() {
+    var channels = state.analytics.channels || [];
+    if (!channels.length) { destroyChart('chartRadar'); var c = document.getElementById('chartRadar'); if (c) c.parentElement.innerHTML = '<div class="text-[12px]" style="color:var(--muted);padding:40px 0;text-align:center">暂无调用数据</div>'; return; }
+    var maxCalls = Math.max.apply(null, channels.map(function (x) { return x.calls; }).concat([1]));
+    var maxTokens = Math.max.apply(null, channels.map(function (x) { return x.tokens; }).concat([1]));
+    var maxCost = Math.max.apply(null, channels.map(function (x) { return x.cost; }).concat([1]));
+    var maxLat = Math.max.apply(null, channels.map(function (x) { return x.avgLatencyMs; }).concat([1]));
+    drawChart('chartRadar', { type: 'radar', data: { labels: ['调用量', '成功率', '低延迟', 'Token', '成本'], datasets: channels.map(function (c, i) {
+      return { label: c.channel, data: [
+        c.calls / maxCalls,
+        c.successRate || 0,
+        maxLat ? 1 - (c.avgLatencyMs / maxLat) : 0,
+        c.tokens / maxTokens,
+        maxCost ? 1 - (c.cost / maxCost) : 0
+      ], borderColor: ['#0B3D2E', '#C2410C', '#1D4ED8'][i % 3], backgroundColor: ['rgba(11,61,46,0.12)', 'rgba(194,65,12,0.12)', 'rgba(29,78,216,0.12)'][i % 3], pointRadius: 2 };
+    }) }, options: { responsive: true, maintainAspectRatio: false, scales: { r: { beginAtZero: true, max: 1, ticks: { display: false }, grid: { color: 'rgba(138,143,150,0.2)' } } }, plugins: { legend: { position: 'bottom' } } } });
+  }
+
+  function renderHeatmap() {
+    var hm = document.getElementById('heatmap');
+    if (!hm) return;
+    var cells = state.analytics.heatmap || [];
+    if (!cells.length) { hm.innerHTML = '<div class="text-[12px]" style="color:var(--muted);padding:20px 0;text-align:center">暂无热力分布</div>'; return; }
+    var max = 1;
+    cells.forEach(function (c) { if (c.count > max) max = c.count; });
+    var days = ['日', '一', '二', '三', '四', '五', '六'];
+    var byWd = {};
+    cells.forEach(function (c) { (byWd[c.weekday] = byWd[c.weekday] || {})[c.hour] = c.count; });
+    var html = '<div class="flex gap-1 items-center"><div class="w-4 shrink-0"></div>';
+    for (var h = 0; h < 24; h++) html += '<div class="text-[9px] font-mono" style="width:14px;color:var(--muted);text-align:center">' + h + '</div>';
+    html += '</div>';
+    for (var w = 0; w < 7; w++) {
+      html += '<div class="flex gap-1 items-center"><div class="w-4 shrink-0 text-[10px]" style="color:var(--muted)">' + days[w] + '</div>';
+      for (var h2 = 0; h2 < 24; h2++) {
+        var cnt = (byWd[w] && byWd[w][h2]) || 0;
+        var level = cnt === 0 ? 0 : Math.min(5, Math.ceil(cnt / max * 5));
+        html += '<div class="heat-cell heat-' + level + '" title="' + days[w] + ' ' + String(h2).padStart(2, '0') + ':00 · ' + cnt + ' 次"></div>';
+      }
+      html += '</div>';
+    }
+    hm.innerHTML = html;
+  }
+
+  // ─── 操作（全部真实写后端）──────────────────────────────────
+  window.toggleAccount = function (id, enabled) { api('/api/accounts/'+id, {method:'PATCH',body:JSON.stringify({enabled:enabled})}).then(function(){toast('账号状态已更新');return loadAll();}).catch(function(e){toast(e.message);}); };
+  window.deleteAccount = function (id) { if (!confirm('确定删除这个账号？')) return; api('/api/accounts/'+id,{method:'DELETE'}).then(function(){toast('账号已删除');return loadAll();}).catch(function(e){toast(e.message);}); };
+  window.exportAccounts = function () {
+    if (!confirm('导出文件包含账号密码和登录凭据，确定继续？')) return;
+    fetch('/api/accounts/export', { headers: { 'Authorization': 'Bearer ' + key() } }).then(function (r) {
+      if (!r.ok) return r.json().then(function (d) { throw new Error(d.error && d.error.message || '导出失败'); });
+      return r.text();
+    }).then(function (content) { download('account.json', content); toast('账号已导出'); }).catch(function (e) { toast(e.message); });
+  };
+  window.importAccountsFile = function (input) {
+    var file = input.files && input.files[0];
+    if (!file) return;
+    file.text().then(function (content) {
+      return api('/api/accounts/import', { method: 'POST', body: content });
+    }).then(function (d) {
+      toast('已导入 ' + d.imported + ' 个账号');
+      return loadAll();
+    }).catch(function (e) { toast(e.message); }).finally(function () { input.value = ''; });
+  };
+  window.submitAccount = function () {
+    var f=document.getElementById('drawer');
+    var inputs=f.querySelectorAll('input');
+    var email=inputs[0]&&inputs[0].value, token=inputs[1]&&inputs[1].value, workspace=inputs[2]&&inputs[2].value, subdomain=inputs[3]&&inputs[3].value;
+    if(!email||!token||!workspace){toast('请填写邮箱、access_token 和 workspace_id');return;}
+    var t={access_token:token,user_id:'dashboard',workspace_id:workspace};
+    if(subdomain)t.workspace_subdomain=subdomain;
+    api('/api/accounts',{method:'POST',body:JSON.stringify({email:email,tokens:t})}).then(function(){closeDrawer();toast('账号已加入号池');return loadAll();}).catch(function(e){toast(e.message);});
+  };
+  window.openDrawer = function () {
+    var f=document.getElementById('drawer');if(!f)return;
+    var body=f.querySelector('.flex-1');
+    if(body&&!body.dataset.real){body.dataset.real='1';body.innerHTML='<div class="space-y-4"><div><label class="text-[12px] font-semibold block mb-1.5">邮箱标识</label><input class="input" placeholder="account@example.com"></div><div><label class="text-[12px] font-semibold block mb-1.5">Postman token（桌面版填 access_token；web 版填 postman.sid）</label><input class="input font-mono" type="password" placeholder="token / postman.sid"></div><div><label class="text-[12px] font-semibold block mb-1.5">workspace_id（= 登录态 teamId）</label><input class="input font-mono" placeholder="workspace UUID"></div><div><label class="text-[12px] font-semibold block mb-1.5">workspace_subdomain（web 版必填，如 abc123；桌面版可留空）</label><input class="input font-mono" placeholder="如 abc123"></div><p class="text-[12px]" style="color:var(--muted)">web 版获取：F12 → Application → Cookies 复制 postman.sid；Console 执行 fetch(\'https://god.postman.co/api/users/me\',{credentials:\'include\'}).then(r=>r.json()).then(m=>console.log(m.id, (m.user_organizations||{}).organizations)) 得到 user_id / workspace_id（orgs[0].id）/ subdomain（m.username 小写）。token 只写入服务端 SQLite，不会回显到面板。</p></div>';}
+    f.classList.add('show');document.getElementById('drawerBackdrop').classList.add('show');
+  };
+  window.resolveAlert = function (id) { api('/api/alerts/'+id+'/resolve', {method:'POST',body:'{}'}).then(function(){toast('告警已处理');return loadAll();}).catch(function(e){toast(e.message);}); };
+  window.resolveAllAlerts = function () { if (!confirm('确定处理全部未处理告警？')) return; api('/api/alerts/resolve-all', {method:'POST',body:'{}'}).then(function(){toast('全部告警已处理');return loadAll();}).catch(function(e){toast(e.message);}); };
+  window.saveSettings = function () {
+    var payload = {};
+    document.querySelectorAll('#settingsForm [data-key]').forEach(function (el) {
+      payload[el.dataset.key] = el.type === 'checkbox' ? (el.checked ? 'true' : 'false') : el.value;
+    });
+    api('/api/settings', {method:'PUT', body:JSON.stringify({settings:payload})}).then(function(){toast('配置已保存并生效');return loadAll();}).catch(function(e){toast(e.message);});
+  };
+  window.saveRouting = function () {
+    var retry = document.getElementById('routingRetry');
+    var failover = document.getElementById('routingFailover');
+    var payload = { settings: {} };
+    if (retry) payload.settings['retry_count'] = retry.value;
+    if (failover) payload.settings['failover_enabled'] = failover.checked ? 'true' : 'false';
+    api('/api/settings', {method:'PUT', body:JSON.stringify(payload)}).then(function(){toast('路由策略已保存并生效');return loadAll();}).catch(function(e){toast(e.message);});
+  };
+
+  window.loadDashboard = loadAll;
+  window.toggleNotif = function () { toast((state.alertSummary.open || 0) ? '有 ' + state.alertSummary.open + ' 条未处理告警' : '暂无未处理告警'); };
+  window.refreshData = function () { loadAll().then(function () { toast('数据已刷新'); }); };
+  window.syncStatus = function () { loadAll().then(function () { toast('状态已同步'); }); };
+  window.refreshQuota = function () {
+    toast('正在探测账号额度…');
+    api('/api/refresh-quota', { method: 'POST', body: '{}' }).then(function (d) {
+      var msg = '探测完成：' + (d.ok || 0) + ' 个账号额度已刷新' + ((d.failed || 0) > 0 ? '，' + d.failed + ' 个失败' : '');
+      loadAll().then(function () { toast(msg); });
+    }).catch(function (e) { toast('探测失败：' + e.message); });
+  };
+  window.checkHealth = function () { loadAll().then(function () { toast('主动检查完成'); }); };
+  window.toggleLogPause = function () {
+    state.paused = !state.paused;
+    var btn = document.getElementById('pauseBtn');
+    if (btn) btn.innerHTML = state.paused
+      ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg> 继续'
+      : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect width="4" height="16" x="6" y="4"/><rect width="4" height="16" x="14" y="4"/></svg> 暂停';
+    toast(state.paused ? '日志轮询已暂停' : '日志轮询已恢复');
+  };
+  window.clearLogs = function () { state.logs = []; renderLogsReal(); toast('日志已清空（仅本次会话，后端日志保留）'); };
+  window.exportReport = function () {
+    var data = JSON.stringify({ exported: new Date().toISOString(), stats: state.stats, accounts: state.accounts, analytics: state.analytics, alerts: state.alerts }, null, 2);
+    download('postman2api-report-' + new Date().toISOString().slice(0, 10) + '.json', data);
+    toast('报表已导出（真实数据）');
+  };
+  window.exportLogs = function () {
+    var data = JSON.stringify({ exported: new Date().toISOString(), logs: state.logs }, null, 2);
+    download('postman2api-logs-' + new Date().toISOString().slice(0, 10) + '.json', data);
+    toast('明细已导出');
+  };
+  window.setTrafficRange = function (days) { state.days = days; loadAll().then(function () { toast('已切换为最近 ' + days + ' 天'); }); };
+
+  // ─── 事件绑定 ───────────────────────────────────────────────
+  document.addEventListener('click', function (e) {
+    var filter = e.target.closest && e.target.closest('.log-filter');
+    if (filter) { state.filter = filter.dataset.level || 'ALL'; renderLogsReal(); return; }
+    var range = e.target.closest && e.target.closest('[data-range]');
+    if (range) { var d = parseInt((range.dataset.range || '14').replace('d', ''), 10); if (d > 0) setTrafficRange(d); return; }
+    var alertTab = e.target.closest && e.target.closest('#page-alerts .tab');
+    if (alertTab) {
+      state.alertTab = (alertTab.textContent || '').indexOf('全部') >= 0 ? 'all' : 'open';
+      renderAlertsReal();
+      return;
+    }
+  });
+  document.addEventListener('input', function (e) {
+    if (e.target && e.target.id === 'logSearch') { state.query = e.target.value; renderLogsReal(); }
+    if (e.target && e.target.id === 'poolSearch') { state.poolQuery = e.target.value; renderPoolsReal(); }
+  });
+  document.addEventListener('change', function (e) {
+    if (e.target && e.target.id === 'poolStatus') { state.poolStatus = e.target.value || 'ALL'; renderPoolsReal(); }
+    if (e.target && e.target.id === 'statsRange') {
+      var v = e.target.value;
+      var days = v === 'month' ? new Date().getDate() : parseInt(v, 10);
+      if (days > 0 && days !== state.days) { state.days = days; loadAll().then(function () { toast('统计范围已更新'); }); }
+    }
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closeDrawer();
+  });
+
+  function startDashboard() {
+    bootstrapDashboard().then(function () {
+      loadAll();
+      setInterval(function () { if (!state.paused) refreshCurrentPage(); }, 5000);
+    }).catch(function (err) {
+      var app = document.getElementById('dashboard-app');
+      if (app) app.innerHTML = '<div style="padding:32px;color:#B91C1C;font-family:monospace">Dashboard load failed: ' + esc(err.message) + '</div>';
+      toast('加载控制台失败：' + err.message);
+    });
+  }
+  if (document.readyState === 'loading') {
+    window.addEventListener('DOMContentLoaded', startDashboard);
+  } else {
+    startDashboard();
+  }
+}());

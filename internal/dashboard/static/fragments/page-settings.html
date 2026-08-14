@@ -1,0 +1,158 @@
+<section class="page" id="page-settings">
+    <div class="p-8">
+      <div class="flex items-end justify-between mb-8 gap-6 flex-wrap">
+        <div>
+          <div class="text-[11px] font-semibold tracking-wider uppercase mb-2" style="color: var(--muted);">Settings</div>
+          <h1 class="hero-title">系统 <em>设置</em></h1>
+          <p class="mt-2 text-[14px]" style="color: var(--fg-2);">全局配置、安全策略与集成管理。</p>
+        </div>
+
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div class="card p-4 h-fit lg:sticky lg:top-20">
+          <div class="space-y-1">
+            <a href="#set-general" class="sidebar-item active">服务状态</a>
+            <a href="#set-runtime" class="sidebar-item">网关配置</a>
+            <a href="#set-security" class="sidebar-item">安全与认证</a>
+            <a href="#set-notify" class="sidebar-item">数据存储</a>
+            <a href="#set-api" class="sidebar-item">API 端点</a>
+            <a href="#set-about" class="sidebar-item">关于系统</a>
+          </div>
+        </div>
+
+        <div class="lg:col-span-2 space-y-4">
+          <div class="card p-6" id="set-general">
+            <h3 class="font-display text-[20px] font-medium mb-1">服务状态</h3>
+            <p class="text-[12px] mb-5" style="color: var(--muted);">网关运行信息</p>
+            <div class="space-y-4">
+              <div class="flex items-center justify-between p-3 rounded-lg" style="background: var(--bg);">
+                <div>
+                  <div class="text-[13px] font-semibold">运行状态</div>
+                  <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">Dashboard 可访问即表示网关在线</div>
+                </div>
+                <span class="tag tag-green">运行中</span>
+              </div>
+              <div>
+                <label class="text-[12.5px] font-semibold block mb-1.5">网关地址</label>
+                <input class="input font-mono" id="settingsHost" readonly>
+              </div>
+              <div>
+                <label class="text-[12.5px] font-semibold block mb-1.5">可用模型</label>
+                <div class="flex flex-wrap gap-1.5" id="settingsModels"></div>
+              </div>
+            </div>
+          </div><div class="card p-6" id="set-runtime">
+            <h3 class="font-display text-[20px] font-medium mb-1">网关配置</h3>
+            <p class="text-[12px] mb-5" style="color: var(--muted);">以下配置项真实读写后端 SQLite settings 表，保存后立即生效</p>
+            <div class="space-y-3" id="settingsForm"></div>
+          </div><div class="card p-6" id="set-security">
+            <h3 class="font-display text-[20px] font-medium mb-1">安全与认证</h3>
+            <p class="text-[12px] mb-5" style="color: var(--muted);">访问控制说明</p>
+            <div class="space-y-3">
+              <div class="flex items-center justify-between p-3 rounded-lg" style="background: var(--bg);">
+                <div>
+                  <div class="text-[13px] font-semibold">API Key</div>
+                  <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">服务端实际生效的 Bearer Key（由启动环境变量 API_KEY 决定）</div>
+                </div>
+                <span class="tag tag-blue font-mono" id="settingsApiKey">—</span>
+              </div>
+              <div class="flex items-center justify-between p-3 rounded-lg" style="background: var(--bg);">
+                <div>
+                  <div class="text-[13px] font-semibold">/v1/* 接口鉴权</div>
+                  <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">chat/completions、messages、models 需 Authorization: Bearer &lt;API_KEY&gt;</div>
+                </div>
+                <span class="tag tag-green">已启用</span>
+              </div>
+              <div class="flex items-center justify-between p-3 rounded-lg" style="background: var(--bg);">
+                <div>
+                  <div class="text-[13px] font-semibold">Dashboard 只读接口</div>
+                  <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">/api/stats、/api/accounts、/api/logs 本机免鉴权</div>
+                </div>
+                <span class="tag tag-gray">本机</span>
+              </div>
+              <div class="flex items-center justify-between p-3 rounded-lg" style="background: var(--bg);">
+                <div>
+                  <div class="text-[13px] font-semibold">账号管理接口</div>
+                  <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">账号增删改需 Bearer；token 仅存服务端 SQLite</div>
+                </div>
+                <span class="tag tag-gray">写操作</span>
+              </div>
+            </div>
+          </div><div class="card p-6" id="set-notify">
+            <h3 class="font-display text-[20px] font-medium mb-1">数据存储</h3>
+            <p class="text-[12px] mb-5" style="color: var(--muted);">本地持久化说明</p>
+            <div class="space-y-3">
+              <div class="flex items-center justify-between p-3 rounded-lg" style="background: var(--bg);">
+                <div>
+                  <div class="text-[13px] font-semibold">数据库</div>
+                  <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">SQLite 单文件，DATABASE_PATH 指定，默认 ./data/postman2api.db</div>
+                </div>
+                <span class="tag tag-gray">local</span>
+              </div>
+              <div class="flex items-center justify-between p-3 rounded-lg" style="background: var(--bg);">
+                <div>
+                  <div class="text-[13px] font-semibold">存储内容</div>
+                  <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">账号（邮箱 + 桌面/Web token）、请求日志、统计数据</div>
+                </div>
+                <span class="tag tag-gray">SQLite</span>
+              </div>
+              <div class="flex items-center justify-between p-3 rounded-lg" style="background: var(--bg);">
+                <div>
+                  <div class="text-[13px] font-semibold">日志保留</div>
+                  <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">Dashboard 展示最近 100 条请求日志</div>
+                </div>
+                <span class="tag tag-gray">100 条</span>
+              </div>
+            </div>
+          </div><div class="card p-6" id="set-api">
+            <h3 class="font-display text-[20px] font-medium mb-1">API 端点</h3>
+            <p class="text-[12px] mb-5" style="color: var(--muted);">OpenAI / Anthropic 兼容接口</p>
+            <div class="space-y-3">
+              <div class="p-4 rounded-lg" style="background: var(--bg);">
+                <div class="text-[13px] font-semibold mb-2">Base URL</div>
+                <div class="font-mono text-[12px] p-2.5 rounded" style="background: var(--card); border: 1px solid var(--border);" id="settingsHost2">-</div>
+              </div>
+              <div class="p-4 rounded-lg" style="background: var(--bg);">
+                <div class="text-[13px] font-semibold mb-2">端点</div>
+                <div class="space-y-1.5">
+                  <div class="font-mono text-[12px] p-2 rounded" style="background: var(--card); border: 1px solid var(--border);">POST /v1/chat/completions · OpenAI 兼容（流式/非流式）</div>
+                  <div class="font-mono text-[12px] p-2 rounded" style="background: var(--card); border: 1px solid var(--border);">POST /v1/messages · Anthropic 兼容</div>
+                  <div class="font-mono text-[12px] p-2 rounded" style="background: var(--card); border: 1px solid var(--border);">GET /v1/models · 模型列表</div>
+                </div>
+              </div>
+              <div class="p-4 rounded-lg" style="background: var(--bg);">
+                <div class="text-[13px] font-semibold mb-2">鉴权</div>
+                <div class="font-mono text-[12px] p-2 rounded" style="background: var(--card); border: 1px solid var(--border);">Authorization: Bearer postman2api-secret-key</div>
+              </div>
+            </div>
+          </div><div class="card p-6" id="set-about">
+            <h3 class="font-display text-[20px] font-medium mb-1">关于系统</h3>
+            <p class="text-[12px] mb-5" style="color: var(--muted);">版本与运行时信息</p>
+            <div class="grid grid-cols-2 gap-4 text-[13px]">
+              <div class="p-3 rounded-lg" style="background: var(--bg);">
+                <div class="text-[11px]" style="color: var(--muted);">系统</div>
+                <div class="font-mono font-semibold mt-1">Postman2API 网关</div>
+              </div>
+              <div class="p-3 rounded-lg" style="background: var(--bg);">
+                <div class="text-[11px]" style="color: var(--muted);">实现</div>
+                <div class="font-mono font-semibold mt-1">Go 1.26</div>
+              </div>
+              <div class="p-3 rounded-lg" style="background: var(--bg);">
+                <div class="text-[11px]" style="color: var(--muted);">上游</div>
+                <div class="font-mono font-semibold mt-1">Postman Agent Chat</div>
+              </div>
+              <div class="p-3 rounded-lg" style="background: var(--bg);">
+                <div class="text-[11px]" style="color: var(--muted);">认证模式</div>
+                <div class="font-mono font-semibold mt-1">Desktop / Web</div>
+              </div>
+              <div class="p-3 rounded-lg" style="background: var(--bg);">
+                <div class="text-[11px]" style="color: var(--muted);">账务存储</div>
+                <div class="font-mono font-semibold mt-1">SQLite</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>

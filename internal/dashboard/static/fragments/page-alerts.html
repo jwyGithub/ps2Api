@@ -1,0 +1,51 @@
+<section class="page" id="page-alerts">
+    <div class="p-8">
+      <div class="flex items-end justify-between mb-8 gap-6 flex-wrap">
+        <div>
+          <div class="text-[11px] font-semibold tracking-wider uppercase mb-2" style="color: var(--muted);">Alerts</div>
+          <h1 class="hero-title">告警 <em>中心</em></h1>
+          <p class="mt-2 text-[14px]" style="color: var(--fg-2);">未处理告警、历史告警与通知渠道管理。</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <button class="btn btn-ghost" id="resolveAllBtn" onclick="resolveAllAlerts()" style="display:none;">全部处理</button>
+          <button class="btn btn-primary" onclick="checkHealth()">立即检查</button>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <div class="card p-5" style="border-left: 3px solid var(--danger);">
+          <div class="text-[11px] uppercase tracking-wider" style="color: var(--muted);">严重</div>
+          <div class="font-display text-[32px] font-medium mt-1" style="color: var(--danger);">1</div>
+        </div>
+        <div class="card p-5" style="border-left: 3px solid var(--warning);">
+          <div class="text-[11px] uppercase tracking-wider" style="color: var(--muted);">警告</div>
+          <div class="font-display text-[32px] font-medium mt-1" style="color: var(--warning);">2</div>
+        </div>
+        <div class="card p-5" style="border-left: 3px solid var(--info);">
+          <div class="text-[11px] uppercase tracking-wider" style="color: var(--muted);">信息</div>
+          <div class="font-display text-[32px] font-medium mt-1" style="color: var(--info);">5</div>
+        </div>
+        <div class="card p-5" style="border-left: 3px solid var(--success);">
+          <div class="text-[11px] uppercase tracking-wider" style="color: var(--muted);">MTTR</div>
+          <div class="font-display text-[32px] font-medium mt-1" style="color: var(--success);">8m</div>
+        </div>
+      </div>
+
+      <div class="card overflow-hidden">
+        <div class="p-4 pb-0">
+          <div class="flex p-1 rounded-lg" style="background: var(--bg-2); width: fit-content;">
+            <div class="tab active">未处理</div>
+            <div class="tab">全部</div>
+          </div>
+        </div>
+        <div class="overflow-x-auto mt-2">
+          <table class="data-table">
+            <thead>
+              <tr><th>级别</th><th>告警</th><th>来源</th><th>触发时间</th><th>状态</th><th>操作</th></tr>
+            </thead>
+            <tbody id="alertsBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>

@@ -1,0 +1,21 @@
+# 凭证与运行时数据（绝不进镜像层）
+account.json
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# 桌面端/打包遗留
+build/
+wails.json
+
+# 依赖与编辑器状态
+node_modules/
+.git/
+.github/
+.idea/
+.vscode/
+.DS_Store
+*.exe
+*.log
+.codegraph/

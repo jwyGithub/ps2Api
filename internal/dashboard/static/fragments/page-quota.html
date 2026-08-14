@@ -1,0 +1,83 @@
+<section class="page" id="page-quota">
+    <div class="p-8">
+      <div class="flex items-end justify-between mb-8 gap-6 flex-wrap">
+        <div>
+          <div class="text-[11px] font-semibold tracking-wider uppercase mb-2" style="color: var(--muted);">Quota</div>
+          <h1 class="hero-title">额度 <em>管理</em></h1>
+          <p class="mt-2 text-[14px]" style="color: var(--fg-2);">月度配额分配、消耗追踪与超额保护。</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <button class="btn btn-ghost" onclick="exportLogs()">导出明细</button>
+          <button class="btn btn-primary" onclick="refreshQuota()">刷新额度</button>
+        </div>
+      </div>
+
+      <div class="card p-8 mb-6 relative overflow-hidden grid-bg">
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8 relative">
+          <div>
+            <div class="text-[11px] uppercase tracking-wider mb-3" style="color: var(--muted);">本月总配额</div>
+            <div class="font-display text-[56px] font-medium leading-none gradient-text">1,000,000</div>
+            <div class="text-[13px] mt-2" style="color: var(--fg-2);">次 API 调用 · 自动重置周期</div>
+            <div class="mt-4 flex items-center gap-3">
+              <span class="tag tag-amber" id="quotaNear">已用 0%</span>
+              <span class="text-[12px]" style="color: var(--muted);" id="quotaReset">按账号月度额度统计</span>
+            </div>
+          </div>
+          <div class="lg:col-span-2">
+            <div class="flex items-center justify-between mb-3">
+              <span class="text-[12px] font-semibold">消耗进度</span>
+              <span class="text-[12px] font-mono"><span class="font-semibold" id="quotaProgressText" style="color: var(--accent);">0</span> / <span id="quotaProgressTotal">0</span></span>
+            </div>
+            <div class="progress" style="height: 12px;">
+              <div class="progress-fill" style="width: 68.2%; background: linear-gradient(90deg, var(--accent), var(--accent-2), var(--gold));"></div>
+            </div>
+            <div class="grid grid-cols-4 gap-4 mt-6">
+              <div>
+                <div class="text-[11px]" style="color: var(--muted);">已使用</div>
+                <div class="font-display text-[24px] font-medium mt-1">682K</div>
+              </div>
+              <div>
+                <div class="text-[11px]" style="color: var(--muted);">剩余</div>
+                <div class="font-display text-[24px] font-medium mt-1" style="color: var(--success);">318K</div>
+              </div>
+              <div>
+                <div class="text-[11px]" style="color: var(--muted);">日均</div>
+                <div class="font-display text-[24px] font-medium mt-1">50.5K</div>
+              </div>
+              <div>
+                <div class="text-[11px]" style="color: var(--muted);">预计月末</div>
+                <div class="font-display text-[24px] font-medium mt-1" style="color: var(--warning);">932K</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+        <div class="card p-6">
+          <h3 class="font-display text-[18px] font-medium mb-1">按渠道分配</h3>
+          <p class="text-[12px] mb-4" style="color: var(--muted);">各渠道本月配额与消耗</p>
+          <div class="space-y-4" id="quotaChannels"></div>
+        </div>
+        <div class="card p-6">
+          <h3 class="font-display text-[18px] font-medium mb-1">按项目分配</h3>
+          <p class="text-[12px] mb-4" style="color: var(--muted);">内部项目配额划分</p>
+          <div class="space-y-4" id="quotaProjects"></div>
+        </div>
+      </div>
+
+      <div class="card p-6">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="font-display text-[18px] font-medium">额度告警规则</h3>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="data-table">
+            <thead>
+              <tr><th>规则名</th><th>触发条件</th><th>通知方式</th><th>状态</th><th>最近触发</th><th>操作</th></tr>
+            </thead>
+            <tbody id="quotaRules"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>

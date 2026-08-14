@@ -1,0 +1,263 @@
+package api
+
+import (
+	"encoding/json"
+	"net/http"
+	"strconv"
+	"time"
+)
+
+// ─── 系统设置（真实持久化到 SQLite settings 表）──────────────────
+
+type settingDef struct {
+	Key         string `json:"key"`
+	Label       string `json:"label"`
+	Type        string `json:"type"` // number | bool | text
+	Default     string `json:"default"`
+	Description string `json:"description"`
+}
+
+// settingDefs 是面板可配置项的白名单。前端按此渲染表单，PUT 只接受这些键。
+var settingDefs = []settingDef{
+	{Key: "retry_count", Label: "请求重试次数", Type: "number", Default: "3", Description: "单次请求失败后最多重试几次（在号池内切换账号）"},
+	{Key: "failover_enabled", Label: "失败自动切换账号", Type: "bool", Default: "true", Description: "关闭后单次请求失败不再换号重试"},
+	{Key: "alert_error_rate", Label: "错误率告警阈值", Type: "number", Default: "0.5", Description: "最近 10 分钟错误率超过该比例（0~1）时触发告警"},
+	{Key: "alert_quota", Label: "额度告警阈值", Type: "number", Default: "0.2", Description: "账号剩余额度低于总配额该比例（0~1）时触发告警"},
+	{Key: "log_retention", Label: "日志页展示条数", Type: "number", Default: "100", Description: "实时日志与部分聚合最多展示的最近日志条数"},
+}
+
+func defaultSettings() map[string]string {
+	m := map[string]string{}
+	for _, d := range settingDefs {
+		m[d.Key] = d.Default
+	}
+	return m
+}
+
+// allSettings 返回默认值 + 数据库覆盖后的完整配置。
+func (s *Server) allSettings() map[string]string {
+	out := defaultSettings()
+	rows, err := s.Store.ListSettings()
+	if err != nil {
+		return out
+	}
+	for k, v := range rows {
+		if _, ok := out[k]; ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
+	settings := s.allSettings()
+	apiKey := "未设置"
+	if s.APIKey != "" {
+		if len(s.APIKey) > 8 {
+			apiKey = s.APIKey[:8] + "****"
+		} else {
+			apiKey = "****"
+		}
+	}
+	jsonWrite(w, 200, map[string]interface{}{
+		"settings": settings,
+		"defs":     settingDefs,
+		"apiKey":   apiKey,
+	})
+}
+
+func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.auth(w, r) {
+		return
+	}
+	var q struct {
+		Settings map[string]string `json:"settings"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&q); err != nil {
+		jsonError(w, 400, err.Error(), "invalid_request")
+		return
+	}
+	valid := map[string]bool{}
+	for _, d := range settingDefs {
+		valid[d.Key] = true
+	}
+	for k, v := range q.Settings {
+		if !valid[k] {
+			jsonError(w, 400, "unknown setting key: "+k, "invalid_request")
+			return
+		}
+		if v == "" {
+			continue
+		}
+		if err := s.Store.SetSetting(k, v); err != nil {
+			jsonError(w, 500, err.Error(), "internal_error")
+			return
+		}
+	}
+	jsonWrite(w, 200, map[string]interface{}{"success": true, "settings": s.allSettings()})
+}
+
+// ─── 统计分析聚合 ───────────────────────────────────────────────
+
+func (s *Server) analytics(w http.ResponseWriter, r *http.Request) {
+	days := 14
+	if v := r.URL.Query().Get("days"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 90 {
+			days = n
+		}
+	}
+	daily, err := s.Store.DailySeries(days)
+	if err != nil {
+		jsonError(w, 500, err.Error(), "internal_error")
+		return
+	}
+	hourly, err := s.Store.HourlySeries(24)
+	if err != nil {
+		jsonError(w, 500, err.Error(), "internal_error")
+		return
+	}
+	models, err := s.Store.ModelDistribution(days)
+	if err != nil {
+		jsonError(w, 500, err.Error(), "internal_error")
+		return
+	}
+	top, err := s.Store.AccountAggregates(days, 20)
+	if err != nil {
+		jsonError(w, 500, err.Error(), "internal_error")
+		return
+	}
+	channels, err := s.Store.ChannelComparison(days)
+	if err != nil {
+		jsonError(w, 500, err.Error(), "internal_error")
+		return
+	}
+	heatmap, err := s.Store.Heatmap(days)
+	if err != nil {
+		jsonError(w, 500, err.Error(), "internal_error")
+		return
+	}
+	today, err := s.Store.TodayCallsByAccount()
+	if err != nil {
+		jsonError(w, 500, err.Error(), "internal_error")
+		return
+	}
+	jsonWrite(w, 200, map[string]interface{}{
+		"daily":       daily,
+		"hourly":      hourly,
+		"models":      models,
+		"topAccounts": top,
+		"channels":    channels,
+		"heatmap":     heatmap,
+		"todayCalls":  today,
+	})
+}
+
+// ─── 告警中心（真实告警记录）────────────────────────────────────
+
+func (s *Server) alerts(w http.ResponseWriter, r *http.Request) {
+	status := r.URL.Query().Get("status")
+	limit := 200
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	list, err := s.Store.ListAlerts(status, limit)
+	if err != nil {
+		jsonError(w, 500, err.Error(), "internal_error")
+		return
+	}
+	sum, err := s.Store.AlertSummary()
+	if err != nil {
+		jsonError(w, 500, err.Error(), "internal_error")
+		return
+	}
+	jsonWrite(w, 200, map[string]interface{}{"data": list, "summary": sum})
+}
+
+func (s *Server) resolveAlert(w http.ResponseWriter, r *http.Request) {
+	if !s.auth(w, r) {
+		return
+	}
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err := s.Store.ResolveAlert(id); err != nil {
+		jsonError(w, 404, err.Error(), "not_found")
+		return
+	}
+	jsonWrite(w, 200, map[string]bool{"success": true})
+}
+
+func (s *Server) resolveAllAlerts(w http.ResponseWriter, r *http.Request) {
+	if !s.auth(w, r) {
+		return
+	}
+	if err := s.Store.ResolveAllOpen(); err != nil {
+		jsonError(w, 500, err.Error(), "internal_error")
+		return
+	}
+	jsonWrite(w, 200, map[string]bool{"success": true})
+}
+
+// ─── 告警后台评估器 ─────────────────────────────────────────────
+
+// runAlertEvaluator 每 60s 基于真实统计数据评估并落告警：
+//  1. 最近 10 分钟错误率超过 alert_error_rate（且样本数 ≥ 5）→ high_error_rate
+//  2. 启用账号剩余额度低于 alert_quota 比例 → low_quota
+//
+// 错误率恢复后自动解决 high_error_rate 告警（MTTR 由真实解决时间计算）。
+func (s *Server) runAlertEvaluator() {
+	for {
+		time.Sleep(60 * time.Second)
+		s.evaluateAlerts()
+	}
+}
+
+func (s *Server) evaluateAlerts() {
+	settings := s.allSettings()
+	errRate, _ := strconv.ParseFloat(settings["alert_error_rate"], 64)
+	if errRate < 0 || errRate > 1 {
+		errRate = 0.5
+	}
+	quotaTh, _ := strconv.ParseFloat(settings["alert_quota"], 64)
+	if quotaTh < 0 || quotaTh > 1 {
+		quotaTh = 0.2
+	}
+
+	// 1) 错误率
+	var total, errs int
+	_ = s.Store.QueryRowScan(`SELECT COUNT(*), COALESCE(SUM(CASE WHEN status='error' THEN 1 ELSE 0 END),0) FROM request_logs WHERE created_at>=datetime('now','-10 minutes')`, &total, &errs)
+	if total >= 5 {
+		rate := float64(errs) / float64(total)
+		if rate > errRate {
+			msg := "最近 10 分钟错误率 " + trimFloat(rate*100) + "%（阈值 " + trimFloat(errRate*100) + "%），共 " + strconv.Itoa(errs) + "/" + strconv.Itoa(total) + " 次失败"
+			_ = s.Store.CreateAlert("warning", "错误率过高", msg, "system", nil, "high_error_rate")
+		} else {
+			_ = s.Store.ResolveAllByType("system", "high_error_rate")
+		}
+	}
+
+	// 2) 额度
+	accounts, err := s.Store.ListAccounts()
+	if err != nil {
+		return
+	}
+	for _, a := range accounts {
+		if !a.Enabled || a.Status != "active" {
+			continue
+		}
+		if a.QuotaLimit <= 0 || a.QuotaRemaining <= 0 {
+			continue
+		}
+		ratio := a.QuotaRemaining / a.QuotaLimit
+		if ratio < quotaTh {
+			sid := a.ID
+			_ = s.Store.CreateAlert("warning", "账号额度不足: "+a.Email,
+				"剩余 "+trimFloat(a.QuotaRemaining)+" / "+trimFloat(a.QuotaLimit)+"（"+trimFloat(ratio*100)+"%），低于阈值 "+trimFloat(quotaTh*100)+"%",
+				"account", &sid, "low_quota")
+		}
+	}
+}
+
+func trimFloat(f float64) string {
+	return strconv.FormatFloat(f, 'f', 1, 64)
+}

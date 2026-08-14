@@ -1,0 +1,112 @@
+<section class="page" id="page-routing">
+    <div class="p-8">
+      <div class="flex items-end justify-between mb-8 gap-6 flex-wrap">
+        <div>
+          <div class="text-[11px] font-semibold tracking-wider uppercase mb-2" style="color: var(--muted);">Routing</div>
+          <h1 class="hero-title">路由 <em>策略</em></h1>
+          <p class="mt-2 text-[14px]" style="color: var(--fg-2);">智能调度、负载均衡与故障转移配置。</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <button class="btn btn-ghost" onclick="syncStatus()">同步状态</button>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
+        <div class="card p-6">
+          <h3 class="font-display text-[18px] font-medium mb-1">调度算法</h3>
+          <p class="text-[12px] mb-4" style="color: var(--muted);">核心算法固定为轮询 + 最少在途；重试次数与故障切换可配置（持久化到后端）</p>
+          <div class="space-y-2">
+            <div class="flex items-start gap-3 p-3 rounded-lg" style="background: var(--bg); border: 1.5px solid var(--accent);">
+              <div>
+                <div class="font-semibold text-[13px]">轮询 + 最少在途</div>
+                <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">账号池内轮询，同时避开在途请求最多的账号（内置算法）</div>
+              </div>
+            </div>
+            <div class="flex items-center justify-between p-3 rounded-lg" style="background: var(--bg); border: 1.5px solid var(--border-strong);">
+              <div>
+                <div class="font-semibold text-[13px]">失败自动切换账号</div>
+                <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">额度耗尽/认证失败/瞬时错误时自动换号重试</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="routingFailover" checked><div class="slider"></div></label>
+            </div>
+            <div class="flex items-center justify-between p-3 rounded-lg" style="background: var(--bg); border: 1.5px solid var(--border-strong);">
+              <div>
+                <div class="font-semibold text-[13px]">请求重试次数</div>
+                <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">单次请求失败后最多重试几次（在号池内切换账号）</div>
+              </div>
+              <input class="input font-mono" id="routingRetry" type="number" min="1" max="10" value="3" style="width: 76px;">
+            </div>
+            <div class="flex items-start gap-3 p-3 rounded-lg" style="border: 1.5px solid var(--border-strong);">
+              <div>
+                <div class="font-semibold text-[13px]">账号隔离</div>
+                <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">错误账号被标记异常，后续请求直接跳过（内置策略）</div>
+              </div>
+            </div>
+            <div class="pt-1">
+              <button class="btn btn-primary" onclick="saveRouting()">保存路由配置</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card p-6 lg:col-span-2">
+          <div class="flex items-center justify-between mb-4">
+            <div>
+              <h3 class="font-display text-[18px] font-medium">渠道权重</h3>
+              <p class="text-[12px] mt-0.5" style="color: var(--muted);">权重总和将自动归一化为百分比</p>
+            </div>
+            <span class="tag tag-blue">实时生效</span>
+          </div>
+          <div class="space-y-5" id="routingWeights"></div>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div class="card p-6">
+          <h3 class="font-display text-[18px] font-medium mb-4">故障转移规则 <span class="text-[12px] font-normal" style="color: var(--muted);">（真实配置）</span></h3>
+          <div class="space-y-3">
+            <div class="flex items-center justify-between p-3 rounded-lg" style="background: var(--bg);">
+              <div>
+                <div class="text-[13px] font-semibold" id="fvRetryTitle">请求重试</div>
+                <div class="text-[11px] mt-0.5" style="color: var(--fg-2);">5xx / 网络错误 / 额度不足时依次切换下一个账号</div>
+              </div>
+              <span class="tag tag-green" id="fvRetryTag">—</span>
+            </div>
+            <div class="flex items-center justify-between p-3 rounded-lg" style="background: var(--bg);">
+              <div>
+                <div class="text-[13px] font-semibold">额度耗尽自动换号</div>
+                <div class="text-[11px] mt-0.5" style="color: var(--fg-2);">QUOTA_EXCEEDED 时标记该账号并换用其他账号（内置策略）</div>
+              </div>
+              <span class="tag tag-green">已启用</span>
+            </div>
+            <div class="flex items-center justify-between p-3 rounded-lg" style="background: var(--bg);">
+              <div>
+                <div class="text-[13px] font-semibold">认证失败隔离</div>
+                <div class="text-[11px] mt-0.5" style="color: var(--fg-2);">401/认证错误账号标记 error，停止参与路由（内置策略）</div>
+              </div>
+              <span class="tag tag-green">已启用</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card p-6">
+          <h3 class="font-display text-[18px] font-medium mb-4">账号健康</h3>
+          <div class="space-y-4">
+            <div>
+              <div class="flex items-center justify-between text-[12.5px] mb-1.5">
+                <span>检查方式</span>
+                <span class="font-mono font-semibold">请求结果统计</span>
+              </div>
+              <div class="text-[11px]" style="color: var(--muted);">不使用主动探测；每次请求成功/失败都会更新账号状态</div>
+            </div>
+            <div>
+              <div class="flex items-center justify-between text-[12.5px] mb-1.5">
+                <span>状态恢复</span>
+                <span class="font-mono font-semibold">手动启用</span>
+              </div>
+              <div class="text-[11px]" style="color: var(--muted);">账号状态可在号池管理中手动启用恢复</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>

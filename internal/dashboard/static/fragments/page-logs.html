@@ -1,0 +1,48 @@
+<section class="page" id="page-logs">
+    <div class="p-8">
+      <div class="flex items-end justify-between mb-6 gap-6 flex-wrap">
+        <div>
+          <div class="text-[11px] font-semibold tracking-wider uppercase mb-2" style="color: var(--muted);">Live Tail</div>
+          <h1 class="hero-title">实时 <em>日志流</em></h1>
+          <p class="mt-2 text-[14px]" style="color: var(--fg-2);">所有号池、路由、调度事件的实时追踪。</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <div class="flex items-center gap-2 px-3 py-2 rounded-lg" style="background: var(--card); border: 1px solid var(--border);">
+            <span class="dot dot-online dot-pulse"></span>
+            <span class="text-[12px] font-mono font-semibold">LIVE</span>
+            <span class="text-[12px] font-mono" style="color: var(--muted);" id="logCount">0 条</span>
+          </div>
+          <button class="btn btn-ghost" id="pauseBtn" onclick="toggleLogPause()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect width="4" height="16" x="6" y="4"/><rect width="4" height="16" x="14" y="4"/></svg>
+            暂停
+          </button>
+          <button class="btn btn-ghost" onclick="clearLogs()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            清空
+          </button>
+        </div>
+      </div>
+
+      <div class="card p-4 mb-4">
+        <div class="flex items-center gap-3 flex-wrap">
+          <div class="flex items-center gap-2">
+            <span class="text-[11px] font-semibold tracking-wider uppercase" style="color: var(--muted);">级别</span>
+            <div class="flex gap-1">
+              <button class="log-filter active px-2.5 py-1 rounded-md text-[11px] font-mono font-semibold" data-level="ALL" style="background: var(--accent); color: white;">ALL</button>
+              <button class="log-filter px-2.5 py-1 rounded-md text-[11px] font-mono font-semibold" data-level="INFO" style="background: var(--bg-2); color: var(--fg-2);">INFO</button>
+              <button class="log-filter px-2.5 py-1 rounded-md text-[11px] font-mono font-semibold" data-level="SUCCESS" style="background: var(--bg-2); color: var(--fg-2);">SUCCESS</button>
+              <button class="log-filter px-2.5 py-1 rounded-md text-[11px] font-mono font-semibold" data-level="WARN" style="background: var(--bg-2); color: var(--fg-2);">WARN</button>
+              <button class="log-filter px-2.5 py-1 rounded-md text-[11px] font-mono font-semibold" data-level="ERROR" style="background: var(--bg-2); color: var(--fg-2);">ERROR</button>
+              <button class="log-filter px-2.5 py-1 rounded-md text-[11px] font-mono font-semibold" data-level="DEBUG" style="background: var(--bg-2); color: var(--fg-2);">DEBUG</button>
+            </div>
+          </div>
+          <div class="w-px h-6" style="background: var(--border);"></div>
+          <input class="input flex-1 min-w-[200px]" placeholder="搜索日志关键字..." id="logSearch" style="height: 34px;">
+        </div>
+      </div>
+
+      <div class="card overflow-hidden">
+        <div class="log-stream max-h-[600px] overflow-y-auto" id="logStream"></div>
+      </div>
+    </div>
+  </section>

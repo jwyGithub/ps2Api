@@ -1,0 +1,19 @@
+services:
+  postman2api:
+    build: .
+    image: postman2api-go
+    container_name: postman2api
+    restart: unless-stopped
+    ports:
+      - "1930:1930"
+    volumes:
+      - ./data:/data
+    environment:
+      - API_KEY=postman2api-secret-key
+      # - POSTMAN2API_PORT=1930
+      # - POSTMAN2API_TRACE_LOG=0
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:1930/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3

@@ -1,0 +1,247 @@
+<section class="page active" id="page-overview">
+    <div class="p-8 relative">
+      <div class="glow-orb" style="width: 320px; height: 320px; background: var(--accent); top: -100px; right: 10%;"></div>
+      <div class="glow-orb" style="width: 280px; height: 280px; background: var(--gold); top: 100px; right: 25%; opacity: 0.15;"></div>
+
+      <div class="relative">
+        <div class="flex items-end justify-between mb-10 gap-6 flex-wrap">
+          <div>
+            <div class="flex items-center gap-3 mb-3">
+              <span class="tag tag-green"><span class="dot dot-online" style="width:6px;height:6px;"></span>系统正常</span>
+              <span class="text-[12px] font-mono" style="color: var(--muted);">同步自 Postman 桌面端</span>
+            </div>
+            <h1 class="hero-title">Postman2API 网关<br>累计处理 <em>128,304</em> 次请求。</h1>
+            <p class="mt-3 text-[14px] max-w-xl" style="color: var(--fg-2);">账号池直连 Postman 桌面端，轮询 + 最少在途路由，请求失败自动切换账号。</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button class="btn btn-ghost" onclick="exportReport()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+              导出报表
+            </button>
+            <button class="btn btn-primary" onclick="openDrawer()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+              新建号池
+            </button>
+          </div>
+        </div>
+
+        <!-- KPI -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+          <div class="card card-hover p-5 relative overflow-hidden">
+            <div class="flex items-center justify-between mb-4">
+              <div class="text-[11px] font-semibold tracking-wider uppercase" style="color: var(--muted);">今日请求</div>
+              <div class="w-8 h-8 rounded-lg flex items-center justify-center" style="background: rgba(11,61,46,0.08); color: var(--accent);">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+              </div>
+            </div>
+            <div class="kpi-value">0</div>
+            <div class="flex items-center justify-between mt-3">
+              <div class="flex items-center gap-1 text-[12px] font-semibold" style="color: var(--muted);">
+              今日实时
+              <span class="font-normal ml-1" style="color: var(--muted);">当日计数</span>
+            </div>
+            </div>
+          </div>
+          <div class="card card-hover p-5 relative overflow-hidden">
+            <div class="flex items-center justify-between mb-4">
+              <div class="text-[11px] font-semibold tracking-wider uppercase" style="color: var(--muted);">活跃账号</div>
+              <div class="w-8 h-8 rounded-lg flex items-center justify-center" style="background: rgba(194,65,12,0.08); color: var(--gold);">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+              </div>
+            </div>
+            <div class="kpi-value">38<span class="text-[20px]" style="color: var(--muted);">/42</span></div>
+            <div class="flex items-center justify-between mt-3">
+              <div class="flex items-center gap-1 text-[12px] font-semibold" style="color: var(--muted);">
+              账号池
+              <span class="font-normal ml-1" style="color: var(--muted);">可启用可停用</span>
+            </div>
+            </div>
+          </div>
+          <div class="card card-hover p-5 relative overflow-hidden">
+            <div class="flex items-center justify-between mb-4">
+              <div class="text-[11px] font-semibold tracking-wider uppercase" style="color: var(--muted);">平均延迟</div>
+              <div class="w-8 h-8 rounded-lg flex items-center justify-center" style="background: rgba(30,64,175,0.08); color: var(--info);">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              </div>
+            </div>
+            <div class="kpi-value">412<span class="text-[20px]" style="color: var(--muted);"> ms</span></div>
+            <div class="flex items-center justify-between mt-3">
+              <div class="flex items-center gap-1 text-[12px] font-semibold" style="color: var(--muted);">
+              直连桌面端
+              <span class="font-normal ml-1" style="color: var(--muted);">视网络而定</span>
+            </div>
+            </div>
+          </div>
+          <div class="card card-hover p-5 relative overflow-hidden">
+            <div class="flex items-center justify-between mb-4">
+              <div class="text-[11px] font-semibold tracking-wider uppercase" style="color: var(--muted);">成功率</div>
+              <div class="w-8 h-8 rounded-lg flex items-center justify-center" style="background: rgba(21,128,61,0.08); color: var(--success);">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+              </div>
+            </div>
+            <div class="kpi-value">99.62<span class="text-[20px]" style="color: var(--muted);">%</span></div>
+            <div class="flex items-center justify-between mt-3">
+              <div class="flex items-center gap-1 text-[12px] font-semibold" style="color: var(--muted);">
+              成功率
+              <span class="font-normal ml-1" style="color: var(--muted);">实时计算</span>
+            </div>
+            <div class="text-[11px] font-mono" style="color: var(--muted);" id="kpiErrors">0 次失败</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 主图 -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
+          <div class="card p-6 lg:col-span-2">
+            <div class="flex items-center justify-between mb-1">
+              <div>
+                <h3 class="font-display text-[22px] font-medium leading-tight">请求流量趋势</h3>
+                <p class="text-[12px] mt-1" style="color: var(--muted);">最近 14 天 · 按日聚合 · 成功 vs 失败</p>
+              </div>
+              <div class="flex items-center gap-2">
+                <div class="flex p-1 rounded-lg" style="background: var(--bg-2);">
+                  <div class="tab" data-range="7d">7天</div>
+                  <div class="tab active" data-range="14d">14天</div>
+                  <div class="tab" data-range="30d">30天</div>
+                </div>
+              </div>
+            </div>
+            <div class="flex items-center gap-5 mt-3 mb-4 text-[12px]">
+              <div class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full" style="background: var(--accent);"></span>成功请求</div>
+              <div class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full" style="background: var(--gold);"></span>失败请求</div>
+              <div class="flex items-center gap-1.5 ml-auto font-mono" style="color: var(--muted);">总计 <span id="trafficTotal">0</span> 次</div>
+            </div>
+            <div class="h-72"><canvas id="chartTraffic"></canvas></div>
+          </div>
+
+          <div class="card p-6">
+            <h3 class="font-display text-[22px] font-medium leading-tight">号池分布</h3>
+            <p class="text-[12px] mt-1 mb-4" style="color: var(--muted);">按渠道与状态</p>
+            <div class="h-44 flex items-center justify-center"><canvas id="chartPool"></canvas></div>
+            <div class="mt-4 space-y-2.5">
+              <div class="flex items-center justify-between text-[12.5px]">
+                <div class="flex items-center gap-2"><span class="w-2 h-2 rounded-sm" style="background: var(--accent);"></span>Postman Desktop</div>
+                <span class="font-mono font-semibold" id="poolLegendActive">0</span>
+              </div>
+              <div class="flex items-center justify-between text-[12.5px]">
+                <div class="flex items-center gap-2"><span class="w-2 h-2 rounded-sm" style="background: var(--warning);"></span>额度耗尽</div>
+                <span class="font-mono font-semibold" id="poolLegendExhausted">0</span>
+              </div>
+              <div class="flex items-center justify-between text-[12.5px]">
+                <div class="flex items-center gap-2"><span class="w-2 h-2 rounded-sm" style="background: var(--danger);"></span>异常</div>
+                <span class="font-mono font-semibold" id="poolLegendError">0</span>
+              </div>
+              <div class="flex items-center justify-between text-[12.5px]">
+                <div class="flex items-center gap-2"><span class="w-2 h-2 rounded-sm" style="background: #8A8F96;"></span>停用</div>
+                <span class="font-mono font-semibold" id="poolLegendDisabled">0</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 第二行 -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
+          <div class="card p-6">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="font-display text-[18px] font-medium">系统状态</h3>
+              <span class="tag tag-green">运行中</span>
+            </div>
+            <div class="space-y-4">
+              <div>
+                <div class="flex items-center justify-between text-[12.5px] mb-1.5">
+                  <span style="color: var(--fg-2);">状态</span>
+                  <span class="font-mono font-semibold">运行中</span>
+                </div>
+                <div class="progress"><div class="progress-fill" style="width: 100%; background: var(--accent);"></div></div>
+              </div>
+              <div>
+                <div class="flex items-center justify-between text-[12.5px] mb-1.5">
+                  <span style="color: var(--fg-2);">监听地址</span>
+                  <span class="font-mono font-semibold" id="sysHost">-</span>
+                </div>
+                <div class="progress"><div class="progress-fill" style="width: 100%; background: var(--accent-2);"></div></div>
+              </div>
+              <div>
+                <div class="flex items-center justify-between text-[12.5px] mb-1.5">
+                  <span style="color: var(--fg-2);">上游协议</span>
+                  <span class="font-mono font-semibold">Postman Desktop x-access-token</span>
+                </div>
+                <div class="progress"><div class="progress-fill" style="width: 100%; background: var(--accent-2);"></div></div>
+              </div>
+              <div>
+                <div class="flex items-center justify-between text-[12.5px] mb-1.5">
+                  <span style="color: var(--fg-2);">数据存储</span>
+                  <span class="font-mono font-semibold">SQLite · data/postman2api.db</span>
+                </div>
+                <div class="progress"><div class="progress-fill" style="width: 100%; background: var(--accent-2);"></div></div>
+              </div>
+            </div>
+            <div class="mt-5 pt-4 grid grid-cols-2 gap-3 text-[12px]" style="border-top: 1px solid var(--border);">
+              <div>
+                <div style="color: var(--muted);">账号总数</div>
+                <div class="font-mono font-semibold mt-0.5" id="sysAccounts">0</div>
+              </div>
+              <div>
+                <div style="color: var(--muted);">在线账号</div>
+                <div class="font-mono font-semibold mt-0.5" id="sysActive">0</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card p-6 lg:col-span-2">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="font-display text-[18px] font-medium">最近活动</h3>
+              <button class="text-[12px] font-semibold" style="color: var(--accent);" onclick="switchPage('logs')">查看全部 →</button>
+            </div>
+            <div>
+              <div class="timeline-item">
+                <div class="flex items-start justify-between gap-3">
+                  <div>
+                    <div class="text-[13px] font-semibold">号池 <span class="font-mono" style="color: var(--accent);">pool-prod-01</span> 触发自动扩容</div>
+                    <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">从 8 个账号扩展至 12 个，由 QPS 阈值规则触发</div>
+                  </div>
+                  <span class="text-[11px] font-mono whitespace-nowrap" style="color: var(--muted);">2 分钟前</span>
+                </div>
+              </div>
+              <div class="timeline-item">
+                <div class="flex items-start justify-between gap-3">
+                  <div>
+                    <div class="text-[13px] font-semibold">账号 <span class="font-mono" style="color: var(--gold);">oa-7f3a2c</span> 进入冷却</div>
+                    <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">连续 5 次 429 响应，自动隔离 30 分钟</div>
+                  </div>
+                  <span class="text-[11px] font-mono whitespace-nowrap" style="color: var(--muted);">7 分钟前</span>
+                </div>
+              </div>
+              <div class="timeline-item">
+                <div class="flex items-start justify-between gap-3">
+                  <div>
+                    <div class="text-[13px] font-semibold">路由策略 <span class="font-mono" style="color: var(--accent);">weighted-round-robin</span> 已更新</div>
+                    <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">账号池路由策略固定为轮询 + 最少在途，不支持自定义</div>
+                  </div>
+                  <span class="text-[11px] font-mono whitespace-nowrap" style="color: var(--muted);">23 分钟前</span>
+                </div>
+              </div>
+              <div class="timeline-item">
+                <div class="flex items-start justify-between gap-3">
+                  <div>
+                    <div class="text-[13px] font-semibold">月度额度报告已生成</div>
+                    <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">1 月预计消耗 682K 次，距上限尚有 318K 余量</div>
+                  </div>
+                  <span class="text-[11px] font-mono whitespace-nowrap" style="color: var(--muted);">1 小时前</span>
+                </div>
+              </div>
+              <div class="timeline-item">
+                <div class="flex items-start justify-between gap-3">
+                  <div>
+                    <div class="text-[13px] font-semibold">告警规则 <span class="font-mono" style="color: var(--accent);">high-error-rate</span> 已触发并解除</div>
+                    <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">Claude 渠道错误率短暂升至 2.1%，已自动恢复</div>
+                  </div>
+                  <span class="text-[11px] font-mono whitespace-nowrap" style="color: var(--muted);">3 小时前</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
