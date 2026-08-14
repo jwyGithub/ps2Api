@@ -35,7 +35,7 @@
     });
   }
 
-  function key() { return localStorage.getItem('postman2api_api_key') || 'postman2api-secret-key'; }
+  function key() { return localStorage.getItem('postman2api_api_key') || 'your-secret-key'; }
   function esc(value) { return String(value == null ? '' : value).replace(/[&<>"']/g, function (c) { return ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[c]; }); }
   function fmt(value) { return Number(value || 0).toLocaleString('zh-CN'); }
   function ago(value) {

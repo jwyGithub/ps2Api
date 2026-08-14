@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"ps2api/internal/api"
 	"ps2api/internal/store"
@@ -45,9 +47,53 @@ func env(k, fallback string) string {
 
 func logging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/health" {
-			log.Printf("%s %s", r.Method, r.URL.Path)
+		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
 		}
-		next.ServeHTTP(w, r)
+		started := time.Now()
+		rec := &logRecorder{ResponseWriter: w, status: 200}
+		next.ServeHTTP(rec, r)
+		dur := time.Since(started).Milliseconds()
+		if rec.status >= 400 {
+			// 失败时把响应体（JSON error 的 message）一并打出来，便于定位原因。
+			log.Printf("%s %s -> %d (%dms) %s", r.Method, r.URL.Path, rec.status, dur, strings.TrimSpace(rec.errBody.String()))
+		} else {
+			log.Printf("%s %s -> %d (%dms)", r.Method, r.URL.Path, rec.status, dur)
+		}
 	})
+}
+
+// logRecorder 记录状态码，并在响应为错误（status>=400）时缓存前 2KB 响应体，
+// 供 logging 中间件打印失败原因。透传 Flush 以保持 SSE 流式不被缓冲。
+type logRecorder struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+	errBody     bytes.Buffer
+}
+
+func (l *logRecorder) WriteHeader(status int) {
+	if l.wroteHeader {
+		return
+	}
+	l.wroteHeader = true
+	l.status = status
+	l.ResponseWriter.WriteHeader(status)
+}
+
+func (l *logRecorder) Write(b []byte) (int, error) {
+	if !l.wroteHeader {
+		l.WriteHeader(200)
+	}
+	if l.status >= 400 && l.errBody.Len() < 2048 {
+		l.errBody.Write(b[:min(len(b), 2048-l.errBody.Len())])
+	}
+	return l.ResponseWriter.Write(b)
+}
+
+func (l *logRecorder) Flush() {
+	if fl, ok := l.ResponseWriter.(http.Flusher); ok {
+		fl.Flush()
+	}
 }
