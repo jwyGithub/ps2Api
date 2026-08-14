@@ -1,13 +1,8 @@
-# Postman2API
+# ps2Api
 
 将 **Postman Agent Chat** 账号聚合成一个本地网关，对外暴露 **OpenAI 兼容**（`/v1/chat/completions`）与 **Anthropic 兼容**（`/v1/messages`）接口。多账号自动轮询、故障切换、真实额度同步，附带一个实时数据面板。以 **Docker** 运行（无界面、纯静态二进制）。
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-![Go](https://img.shields.io/badge/Go-1.26+-00ADD8.svg)
-![Docker](https://img.shields.io/badge/Docker-ready-2496ED.svg)
-
-> ⚠️ **免责声明**
-> 本项目通过逆向 Postman Agent Chat 的私有协议实现，**与 Postman 无任何关联，也未获得其授权或认可**。仅供个人学习与技术研究，请勿用于违反 Postman 服务条款的场景（如绕过计费）。私有协议随时可能变更导致功能失效，后果由使用者自行承担。仓库内置的 Postman 火箭图标为其**注册商标**，公开分发时请替换为自有图标。
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) ![Go](https://img.shields.io/badge/Go-1.26+-00ADD8.svg) ![Docker](https://img.shields.io/badge/Docker-ready-2496ED.svg)
 
 ---
 
@@ -89,20 +84,20 @@ docker run -d --name postman2api \
 
 ```json
 {
-  "version": 1,
-  "accounts": [
-    {
-      "email": "your@email.example",
-      "source": "manual",
-      "enabled": true,
-      "tokens": {
-        "access_token": "…",
-        "user_id": "…",
-        "workspace_id": "…",
-        "workspace_subdomain": "…"
-      }
-    }
-  ]
+    "version": 1,
+    "accounts": [
+        {
+            "email": "your@email.example",
+            "source": "manual",
+            "enabled": true,
+            "tokens": {
+                "access_token": "…",
+                "user_id": "…",
+                "workspace_id": "…",
+                "workspace_subdomain": "…"
+            }
+        }
+    ]
 }
 ```
 
@@ -153,13 +148,13 @@ curl http://127.0.0.1:1930/v1/messages \
 
 全部通过环境变量传入：
 
-| 环境变量 | 默认 | 说明 |
-| --- | --- | --- |
-| `API_KEY` | `postman2api-secret-key` | 客户端 Bearer Key；设为空字符串则关闭鉴权 |
-| `POSTMAN2API_PORT` | `1930` | 监听端口 |
-| `DATABASE_PATH` | `/data/postman2api.db`（镜像内） | SQLite 路径 |
-| `POSTMAN2API_TRACE_LOG` | `0` | 设为 `1` 记录客户端请求、路由、上游请求 / SSE 与响应，供故障排查 |
-| `POSTMAN2API_TRACE_DIR` | `./data/traces` | 追踪日志根目录；按日期分目录，每个请求单独生成 `<trace_id>.jsonl` |
+| 环境变量                | 默认                             | 说明                                                              |
+| ----------------------- | -------------------------------- | ----------------------------------------------------------------- |
+| `API_KEY`               | `postman2api-secret-key`         | 客户端 Bearer Key；设为空字符串则关闭鉴权                         |
+| `POSTMAN2API_PORT`      | `1930`                           | 监听端口                                                          |
+| `DATABASE_PATH`         | `/data/postman2api.db`（镜像内） | SQLite 路径                                                       |
+| `POSTMAN2API_TRACE_LOG` | `0`                              | 设为 `1` 记录客户端请求、路由、上游请求 / SSE 与响应，供故障排查  |
+| `POSTMAN2API_TRACE_DIR` | `./data/traces`                  | 追踪日志根目录；按日期分目录，每个请求单独生成 `<trace_id>.jsonl` |
 
 > 追踪日志默认关闭。开启后 `Authorization`、`Cookie`、密码、API Key、access token、`postman.sid` 会自动脱敏，但日志仍含对话正文与工具结果，排查后应关闭并妥善处理。响应头 `X-Postman2API-Trace-ID` 对应该次请求的日志文件名。
 
@@ -167,36 +162,36 @@ curl http://127.0.0.1:1930/v1/messages \
 
 Base URL：`http://127.0.0.1:1930`。除面板只读接口外，均需 `Authorization: Bearer <API_KEY>`。
 
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| POST | `/v1/chat/completions` | OpenAI 兼容（流式 / 非流式） |
-| POST | `/v1/messages` | Anthropic 兼容 |
-| GET | `/v1/models` | 模型列表 |
-| GET / POST | `/api/accounts` | 账号列表 / 手动添加 |
-| GET | `/api/accounts/export` | 导出 `account.json` |
-| POST | `/api/accounts/import` | 导入 `account.json` |
-| PATCH / DELETE | `/api/accounts/{id}` | 启用 / 停用、删除 |
-| POST | `/api/refresh-quota` | 对未采集额度的账号发起轻量探测并写库 |
-| GET | `/api/stats` | 累计请求、成功率、平均延迟、P95、成本、错误率、今日请求 |
-| GET | `/api/analytics?days=N` | 日 / 时序列、模型分布、渠道对比、账号排行、热力图 |
-| GET | `/api/logs` | 最近请求日志（条数可配） |
-| GET / PUT | `/api/settings` | 系统设置读写 |
-| GET | `/api/alerts` | 告警记录 |
-| POST | `/api/alerts/{id}/resolve` · `/api/alerts/resolve-all` | 处理单条 / 全部告警 |
-| GET | `/health` | 健康检查（无需鉴权） |
+| 方法           | 路径                                                   | 说明                                                    |
+| -------------- | ------------------------------------------------------ | ------------------------------------------------------- |
+| POST           | `/v1/chat/completions`                                 | OpenAI 兼容（流式 / 非流式）                            |
+| POST           | `/v1/messages`                                         | Anthropic 兼容                                          |
+| GET            | `/v1/models`                                           | 模型列表                                                |
+| GET / POST     | `/api/accounts`                                        | 账号列表 / 手动添加                                     |
+| GET            | `/api/accounts/export`                                 | 导出 `account.json`                                     |
+| POST           | `/api/accounts/import`                                 | 导入 `account.json`                                     |
+| PATCH / DELETE | `/api/accounts/{id}`                                   | 启用 / 停用、删除                                       |
+| POST           | `/api/refresh-quota`                                   | 对未采集额度的账号发起轻量探测并写库                    |
+| GET            | `/api/stats`                                           | 累计请求、成功率、平均延迟、P95、成本、错误率、今日请求 |
+| GET            | `/api/analytics?days=N`                                | 日 / 时序列、模型分布、渠道对比、账号排行、热力图       |
+| GET            | `/api/logs`                                            | 最近请求日志（条数可配）                                |
+| GET / PUT      | `/api/settings`                                        | 系统设置读写                                            |
+| GET            | `/api/alerts`                                          | 告警记录                                                |
+| POST           | `/api/alerts/{id}/resolve` · `/api/alerts/resolve-all` | 处理单条 / 全部告警                                     |
+| GET            | `/health`                                              | 健康检查（无需鉴权）                                    |
 
 ## 支持的模型
 
 `GET /v1/models` 返回完整列表。当前包含：
 
-| 模型 | 上下文 | 最大输出 | 思考 |
-| --- | --- | --- | --- |
-| `claude-opus-4-8` / `4-7` / `4-6` / `4-5` | 200K | 64K | ✓ |
-| `claude-sonnet-4-6` / `4-5` | 200K | 64K | ✓ |
-| `claude-haiku-4-5` | 200K | 64K | — |
-| `gpt-5.6-sol` / `terra` / `luna` | 128K | 32K | ✓ |
-| `gpt-5.5` / `5.4` / `5.2` | 128K | 32K | — |
-| `auto` | 200K | 64K | — |
+| 模型                                      | 上下文 | 最大输出 | 思考 |
+| ----------------------------------------- | ------ | -------- | ---- |
+| `claude-opus-4-8` / `4-7` / `4-6` / `4-5` | 200K   | 64K      | ✓    |
+| `claude-sonnet-4-6` / `4-5`               | 200K   | 64K      | ✓    |
+| `claude-haiku-4-5`                        | 200K   | 64K      | —    |
+| `gpt-5.6-sol` / `terra` / `luna`          | 128K   | 32K      | ✓    |
+| `gpt-5.5` / `5.4` / `5.2`                 | 128K   | 32K      | —    |
+| `auto`                                    | 200K   | 64K      | —    |
 
 ## 开发
 
@@ -230,3 +225,4 @@ docs/                        # 逆向协议笔记
 - 代码以 **MIT License** 开源（见 [LICENSE](LICENSE)），**不包含** Postman 任何源代码。
 - 「Postman」名称与火箭图标为 Postman, Inc. 的注册商标，仓库内置图标仅作本地使用；**公开分发时请替换为自有图标**。
 - 上游协议的逆向描述见 `docs/`，仅用于技术说明。
+
