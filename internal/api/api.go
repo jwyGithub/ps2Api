@@ -128,11 +128,13 @@ func (s *Server) auth(w http.ResponseWriter, r *http.Request) bool {
 	if key == "" {
 		return true
 	}
-	if r.Header.Get("Authorization") != "Bearer "+key {
-		jsonError(w, 401, "Invalid API key", "invalid_api_key")
-		return false
+	// 同时接受两种鉴权头：OpenAI 风格 Authorization: Bearer <key>，
+	// 与 Anthropic 风格 x-api-key: <key>（Claude 客户端按此约定发送）。
+	if r.Header.Get("Authorization") == "Bearer "+key || r.Header.Get("x-api-key") == key {
+		return true
 	}
-	return true
+	jsonError(w, 401, "Invalid API key", "invalid_api_key")
+	return false
 }
 
 // apiKey 从 SQLite settings 读取当前生效的客户端 Bearer Key（面板可动态修改，改后立即生效）。
