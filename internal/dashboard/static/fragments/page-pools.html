@@ -7,7 +7,7 @@
           <p class="mt-2 text-[14px]" style="color: var(--fg-2);">统一管理所有上游账号，监控健康度与配额。</p>
         </div>
         <div class="flex items-center gap-2 flex-wrap justify-end">
-          <input id="accountImportFile" type="file" accept="application/json,.json" class="hidden" onchange="importAccountsFile(this)">
+          <input id="accountImportFile" type="file" accept="application/json,.json" multiple class="hidden" onchange="importAccountsFile(this)">
           <button class="btn btn-ghost" onclick="document.getElementById('accountImportFile').click()">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 8 5-5 5 5"/><path d="M5 21h14"/></svg>
             导入

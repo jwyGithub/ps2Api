@@ -309,6 +309,49 @@ func isAnthropicToolResult(msg ChatMessage) bool {
 	return false
 }
 
+// UnsupportedToolResult returns the tool name when the caller reports that it
+// cannot execute a custom tool. Replaying this history only makes the model
+// emit the same tool call again, so the API layer can stop the loop early.
+func UnsupportedToolResult(messages []ChatMessage) (string, bool) {
+	for _, msg := range messages {
+		if msg.Role == "tool" {
+			if name := unsupportedToolName(ExtractText(msg.Content)); name != "" {
+				return name, true
+			}
+			continue
+		}
+		if !isAnthropicToolResult(msg) {
+			continue
+		}
+		var blocks []map[string]interface{}
+		if json.Unmarshal(msg.Content, &blocks) != nil {
+			continue
+		}
+		for _, block := range blocks {
+			if block["type"] != "tool_result" {
+				continue
+			}
+			if name := unsupportedToolName(toolResultText(block["content"])); name != "" {
+				return name, true
+			}
+		}
+	}
+	return "", false
+}
+
+func unsupportedToolName(content string) string {
+	const marker = "unsupported custom tool call:"
+	idx := strings.Index(strings.ToLower(content), marker)
+	if idx < 0 {
+		return ""
+	}
+	name := strings.TrimSpace(content[idx+len(marker):])
+	if fields := strings.Fields(name); len(fields) > 0 {
+		return strings.Trim(fields[0], "`\"'")
+	}
+	return "unknown"
+}
+
 // ---------- 请求构造 ----------
 
 func (p *Provider) buildThirdPartyTools(tools []interface{}) map[string]interface{} {

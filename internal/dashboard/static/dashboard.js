@@ -565,14 +565,24 @@
     }).then(function (content) { download('account.json', content); toast('账号已导出'); }).catch(function (e) { toast(e.message); });
   };
   window.importAccountsFile = function (input) {
-    var file = input.files && input.files[0];
-    if (!file) return;
-    file.text().then(function (content) {
-      return api('/api/accounts/import', { method: 'POST', body: content });
-    }).then(function (d) {
-      toast('已导入 ' + d.imported + ' 个账号，请点击“刷新额度”获取官方快照');
+    var files = input.files ? Array.prototype.slice.call(input.files) : [];
+    if (!files.length) return;
+    var imported = 0, failed = [];
+    // ponytail: 逐个文件顺序导入，每个文件都是一份 account.json；单个失败不影响其余文件。
+    var chain = files.reduce(function (p, file) {
+      return p.then(function () {
+        return file.text().then(function (content) {
+          return api('/api/accounts/import', { method: 'POST', body: content });
+        }).then(function (d) { imported += d.imported; }).catch(function (e) {
+          failed.push(file.name + ': ' + e.message);
+        });
+      });
+    }, Promise.resolve());
+    chain.then(function () {
+      if (imported) toast('已导入 ' + imported + ' 个账号，请点击“刷新额度”获取官方快照');
+      if (failed.length) toast('部分文件导入失败：' + failed.join('；'));
       return loadAll();
-    }).catch(function (e) { toast(e.message); }).finally(function () { input.value = ''; });
+    }).finally(function () { input.value = ''; });
   };
   window.submitAccount = function () {
     var f=document.getElementById('drawer');

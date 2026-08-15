@@ -165,6 +165,11 @@ func (s *Server) openAI(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 400, "model and messages are required", "invalid_request")
 		return
 	}
+	if name, ok := provider.UnsupportedToolResult(req.Messages); ok {
+		provider.Trace(r.Context(), "client.tool_loop_blocked", map[string]interface{}{"tool": name, "reason": "unsupported custom tool call"})
+		jsonError(w, 400, fmt.Sprintf("tool %q was not executed by the client; register a handler for this tool before retrying", name), "tool_execution_error")
+		return
+	}
 	req.Endpoint = "openai"
 	if req.Stream {
 		s.streamOpenAI(w, r, &req)
@@ -266,6 +271,11 @@ func (s *Server) anthropic(w http.ResponseWriter, r *http.Request) {
 	}
 	req := anthropicToOpenAI(ar)
 	req.Endpoint = "anthropic"
+	if name, ok := provider.UnsupportedToolResult(req.Messages); ok {
+		provider.Trace(r.Context(), "client.tool_loop_blocked", map[string]interface{}{"tool": name, "reason": "unsupported custom tool call"})
+		jsonError(w, 400, fmt.Sprintf("tool %q was not executed by the client; register a handler for this tool before retrying", name), "tool_execution_error")
+		return
+	}
 	if ar.Stream {
 		req.Stream = true
 		s.streamAnthropic(w, r, &req, ar)
