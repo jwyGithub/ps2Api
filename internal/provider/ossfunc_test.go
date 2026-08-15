@@ -2,7 +2,9 @@ package provider
 
 import (
 	"encoding/json"
+	"net/http"
 	"testing"
+	"time"
 )
 
 func TestToolCallOSSShape(t *testing.T) {
@@ -27,6 +29,21 @@ func TestToolCallOSSShape(t *testing.T) {
 	}
 	if !json.Valid([]byte(args)) {
 		t.Fatalf("arguments must be valid JSON: %q", args)
+	}
+}
+
+func TestUsageAndRateLimitMetadata(t *testing.T) {
+	r := NewStreamReader()
+	r.Feed(`data: {"eventType":"usage","data":{"userType":"FREE_USER","usageState":"AVAILABLE","limit":50000,"usage":28713,"overage":0,"spillage":2,"allowOverage":false,"warningThresholds":[{"value":50,"unit":"Percentage"}],"usageCycle":{"start":"2026-08-11T23:22:55Z","end":"2026-09-11T23:22:55Z"},"isTeamPooled":true}}`)
+	if r.Usage == nil || r.Usage.Spillage != 2 || r.Usage.UsageCycle == nil || r.Usage.UsageCycle.End.Format(time.RFC3339) != "2026-09-11T23:22:55Z" || !r.Usage.IsTeamPooled {
+		t.Fatalf("usage metadata = %+v", r.Usage)
+	}
+
+	now := time.Date(2026, 8, 15, 11, 10, 58, 0, time.UTC)
+	headers := http.Header{"X-Ratelimit-Limit": {"30"}, "X-Ratelimit-Remaining": {"29"}, "X-Ratelimit-Reset": {"1786792317000"}, "Ratelimit-Policy": {"30;w=60"}}
+	rate := parseRateLimit(headers, now)
+	if rate == nil || rate.Limit != 30 || rate.Remaining != 29 || rate.WindowSeconds != 60 || rate.ResetAt == nil || rate.ResetAt.UnixMilli() != 1786792317000 {
+		t.Fatalf("rate limit metadata = %+v", rate)
 	}
 }
 
@@ -63,7 +80,7 @@ func TestToolCallChunkWithoutRepeatedIDUsesPreviousCall(t *testing.T) {
 
 func TestToolCallChunkStreamShape(t *testing.T) {
 	r := NewStreamReader()
-	first := `data: {"eventType":"toolCallChunk","data":{"toolCalls":[{"id":"call_1","function":{"name":"get_weather","arguments":{"city":"Tokyo"}}}]}}`
+	first := `data: {"eventType":"toolCallChunk","data":{"toolCalls":[{"id":"call_1","toolCallGroupId":"group_1","function":{"name":"get_weather","arguments":{"city":"Tokyo"}}}]}}`
 	deltas := r.Feed(first)
 	if len(deltas) != 1 || len(deltas[0].ToolCalls) != 1 {
 		t.Fatalf("first chunk deltas: %+v (sawToolCall=%v)", deltas, r.sawToolCall)
@@ -71,6 +88,9 @@ func TestToolCallChunkStreamShape(t *testing.T) {
 	firstDtc := deltas[0].ToolCalls[0]
 	if firstDtc.Index != 0 || firstDtc.ID != "call_1" || firstDtc.Type != "function" {
 		t.Fatalf("first chunk must carry id/type: %+v", firstDtc)
+	}
+	if firstDtc.GroupID != "group_1" {
+		t.Fatalf("tool call group = %q", firstDtc.GroupID)
 	}
 	if firstDtc.Function == nil || firstDtc.Function.Name != "get_weather" {
 		t.Fatalf("first chunk must carry name: %+v", firstDtc.Function)

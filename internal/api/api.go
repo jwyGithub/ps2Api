@@ -623,8 +623,8 @@ func (s *Server) importAccounts(w http.ResponseWriter, r *http.Request) {
 	jsonWrite(w, 200, map[string]interface{}{"success": true, "imported": len(input.Accounts)})
 }
 
-// refreshQuota 对从未采集过额度的账号发起轻量探测调用并写库，
-// 供额度管理页「刷新额度」按钮调用；已采集过额度的账号自动跳过。
+// refreshQuota 对所有启用账号发起轻量探测调用并写库，
+// 供额度管理页「刷新额度」按钮调用；已采集过的账号也会重新核实。
 func (s *Server) refreshQuota(w http.ResponseWriter, r *http.Request) {
 	if !s.auth(w, r) {
 		return

@@ -13,7 +13,7 @@ const ProbeTimeout = 60 * time.Second
 
 // ProbeQuota 向 Postman 发起一次最小探测请求（query="ping"，haiku 模型），
 // 从流里取 usage 事件拉取该账号真实额度（limit/usage/overage/userType）。
-// 探测会真实消耗极少量额度，仅用于从未采集过额度的账号；失败时 Result 里
+// 探测会真实消耗极少量额度，可用于新导入账号的首次采集或存量账号的复核；失败时 Result 里
 // 会携带 Error/AuthFailed/QuotaExhausted 等状态，由调用方决定如何处理。
 // 注意：探测不经过 Router.Chat，不写 request_logs、不改变号池状态。
 func (p *Provider) ProbeQuota(ctx context.Context, acc *store.Account) *Result {

@@ -3,6 +3,7 @@ package provider
 import (
 	"encoding/json"
 	"strings"
+	"time"
 )
 
 // Delta 是从 Postman SSE 流解析出来的增量，直接对应 OpenAI chunk 的 delta 结构。
@@ -18,6 +19,7 @@ type DeltaToolCall struct {
 	Index    int    `json:"index"`
 	ID       string `json:"id,omitempty"`
 	Type     string `json:"type,omitempty"`
+	GroupID  string `json:"-"`
 	Function *struct {
 		Name      string `json:"name,omitempty"`
 		Arguments string `json:"arguments,omitempty"`
@@ -25,11 +27,33 @@ type DeltaToolCall struct {
 }
 
 type Usage struct {
-	Limit      float64 `json:"limit"`
-	Usage      float64 `json:"usage"`
-	Overage    float64 `json:"overage"`
-	UserType   string  `json:"userType"`
-	UsageState string  `json:"usageState"`
+	Limit             float64          `json:"limit"`
+	Usage             float64          `json:"usage"`
+	Overage           float64          `json:"overage"`
+	Spillage          float64          `json:"spillage"`
+	UserType          string           `json:"userType"`
+	UsageState        string           `json:"usageState"`
+	AllowOverage      bool             `json:"allowOverage"`
+	WarningThresholds []UsageThreshold `json:"warningThresholds"`
+	UsageCycle        *UsageCycle      `json:"usageCycle"`
+	IsTeamPooled      bool             `json:"isTeamPooled"`
+}
+
+type UsageThreshold struct {
+	Value float64 `json:"value"`
+	Unit  string  `json:"unit"`
+}
+
+type UsageCycle struct {
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`
+}
+
+type RateLimit struct {
+	Limit         int        `json:"limit"`
+	Remaining     int        `json:"remaining"`
+	WindowSeconds int        `json:"windowSeconds"`
+	ResetAt       *time.Time `json:"resetAt,omitempty"`
 }
 
 // StreamReader 逐行解析 Postman agent-mode SSE 流。
@@ -42,11 +66,12 @@ type StreamReader struct {
 	ConversationID string
 	sawToolCall    bool
 	toolCallIndex  map[string]int
+	toolCallGroup  map[string]string
 	lastToolID     string
 }
 
 func NewStreamReader() *StreamReader {
-	return &StreamReader{toolCallIndex: map[string]int{}}
+	return &StreamReader{toolCallIndex: map[string]int{}, toolCallGroup: map[string]string{}}
 }
 
 type sseEvent struct {
@@ -166,6 +191,7 @@ func (r *StreamReader) handleToolCallChunk(data json.RawMessage) []Delta {
 	var d struct {
 		ToolCalls []struct {
 			ID       string `json:"id"`
+			GroupID  string `json:"toolCallGroupId"`
 			Function *struct {
 				Name      string          `json:"name"`
 				Arguments json.RawMessage `json:"arguments"`
@@ -187,13 +213,16 @@ func (r *StreamReader) handleToolCallChunk(data json.RawMessage) []Delta {
 			continue
 		}
 		r.lastToolID = id
+		if tc.GroupID != "" {
+			r.toolCallGroup[id] = tc.GroupID
+		}
 		r.sawToolCall = true
 		idx, seen := r.toolCallIndex[id]
 		if !seen {
 			idx = len(r.toolCallIndex)
 			r.toolCallIndex[id] = idx
 		}
-		dtc := DeltaToolCall{Index: idx}
+		dtc := DeltaToolCall{Index: idx, GroupID: r.toolCallGroup[id]}
 		if !seen {
 			dtc.ID = id
 			dtc.Type = "function"

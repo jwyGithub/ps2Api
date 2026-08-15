@@ -175,19 +175,33 @@ func (r *Router) logAttempt(acc *store.Account, model string, res *provider.Resu
 	_ = r.Store.LogRequest(l)
 }
 
-// persistQuota 把聊天流 usage 事件里的真实额度（limit/usage/overage）写入账号，
-// 号池页的「余量/总量」由此而来（此前 DB 恒为 0）。
+// persistQuota 把聊天流 usage 与响应头限流快照写入账号。
 func (r *Router) persistQuota(acc *store.Account, res *provider.Result) {
-	if res == nil || res.Usage == nil || res.Usage.Limit <= 0 {
+	if res == nil {
 		return
 	}
-	remaining := res.Usage.Limit - res.Usage.Usage - res.Usage.Overage
-	if remaining < 0 || res.QuotaExhausted {
-		remaining = 0
+	if usage := res.Usage; usage != nil && usage.Limit > 0 {
+		remaining := usage.Limit - usage.Usage - usage.Overage
+		if remaining < 0 || res.QuotaExhausted {
+			remaining = 0
+		}
+		thresholds := make([]store.QuotaThreshold, len(usage.WarningThresholds))
+		for i, threshold := range usage.WarningThresholds {
+			thresholds[i] = store.QuotaThreshold{Value: threshold.Value, Unit: threshold.Unit}
+		}
+		var cycleStart, cycleEnd *time.Time
+		if usage.UsageCycle != nil {
+			cycleStart, cycleEnd = &usage.UsageCycle.Start, &usage.UsageCycle.End
+		}
+		_ = r.Store.SetQuotaSnapshot(acc.ID, store.QuotaSnapshot{
+			Plan: usage.UserType, State: usage.UsageState, Limit: usage.Limit, Used: usage.Usage,
+			Remaining: remaining, Overage: usage.Overage, Spillage: usage.Spillage,
+			AllowOverage: usage.AllowOverage, TeamPooled: usage.IsTeamPooled,
+			WarningThresholds: thresholds, CycleStart: cycleStart, CycleEnd: cycleEnd,
+		})
 	}
-	_ = r.Store.SetQuota(acc.ID, res.Usage.Limit, remaining)
-	if res.Usage.UserType != "" {
-		_ = r.Store.SetPlan(acc.ID, res.Usage.UserType)
+	if rate := res.RateLimit; rate != nil {
+		_ = r.Store.SetRateLimit(acc.ID, rate.Limit, rate.Remaining, rate.WindowSeconds, rate.ResetAt)
 	}
 }
 
@@ -232,14 +246,14 @@ func (r *Router) ProbeQuotas(ctx context.Context) []ProbeResult {
 			defer func() { <-sem }()
 			pr := ProbeResult{AccountID: acc.ID, Email: acc.Email}
 			res := r.Provider.ProbeQuota(ctx, acc)
+			// 限流头可能在没有 usage 对象的响应中返回，也要先落库。
+			if res != nil {
+				r.persistQuota(acc, res)
+			}
 			if res != nil && res.Usage != nil && res.Usage.Limit > 0 {
 				remaining := res.Usage.Limit - res.Usage.Usage - res.Usage.Overage
 				if remaining < 0 || res.QuotaExhausted {
 					remaining = 0
-				}
-				_ = r.Store.SetQuota(acc.ID, res.Usage.Limit, remaining)
-				if res.Usage.UserType != "" {
-					_ = r.Store.SetPlan(acc.ID, res.Usage.UserType)
 				}
 				pr.OK = true
 				pr.Limit = res.Usage.Limit

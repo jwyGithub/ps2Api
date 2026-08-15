@@ -48,6 +48,43 @@
         </div>
       </div>
 
+      <div class="card p-6 mb-6" id="quotaForecastPanel">
+        <div class="flex items-start justify-between gap-4 flex-wrap mb-5">
+          <div>
+            <div class="text-[11px] uppercase tracking-wider mb-2" style="color: var(--muted);">Month-end capacity</div>
+            <h3 class="font-display text-[22px] font-medium">月底额度预测</h3>
+            <p class="text-[12px] mt-1" style="color: var(--muted);">按官方额度周期折算日均消耗，估算本月底是否需要补号。</p>
+          </div>
+          <span class="tag tag-gray" id="quotaForecastStatus">数据不足</span>
+        </div>
+        <div class="grid grid-cols-2 lg:grid-cols-5 gap-4">
+          <div>
+            <div class="text-[11px]" style="color: var(--muted);">日均消耗</div>
+            <div class="font-display text-[24px] font-medium mt-1" id="quotaForecastDaily">-</div>
+          </div>
+          <div>
+            <div class="text-[11px]" style="color: var(--muted);">当前剩余总量</div>
+            <div class="font-display text-[24px] font-medium mt-1" id="quotaForecastRemaining">-</div>
+          </div>
+          <div>
+            <div class="text-[11px]" style="color: var(--muted);">月底预计剩余</div>
+            <div class="font-display text-[24px] font-medium mt-1" id="quotaForecastAtEnd">-</div>
+          </div>
+          <div>
+            <div class="text-[11px]" style="color: var(--muted);">预计额度缺口</div>
+            <div class="font-display text-[24px] font-medium mt-1" id="quotaForecastShortfall">-</div>
+          </div>
+          <div>
+            <div class="text-[11px]" style="color: var(--muted);">建议补号</div>
+            <div class="font-display text-[24px] font-medium mt-1" id="quotaForecastAccounts">-</div>
+          </div>
+        </div>
+        <div class="flex items-center justify-between gap-4 flex-wrap mt-5 pt-4" style="border-top:1px solid var(--line);">
+          <span class="text-[12px]" style="color: var(--fg-2);" id="quotaForecastDetail">额度刷新后开始估算。</span>
+          <span class="text-[11px] font-mono" style="color: var(--muted);" id="quotaForecastMeta">-</span>
+        </div>
+      </div>
+
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
         <div class="card p-6">
           <h3 class="font-display text-[20px] font-medium mb-1">每小时调用量</h3>

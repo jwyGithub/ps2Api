@@ -250,6 +250,121 @@ func TestToolResultReplaysCompleteHistoryWithoutPendingConversation(t *testing.T
 	}
 }
 
+func TestToolResultWithTrailingTokenMetadataReplaysHistory(t *testing.T) {
+	p := New()
+	first := []ChatMessage{mustMsg(t, "user", "read file")}
+	res := &Result{ConversationID: "conv-anthropic-tool"}
+	res.ToolCalls = []ToolCall{{ID: "toolu_1", Type: "function", Function: struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}{Name: "Read", Arguments: `{"file_path":"/tmp/a"}`}}}
+	p.RememberConversation(1, first, res)
+	followup := []ChatMessage{
+		first[0],
+		{Role: "assistant", ToolCalls: rawJSON(t, `[{"id":"toolu_1","type":"function","function":{"name":"Read","arguments":"{\"file_path\":\"/tmp/a\"}"}}]`)},
+		{Role: "user", Content: rawJSON(t, `[{"type":"tool_result","tool_use_id":"toolu_1","content":"file contents"}]`)},
+		{Role: "system", Content: rawText(t, "<total_tokens>14999302 tokens left</total_tokens>")},
+	}
+	body := p.buildBody(&ChatRequest{Messages: followup}, &Tokens{AccessToken: "x", UserID: "u", WorkspaceID: "w"}, "test", 1)
+	input := body["input"].(map[string]interface{})
+	if input["conversationId"] != nil {
+		t.Fatalf("tool result followed by token metadata must not reuse pending conversation: %#v", input["conversationId"])
+	}
+	query := input["query"].(string)
+	if !strings.Contains(query, "file contents") || strings.Contains(query, "<total_tokens>") {
+		t.Fatalf("bad tool result query: %q", query)
+	}
+}
+
+func TestBuildBodyDoesNotInjectTextToolProtocol(t *testing.T) {
+	p := New()
+	body := p.buildBody(&ChatRequest{
+		Messages: []ChatMessage{mustMsg(t, "user", "read file")},
+		Tools: []interface{}{map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "Read",
+				"description": "Read a file",
+				"parameters":  map[string]interface{}{"type": "object"},
+			},
+		}},
+	}, &Tokens{AccessToken: "x", UserID: "u", WorkspaceID: "w"}, "test", 1)
+	input := body["input"].(map[string]interface{})
+	if strings.Contains(input["query"].(string), "<tool_call>") {
+		t.Fatalf("request must rely on registered native tools, query=%q", input["query"])
+	}
+	thirdParty := body["clientTools"].(map[string]interface{})["thirdParty"].(map[string]interface{})
+	proxyTools := thirdParty["proxy-tools"].(map[string]interface{})["tools"].([]map[string]interface{})
+	if len(proxyTools) != 1 || proxyTools[0]["name"] != "Read" {
+		t.Fatalf("native tool registration missing: %#v", proxyTools)
+	}
+}
+
+func TestBuildBodyUsesNativeToolResponse(t *testing.T) {
+	p := New()
+	first := []ChatMessage{mustMsg(t, "user", "read file")}
+	res := &Result{ConversationID: "conv-native-tool"}
+	res.ToolCalls = []ToolCall{{ID: "toolu_1", Type: "function", GroupID: "group_1", Function: struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}{Name: "Read", Arguments: `{"file_path":"/tmp/a"}`}}}
+	p.rememberToolGroups(1, res.ToolCalls)
+	p.RememberConversation(1, first, res)
+	followup := []ChatMessage{
+		first[0],
+		{Role: "assistant", ToolCalls: rawJSON(t, `[{"id":"toolu_1","type":"function","function":{"name":"Read","arguments":"{\"file_path\":\"/tmp/a\"}"}}]`)},
+		{Role: "tool", ToolCallID: "toolu_1", Content: rawText(t, `{"status":"SUCCESS","message":"file contents"}`)},
+	}
+	body := p.buildBody(&ChatRequest{Messages: followup}, &Tokens{AccessToken: "x", UserID: "u", WorkspaceID: "w"}, "test", 1)
+	input := body["input"].(map[string]interface{})
+	if input["chatType"] != "TOOL_RESPONSE" || input["conversationId"] != "conv-native-tool" || input["toolCallGroupId"] != "group_1" {
+		t.Fatalf("native tool response input = %#v", input)
+	}
+	responses := input["toolResponses"].([]map[string]interface{})
+	if len(responses) != 1 || responses[0]["toolCallId"] != "toolu_1" || responses[0]["toolResponseStatus"] != "SUCCESS" {
+		t.Fatalf("native tool responses = %#v", responses)
+	}
+	if _, exists := input["seedingMessages"]; exists {
+		t.Fatalf("native tool response must not replay history: %#v", input)
+	}
+
+	followup[2].Content = rawText(t, `{"status":"FAILED","message":"command rejected"}`)
+	body = p.buildBody(&ChatRequest{Messages: followup}, &Tokens{AccessToken: "x", UserID: "u", WorkspaceID: "w"}, "test", 1)
+	responses = body["input"].(map[string]interface{})["toolResponses"].([]map[string]interface{})
+	if responses[0]["toolResponseStatus"] != "FAILED" || responses[0]["toolResponseFailureType"] != "UNHANDLED_ERROR" {
+		t.Fatalf("native failed tool response = %#v", responses[0])
+	}
+}
+
+func TestBuildBodyUsesNativeAnthropicToolResponseGroup(t *testing.T) {
+	p := New()
+	first := []ChatMessage{mustMsg(t, "user", "inspect files")}
+	calls := []ToolCall{
+		{ID: "toolu_1", Type: "function", GroupID: "group_1", Function: struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		}{Name: "Read", Arguments: `{}`}},
+		{ID: "toolu_2", Type: "function", GroupID: "group_1", Function: struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		}{Name: "Read", Arguments: `{}`}},
+	}
+	p.rememberToolGroups(1, calls)
+	p.RememberConversation(1, first, &Result{ConversationID: "conv-anthropic-native", ToolCalls: calls})
+	followup := []ChatMessage{
+		first[0],
+		{Role: "assistant", ToolCalls: rawJSON(t, `[{"id":"toolu_1","type":"function","function":{"name":"Read","arguments":"{}"}},{"id":"toolu_2","type":"function","function":{"name":"Read","arguments":"{}"}}]`)},
+		{Role: "user", Content: rawJSON(t, `[{"type":"tool_result","tool_use_id":"toolu_1","content":"one"},{"type":"tool_result","tool_use_id":"toolu_2","content":"two"}]`)},
+		{Role: "system", Content: rawText(t, "<total_tokens>14999302 tokens left</total_tokens>")},
+	}
+	body := p.buildBody(&ChatRequest{Messages: followup}, &Tokens{AccessToken: "x", UserID: "u", WorkspaceID: "w"}, "test", 1)
+	input := body["input"].(map[string]interface{})
+	responses := input["toolResponses"].([]map[string]interface{})
+	if input["chatType"] != "TOOL_RESPONSE" || len(responses) != 2 || responses[0]["toolCallId"] != "toolu_1" || responses[1]["toolCallId"] != "toolu_2" {
+		t.Fatalf("anthropic native tool response = %#v", input)
+	}
+}
+
 func TestStickyAccountAfterReset(t *testing.T) {
 	p := New()
 	msgs := []ChatMessage{mustMsg(t, "user", "hi")}

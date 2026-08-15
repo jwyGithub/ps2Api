@@ -65,9 +65,10 @@ type ChatRequest struct {
 }
 
 type Provider struct {
-	Client  *http.Client
-	convMap sync.Map // accountID:fingerprint -> conversationID
-	convOwn sync.Map // fingerprint -> accountID(int64) 会话归属账号（粘性路由用）
+	Client     *http.Client
+	convMap    sync.Map // accountID:fingerprint -> conversationID
+	convOwn    sync.Map // fingerprint -> accountID(int64) 会话归属账号（粘性路由用）
+	toolGroups sync.Map // accountID:toolCallID -> Postman toolCallGroupId
 }
 
 func New() *Provider {
@@ -341,11 +342,30 @@ type splitResult struct {
 }
 
 func toolTail(messages []ChatMessage) bool {
-	if len(messages) == 0 {
+	return toolTailIndex(messages) >= 0
+}
+
+// toolTailIndex finds the last tool result while ignoring token accounting
+// system messages appended by Anthropic-compatible clients.
+func toolTailIndex(messages []ChatMessage) int {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if isTrailingTokenMetadata(messages[i]) {
+			continue
+		}
+		if messages[i].Role == "tool" || isAnthropicToolResult(messages[i]) {
+			return i
+		}
+		return -1
+	}
+	return -1
+}
+
+func isTrailingTokenMetadata(msg ChatMessage) bool {
+	if msg.Role != "system" {
 		return false
 	}
-	last := messages[len(messages)-1]
-	return last.Role == "tool" || isAnthropicToolResult(last)
+	text := ExtractText(msg.Content)
+	return strings.Contains(text, "<total_tokens>")
 }
 
 func formatAssistantToolCalls(raw json.RawMessage) string {
@@ -361,8 +381,8 @@ func formatAssistantToolCalls(raw json.RawMessage) string {
 }
 
 func (p *Provider) splitMessages(messages []ChatMessage, convID string) splitResult {
-	lastMsg := messages[len(messages)-1]
-	isToolTail := lastMsg.Role == "tool" || isAnthropicToolResult(lastMsg)
+	toolIdx := toolTailIndex(messages)
+	isToolTail := toolIdx >= 0
 	hasConv := convID != ""
 
 	var query string
@@ -371,7 +391,7 @@ func (p *Provider) splitMessages(messages []ChatMessage, convID string) splitRes
 
 	if isToolTail {
 		var parts []string
-		for i := len(messages) - 1; i >= 0; i-- {
+		for i := toolIdx; i >= 0; i-- {
 			msg := messages[i]
 			if msg.Role == "tool" {
 				skipFrom = i
@@ -482,18 +502,111 @@ var desktopExcludedTools = []string{
 	"updateWorkspaceDoc", "deleteWorkspaceDoc", "askUser",
 }
 
+type nativeToolResponse struct {
+	conversationID string
+	groupID        string
+	responses      []map[string]interface{}
+}
+
+func (p *Provider) nativeToolResponse(accountID int64, messages []ChatMessage) (nativeToolResponse, bool) {
+	toolIdx := toolTailIndex(messages)
+	if toolIdx < 0 {
+		return nativeToolResponse{}, false
+	}
+	response := nativeToolResponse{conversationID: p.LookupConversation(accountID, messages)}
+	if response.conversationID == "" {
+		return nativeToolResponse{}, false
+	}
+	add := func(toolCallID, content string, failed bool) bool {
+		groupID := p.lookupToolGroup(accountID, toolCallID)
+		if groupID == "" {
+			return false
+		}
+		if response.groupID == "" {
+			response.groupID = groupID
+		} else if response.groupID != groupID {
+			return false
+		}
+		status := "SUCCESS"
+		if failed {
+			status = "FAILED"
+		}
+		payload := strings.TrimSpace(content)
+		if !json.Valid([]byte(payload)) {
+			encoded, _ := json.Marshal(map[string]string{"status": status, "message": content})
+			payload = string(encoded)
+		}
+		summary := content
+		if len(summary) > 512 {
+			summary = summary[:512] + "..."
+		}
+		entry := map[string]interface{}{
+			"toolCallId":          toolCallID,
+			"content":             payload,
+			"toolResponseSummary": summary,
+			"toolResponseStatus":  status,
+		}
+		if failed {
+			entry["toolResponseFailureType"] = "UNHANDLED_ERROR"
+		}
+		response.responses = append([]map[string]interface{}{entry}, response.responses...)
+		return true
+	}
+	for i := toolIdx; i >= 0; i-- {
+		msg := messages[i]
+		if msg.Role == "tool" {
+			content := ExtractText(msg.Content)
+			failed := strings.Contains(content, "<tool_use_error>")
+			if !failed {
+				var result struct {
+					Status  string `json:"status"`
+					IsError bool   `json:"is_error"`
+				}
+				if json.Unmarshal([]byte(content), &result) == nil {
+					failed = result.IsError || strings.EqualFold(result.Status, "FAILED") || strings.EqualFold(result.Status, "ERROR")
+				}
+			}
+			if !add(msg.ToolCallID, content, failed) {
+				return nativeToolResponse{}, false
+			}
+			continue
+		}
+		if !isAnthropicToolResult(msg) {
+			break
+		}
+		var blocks []map[string]interface{}
+		if json.Unmarshal(msg.Content, &blocks) != nil {
+			return nativeToolResponse{}, false
+		}
+		for i := len(blocks) - 1; i >= 0; i-- {
+			block := blocks[i]
+			if block["type"] != "tool_result" {
+				continue
+			}
+			toolCallID, _ := block["tool_use_id"].(string)
+			failed, _ := block["is_error"].(bool)
+			if toolCallID == "" || !add(toolCallID, toolResultText(block["content"]), failed) {
+				return nativeToolResponse{}, false
+			}
+		}
+	}
+	return response, len(response.responses) > 0 && response.groupID != ""
+}
+
 func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel string, accountID int64) map[string]interface{} {
+	nativeResponse, useNativeResponse := p.nativeToolResponse(accountID, req.Messages)
 	convID := p.LookupConversation(accountID, req.Messages)
-	// Postman keeps native tool calls pending inside a conversation. External
-	// tool results cannot be sent as USER_QUERY without being interpreted as an
-	// interruption, so replay the complete tool call/result history instead.
-	if toolTail(req.Messages) {
+	// Native tool responses must keep the pending Postman conversation. If the
+	// group ID is unavailable (for example after a process restart), replay the
+	// history instead of sending a tool result as USER_QUERY.
+	if useNativeResponse {
+		convID = nativeResponse.conversationID
+	} else if toolTail(req.Messages) {
 		convID = ""
 	}
 	split := p.splitMessages(req.Messages, convID)
 	tools, toolInstruction := selectedTools(req.Tools, req.ToolChoice)
 	if len(tools) > 0 {
-		split.Query = injectToolProtocol(split.Query, tools)
 		if toolInstruction != "" {
 			split.Query = toolInstruction + "\n\n" + split.Query
 		}
@@ -576,6 +689,16 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 		"thinkingLevel":                  "medium",
 	}
 	body["devModeOptions"] = devMode
+	if useNativeResponse {
+		input["chatType"] = "TOOL_RESPONSE"
+		input["query"] = ""
+		input["conversationId"] = nativeResponse.conversationID
+		input["toolCallGroupId"] = nativeResponse.groupID
+		input["toolResponses"] = nativeResponse.responses
+		delete(input, "toolResponse")
+		delete(input, "agent")
+		delete(input, "seedingMessages")
+	}
 
 	return body
 }
@@ -616,6 +739,7 @@ type Result struct {
 	ActualModel      string
 	ConversationID   string
 	Usage            *Usage
+	RateLimit        *RateLimit
 	PromptTokens     int
 	CompletionTokens int
 	Error            string
@@ -624,13 +748,60 @@ type Result struct {
 	AuthFailed       bool
 }
 
+func parseRateLimit(headers http.Header, now time.Time) *RateLimit {
+	limit, _ := strconv.Atoi(strings.TrimSpace(headers.Get("X-RateLimit-Limit")))
+	remaining, _ := strconv.Atoi(strings.TrimSpace(headers.Get("X-RateLimit-Remaining")))
+	rate := &RateLimit{Limit: limit, Remaining: remaining}
+	for _, part := range strings.Split(headers.Get("RateLimit-Policy"), ";") {
+		if value, ok := strings.CutPrefix(strings.TrimSpace(part), "w="); ok {
+			rate.WindowSeconds, _ = strconv.Atoi(value)
+		}
+	}
+	if value, err := strconv.ParseInt(strings.TrimSpace(headers.Get("X-RateLimit-Reset")), 10, 64); err == nil && value > 0 {
+		var reset time.Time
+		switch {
+		case value >= 1_000_000_000_000:
+			reset = time.UnixMilli(value)
+		case value >= 1_000_000_000:
+			reset = time.Unix(value, 0)
+		default:
+			reset = now.Add(time.Duration(value) * time.Second)
+		}
+		rate.ResetAt = &reset
+	}
+	if rate.Limit == 0 && rate.Remaining == 0 && rate.WindowSeconds == 0 && rate.ResetAt == nil {
+		return nil
+	}
+	return rate
+}
+
 type ToolCall struct {
 	ID       string `json:"id"`
 	Type     string `json:"type"`
+	GroupID  string `json:"-"`
 	Function struct {
 		Name      string `json:"name"`
 		Arguments string `json:"arguments"`
 	} `json:"function"`
+}
+
+func toolGroupKey(accountID int64, toolCallID string) string {
+	return strconv.FormatInt(accountID, 10) + ":" + toolCallID
+}
+
+func (p *Provider) rememberToolGroups(accountID int64, calls []ToolCall) {
+	for _, call := range calls {
+		if call.ID != "" && call.GroupID != "" {
+			p.toolGroups.Store(toolGroupKey(accountID, call.ID), call.GroupID)
+		}
+	}
+}
+
+func (p *Provider) lookupToolGroup(accountID int64, toolCallID string) string {
+	if value, ok := p.toolGroups.Load(toolGroupKey(accountID, toolCallID)); ok {
+		return value.(string)
+	}
+	return ""
 }
 
 // EmitFunc 流式增量回调。
@@ -665,6 +836,9 @@ func (p *Provider) Chat(ctx context.Context, acc *store.Account, req *ChatReques
 				toolAcc[tc.Index] = entry
 			}
 			if entry != nil && tc.Function != nil {
+				if tc.GroupID != "" {
+					entry.GroupID = tc.GroupID
+				}
 				if tc.Function.Name != "" {
 					entry.Function.Name = tc.Function.Name
 				}
@@ -680,6 +854,7 @@ func (p *Provider) Chat(ctx context.Context, acc *store.Account, req *ChatReques
 	res.Content = content.String()
 	res.ReasoningContent = reasoning.String()
 	res.ToolCalls = collectToolCalls(toolAcc)
+	p.rememberToolGroups(acc.ID, res.ToolCalls)
 	res.Content = applySimulatedTools(res, res.Content, tools)
 	res.PromptTokens = EstimateMessagesTokens(req.Messages)
 	res.CompletionTokens = EstimateTokens(res.Content + res.ReasoningContent)
@@ -785,6 +960,9 @@ func (p *Provider) StreamChat(ctx context.Context, acc *store.Account, req *Chat
 					toolAcc[tc.Index] = entry
 				}
 				if entry != nil && tc.Function != nil {
+					if tc.GroupID != "" {
+						entry.GroupID = tc.GroupID
+					}
 					if tc.Function.Name != "" {
 						entry.Function.Name = tc.Function.Name
 					}
@@ -811,6 +989,7 @@ func (p *Provider) StreamChat(ctx context.Context, acc *store.Account, req *Chat
 	if sawNativeTools {
 		_ = flushText()
 		res.ToolCalls = collectToolCalls(toolAcc)
+		p.rememberToolGroups(acc.ID, res.ToolCalls)
 		for i, tc := range res.ToolCalls {
 			_ = emit(Delta{ToolCalls: []DeltaToolCall{{
 				Index: i,
@@ -900,6 +1079,7 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 	Trace(ctx, "upstream.response.headers", map[string]interface{}{
 		"status": resp.StatusCode, "headers": resp.Header, "account_id": acc.ID,
 	})
+	res.RateLimit = parseRateLimit(resp.Header, time.Now())
 
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
 		res.Error = fmt.Sprintf("Postman auth failed (%d)", resp.StatusCode)

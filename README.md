@@ -171,7 +171,7 @@ Base URL：`http://127.0.0.1:1930`。除面板只读接口外，均需 `Authoriz
 | GET            | `/api/accounts/export`                                 | 导出 `account.json`                                     |
 | POST           | `/api/accounts/import`                                 | 导入 `account.json`                                     |
 | PATCH / DELETE | `/api/accounts/{id}`                                   | 启用 / 停用、删除                                       |
-| POST           | `/api/refresh-quota`                                   | 对未采集额度的账号发起轻量探测并写库                    |
+| POST           | `/api/refresh-quota`                                   | 对所有启用账号发起轻量探测，更新额度周期与限流快照        |
 | GET            | `/api/stats`                                           | 累计请求、成功率、平均延迟、P95、成本、错误率、今日请求 |
 | GET            | `/api/analytics?days=N`                                | 日 / 时序列、模型分布、渠道对比、账号排行、热力图       |
 | GET            | `/api/logs`                                            | 最近请求日志（条数可配）                                |

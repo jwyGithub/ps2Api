@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,21 +12,54 @@ import (
 )
 
 type Account struct {
-	ID             int64      `json:"id"`
-	Email          string     `json:"email"`
-	Password       string     `json:"-"`
-	Status         string     `json:"status"` // active | exhausted | error | pending
-	Enabled        bool       `json:"enabled"`
-	Tokens         string     `json:"-"`      // JSON blob
-	Source         string     `json:"source"` // manual | local | detect-web | browser
-	Plan           string     `json:"plan"`   // 来自 Postman usage.userType
-	QuotaLimit     float64    `json:"quotaLimit"`
-	QuotaRemaining float64    `json:"quotaRemaining"`
-	LastUsedAt     *time.Time `json:"lastUsedAt"`
-	LastLoginAt    *time.Time `json:"lastLoginAt"`
-	ErrorMessage   string     `json:"errorMessage"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	UpdatedAt      time.Time  `json:"updatedAt"`
+	ID                     int64            `json:"id"`
+	Email                  string           `json:"email"`
+	Password               string           `json:"-"`
+	Status                 string           `json:"status"` // active | exhausted | error | pending
+	Enabled                bool             `json:"enabled"`
+	Tokens                 string           `json:"-"`      // JSON blob
+	Source                 string           `json:"source"` // manual | local | detect-web | browser
+	Plan                   string           `json:"plan"`   // 来自 Postman usage.userType
+	QuotaLimit             float64          `json:"quotaLimit"`
+	QuotaUsed              float64          `json:"quotaUsed"`
+	QuotaRemaining         float64          `json:"quotaRemaining"`
+	QuotaOverage           float64          `json:"quotaOverage"`
+	QuotaSpillage          float64          `json:"quotaSpillage"`
+	QuotaState             string           `json:"quotaState"`
+	QuotaAllowOverage      bool             `json:"quotaAllowOverage"`
+	QuotaTeamPooled        bool             `json:"quotaTeamPooled"`
+	QuotaWarningThresholds []QuotaThreshold `json:"quotaWarningThresholds"`
+	QuotaCycleStart        *time.Time       `json:"quotaCycleStart"`
+	QuotaCycleEnd          *time.Time       `json:"quotaCycleEnd"`
+	RateLimit              int              `json:"rateLimit"`
+	RateRemaining          int              `json:"rateRemaining"`
+	RateWindowSeconds      int              `json:"rateWindowSeconds"`
+	RateResetAt            *time.Time       `json:"rateResetAt"`
+	LastUsedAt             *time.Time       `json:"lastUsedAt"`
+	LastLoginAt            *time.Time       `json:"lastLoginAt"`
+	ErrorMessage           string           `json:"errorMessage"`
+	CreatedAt              time.Time        `json:"createdAt"`
+	UpdatedAt              time.Time        `json:"updatedAt"`
+}
+
+type QuotaThreshold struct {
+	Value float64 `json:"value"`
+	Unit  string  `json:"unit"`
+}
+
+type QuotaSnapshot struct {
+	Plan              string
+	State             string
+	Limit             float64
+	Used              float64
+	Remaining         float64
+	Overage           float64
+	Spillage          float64
+	AllowOverage      bool
+	TeamPooled        bool
+	WarningThresholds []QuotaThreshold
+	CycleStart        *time.Time
+	CycleEnd          *time.Time
 }
 
 type Alert struct {
@@ -89,7 +123,20 @@ CREATE TABLE IF NOT EXISTS accounts (
   enabled INTEGER NOT NULL DEFAULT 1,
   tokens TEXT,
   quota_limit REAL DEFAULT 0,
+  quota_used REAL DEFAULT 0,
   quota_remaining REAL DEFAULT 0,
+  quota_overage REAL DEFAULT 0,
+  quota_spillage REAL DEFAULT 0,
+  quota_state TEXT NOT NULL DEFAULT '',
+  quota_allow_overage INTEGER NOT NULL DEFAULT 0,
+  quota_team_pooled INTEGER NOT NULL DEFAULT 0,
+  quota_warning_thresholds TEXT NOT NULL DEFAULT '[]',
+  quota_cycle_start DATETIME,
+  quota_cycle_end DATETIME,
+  rate_limit INTEGER NOT NULL DEFAULT 0,
+  rate_remaining INTEGER NOT NULL DEFAULT 0,
+  rate_window_seconds INTEGER NOT NULL DEFAULT 0,
+  rate_reset_at DATETIME,
   last_used_at DATETIME,
   last_login_at DATETIME,
   error_message TEXT,
@@ -134,12 +181,19 @@ CREATE INDEX IF NOT EXISTS alerts_created_idx ON alerts(created_at);
 	if err != nil {
 		return err
 	}
-	// 兼容旧库：补齐 accounts.source / accounts.plan 列
-	if err := s.ensureColumn("accounts", "source", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
+	accountColumns := []struct{ name, decl string }{
+		{"source", "TEXT NOT NULL DEFAULT ''"}, {"plan", "TEXT NOT NULL DEFAULT ''"},
+		{"quota_used", "REAL DEFAULT 0"}, {"quota_overage", "REAL DEFAULT 0"}, {"quota_spillage", "REAL DEFAULT 0"},
+		{"quota_state", "TEXT NOT NULL DEFAULT ''"}, {"quota_allow_overage", "INTEGER NOT NULL DEFAULT 0"},
+		{"quota_team_pooled", "INTEGER NOT NULL DEFAULT 0"}, {"quota_warning_thresholds", "TEXT NOT NULL DEFAULT '[]'"},
+		{"quota_cycle_start", "DATETIME"}, {"quota_cycle_end", "DATETIME"},
+		{"rate_limit", "INTEGER NOT NULL DEFAULT 0"}, {"rate_remaining", "INTEGER NOT NULL DEFAULT 0"},
+		{"rate_window_seconds", "INTEGER NOT NULL DEFAULT 0"}, {"rate_reset_at", "DATETIME"},
 	}
-	if err := s.ensureColumn("accounts", "plan", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
+	for _, column := range accountColumns {
+		if err := s.ensureColumn("accounts", column.name, column.decl); err != nil {
+			return err
+		}
 	}
 	// 兼容旧库：补齐 request_logs.endpoint（调用来源端点）
 	return s.ensureColumn("request_logs", "endpoint", "TEXT NOT NULL DEFAULT ''")
@@ -174,7 +228,11 @@ func (s *Store) ensureColumn(table, col, decl string) error {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) ListAccounts() ([]*Account, error) {
-	rows, err := s.db.Query(`SELECT id,email,password,status,enabled,tokens,source,plan,quota_limit,quota_remaining,last_used_at,last_login_at,error_message,created_at,updated_at FROM accounts ORDER BY id`)
+	rows, err := s.db.Query(`SELECT id,email,password,status,enabled,tokens,source,plan,
+		quota_limit,quota_used,quota_remaining,quota_overage,quota_spillage,quota_state,
+		quota_allow_overage,quota_team_pooled,quota_warning_thresholds,quota_cycle_start,quota_cycle_end,
+		rate_limit,rate_remaining,rate_window_seconds,rate_reset_at,
+		last_used_at,last_login_at,error_message,created_at,updated_at FROM accounts ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -182,17 +240,36 @@ func (s *Store) ListAccounts() ([]*Account, error) {
 	var out []*Account
 	for rows.Next() {
 		a := &Account{}
-		var enabled int
-		var tokens, source, plan, errmsg sql.NullString
-		var lastUsed, lastLogin sql.NullTime
-		if err := rows.Scan(&a.ID, &a.Email, &a.Password, &a.Status, &enabled, &tokens, &source, &plan, &a.QuotaLimit, &a.QuotaRemaining, &lastUsed, &lastLogin, &errmsg, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		var enabled, allowOverage, teamPooled int
+		var tokens, source, plan, quotaState, thresholds, errmsg sql.NullString
+		var cycleStart, cycleEnd, rateReset, lastUsed, lastLogin sql.NullTime
+		if err := rows.Scan(
+			&a.ID, &a.Email, &a.Password, &a.Status, &enabled, &tokens, &source, &plan,
+			&a.QuotaLimit, &a.QuotaUsed, &a.QuotaRemaining, &a.QuotaOverage, &a.QuotaSpillage, &quotaState,
+			&allowOverage, &teamPooled, &thresholds, &cycleStart, &cycleEnd,
+			&a.RateLimit, &a.RateRemaining, &a.RateWindowSeconds, &rateReset,
+			&lastUsed, &lastLogin, &errmsg, &a.CreatedAt, &a.UpdatedAt,
+		); err != nil {
 			return nil, err
 		}
 		a.Enabled = enabled != 0
+		a.QuotaAllowOverage = allowOverage != 0
+		a.QuotaTeamPooled = teamPooled != 0
 		a.Tokens = tokens.String
 		a.Source = source.String
 		a.Plan = plan.String
+		a.QuotaState = quotaState.String
+		_ = json.Unmarshal([]byte(thresholds.String), &a.QuotaWarningThresholds)
 		a.ErrorMessage = errmsg.String
+		if cycleStart.Valid {
+			a.QuotaCycleStart = &cycleStart.Time
+		}
+		if cycleEnd.Valid {
+			a.QuotaCycleEnd = &cycleEnd.Time
+		}
+		if rateReset.Valid {
+			a.RateResetAt = &rateReset.Time
+		}
 		if lastUsed.Valid {
 			a.LastUsedAt = &lastUsed.Time
 		}
@@ -288,8 +365,19 @@ func (s *Store) MarkUsed(id int64) error {
 	return err
 }
 
-func (s *Store) SetQuota(id int64, limit, remaining float64) error {
-	_, err := s.db.Exec(`UPDATE accounts SET quota_limit=?,quota_remaining=?,updated_at=? WHERE id=?`, limit, remaining, time.Now(), id)
+func (s *Store) SetQuotaSnapshot(id int64, q QuotaSnapshot) error {
+	thresholds, _ := json.Marshal(q.WarningThresholds)
+	_, err := s.db.Exec(`UPDATE accounts SET plan=?,quota_state=?,quota_limit=?,quota_used=?,quota_remaining=?,
+		quota_overage=?,quota_spillage=?,quota_allow_overage=?,quota_team_pooled=?,quota_warning_thresholds=?,
+		quota_cycle_start=?,quota_cycle_end=?,updated_at=? WHERE id=?`,
+		q.Plan, q.State, q.Limit, q.Used, q.Remaining, q.Overage, q.Spillage, q.AllowOverage, q.TeamPooled,
+		string(thresholds), q.CycleStart, q.CycleEnd, time.Now(), id)
+	return err
+}
+
+func (s *Store) SetRateLimit(id int64, limit, remaining, windowSeconds int, resetAt *time.Time) error {
+	_, err := s.db.Exec(`UPDATE accounts SET rate_limit=?,rate_remaining=?,rate_window_seconds=?,rate_reset_at=?,updated_at=? WHERE id=?`,
+		limit, remaining, windowSeconds, resetAt, time.Now(), id)
 	return err
 }
 

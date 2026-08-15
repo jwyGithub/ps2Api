@@ -2,10 +2,13 @@ package api
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"ps2api/internal/store"
 )
 
 // ─── 系统设置（真实持久化到 SQLite settings 表）──────────────────
@@ -56,9 +59,9 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	// 面板本身是本机只读入口，与账号 token 同一信任边界。
 	key := s.apiKey()
 	jsonWrite(w, 200, map[string]interface{}{
-		"settings": settings,
-		"defs":     settingDefs,
-		"apiKey":   key,
+		"settings":  settings,
+		"defs":      settingDefs,
+		"apiKey":    key,
 		"apiKeySet": key != "",
 	})
 }
@@ -146,15 +149,127 @@ func (s *Server) analytics(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 500, err.Error(), "internal_error")
 		return
 	}
+	accounts, err := s.Store.ListAccounts()
+	if err != nil {
+		jsonError(w, 500, err.Error(), "internal_error")
+		return
+	}
 	jsonWrite(w, 200, map[string]interface{}{
-		"daily":       daily,
-		"hourly":      hourly,
-		"models":      models,
-		"topAccounts": top,
-		"channels":    channels,
-		"heatmap":     heatmap,
-		"todayCalls":  today,
+		"daily":         daily,
+		"hourly":        hourly,
+		"models":        models,
+		"topAccounts":   top,
+		"channels":      channels,
+		"heatmap":       heatmap,
+		"todayCalls":    today,
+		"quotaForecast": buildQuotaForecast(accounts, time.Now()),
 	})
+}
+
+// quotaForecast 按账号官方额度周期折算日均消耗，再推算到当前自然月月底。
+type quotaForecast struct {
+	Month               string  `json:"month"`
+	DaysInMonth         int     `json:"daysInMonth"`
+	DaysElapsed         int     `json:"daysElapsed"`
+	DaysRemaining       int     `json:"daysRemaining"`
+	ObservedAccounts    int     `json:"observedAccounts"`
+	TotalAccounts       int     `json:"totalAccounts"`
+	TotalLimit          float64 `json:"totalLimit"`
+	TotalUsed           float64 `json:"totalUsed"`
+	CurrentRemaining    float64 `json:"currentRemaining"`
+	DailyConsumption    float64 `json:"dailyConsumption"`
+	ForecastAdditional  float64 `json:"forecastAdditional"`
+	ForecastMonthUsage  float64 `json:"forecastMonthUsage"`
+	ForecastRemaining   float64 `json:"forecastRemaining"`
+	Shortfall           float64 `json:"shortfall"`
+	AverageAccountLimit float64 `json:"averageAccountLimit"`
+	SuggestedAccounts   int     `json:"suggestedAccounts"`
+	CoverageDays        float64 `json:"coverageDays"`
+	NeedsRefill         bool    `json:"needsRefill"`
+	Status              string  `json:"status"` // sufficient | refill | insufficient_data
+}
+
+func buildQuotaForecast(accounts []*store.Account, now time.Time) quotaForecast {
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+	nextMonth := monthStart.AddDate(0, 1, 0)
+	daysInMonth := nextMonth.Add(-time.Nanosecond).Day()
+	daysElapsed := now.Day()
+	daysRemaining := daysInMonth - daysElapsed
+	if daysRemaining < 0 {
+		daysRemaining = 0
+	}
+
+	f := quotaForecast{
+		Month:         monthStart.Format("2006-01"),
+		DaysInMonth:   daysInMonth,
+		DaysElapsed:   daysElapsed,
+		DaysRemaining: daysRemaining,
+		TotalAccounts: len(accounts),
+		Status:        "insufficient_data",
+	}
+	dailyConsumption := 0.0
+	for _, account := range accounts {
+		if account == nil || !account.Enabled || account.QuotaLimit <= 0 {
+			continue
+		}
+		f.ObservedAccounts++
+		f.TotalLimit += account.QuotaLimit
+		f.CurrentRemaining += maxFloat(account.QuotaRemaining, 0)
+		used := account.QuotaUsed
+		// 兼容只有总量/剩余量的旧快照。
+		if used <= 0 && account.QuotaLimit > account.QuotaRemaining {
+			used = account.QuotaLimit - account.QuotaRemaining
+		}
+		if used > 0 {
+			f.TotalUsed += used
+			elapsed := daysElapsed
+			if account.QuotaCycleStart != nil && account.QuotaCycleStart.Before(now) {
+				cycleDays := int(math.Ceil(now.Sub(*account.QuotaCycleStart).Hours() / 24))
+				if cycleDays > 0 {
+					elapsed = cycleDays
+				}
+			}
+			dailyConsumption += used / float64(maxInt(elapsed, 1))
+		}
+	}
+	if f.ObservedAccounts == 0 {
+		return f
+	}
+	f.DailyConsumption = dailyConsumption
+	f.ForecastAdditional = f.DailyConsumption * float64(daysRemaining)
+	f.ForecastMonthUsage = f.DailyConsumption * float64(daysInMonth)
+	f.ForecastRemaining = f.CurrentRemaining - f.ForecastAdditional
+	if f.ForecastRemaining < 0 {
+		f.Shortfall = -f.ForecastRemaining
+	}
+	f.AverageAccountLimit = f.TotalLimit / float64(f.ObservedAccounts)
+	if f.AverageAccountLimit > 0 && f.Shortfall > 0 {
+		f.SuggestedAccounts = int(math.Ceil(f.Shortfall / f.AverageAccountLimit))
+	}
+	if f.DailyConsumption > 0 {
+		f.CoverageDays = f.CurrentRemaining / f.DailyConsumption
+	}
+	f.NeedsRefill = f.Shortfall > 0
+	if f.NeedsRefill {
+		f.Status = "refill"
+	} else {
+		f.Status = "sufficient"
+	}
+	return f
+}
+
+func maxFloat(value, floor float64) float64 {
+	if value < floor {
+		return floor
+	}
+	return value
+}
+
+func maxInt(value, floor int) int {
+	if value < floor {
+		return floor
+	}
+	return value
 }
 
 // ─── 告警中心（真实告警记录）────────────────────────────────────

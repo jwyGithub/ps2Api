@@ -38,6 +38,10 @@
   function key() { return localStorage.getItem('ps2api_api_key') || ''; }
   function esc(value) { return String(value == null ? '' : value).replace(/[&<>"']/g, function (c) { return ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[c]; }); }
   function fmt(value) { return Number(value || 0).toLocaleString('zh-CN'); }
+  function fmtQuota(value) {
+    var n = Number(value);
+    return isFinite(n) ? n.toLocaleString('zh-CN', { maximumFractionDigits: 1 }) : '-';
+  }
   function ago(value) {
     if (!value) return '-';
     var n = Date.now() - new Date(value).getTime();
@@ -58,6 +62,20 @@
     return '$' + (v >= 1000 ? v.toLocaleString('en-US', { maximumFractionDigits: 2 }) : v.toFixed(4));
   }
   function pct(r) { return (Number(r || 0) * 100).toFixed(2) + '%'; }
+  function fmtDate(value) {
+    if (!value) return '-';
+    var d = new Date(value); if (!isFinite(d.getTime())) return '-';
+    return d.toLocaleString('zh-CN', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:false });
+  }
+  function countdown(value) {
+    if (!value) return '-';
+    var ms = new Date(value).getTime() - Date.now(); if (!isFinite(ms)) return '-';
+    if (ms <= 0) return '等待更新';
+    var days = Math.floor(ms / 86400000), hours = Math.floor(ms % 86400000 / 3600000), minutes = Math.floor(ms % 3600000 / 60000);
+    if (days > 0) return days + '天 ' + hours + '小时';
+    if (hours > 0) return hours + '小时 ' + minutes + '分';
+    return Math.max(1, minutes) + '分钟';
+  }
   function api(path, options) {
     options = options || {};
     options.headers = Object.assign({ 'Authorization': 'Bearer ' + key(), 'Content-Type': 'application/json' }, options.headers || {});
@@ -221,39 +239,44 @@
   }
 
   // ─── 额度管理（真实账号额度 + 配置规则读写）─────────────────
+  function quotaObserved(account) {
+    return !!(account.quotaState || account.quotaCycleStart || account.quotaCycleEnd || Number(account.rateLimit || 0));
+  }
   function renderQuotaReal() {
-    var total = state.accounts.reduce(function (n,a) { return n + Number(a.quotaLimit || 0); }, 0);
-    var remain = state.accounts.reduce(function (n,a) { return n + Number(a.quotaRemaining || 0); }, 0);
-    var used = Math.max(0, total - remain), usedPct = total ? used / total * 100 : 0;
-    var nums = document.querySelectorAll('#page-quota .font-display');
-    if (nums[0]) nums[0].textContent = fmt(total);
-    if (nums[1]) nums[1].textContent = fmt(used);
-    if (nums[2]) nums[2].textContent = fmt(remain);
-    var dayOfMonth = new Date().getDate();
-    if (nums[3]) nums[3].textContent = total ? fmt(Math.round(used / Math.max(1, dayOfMonth))) : '0';
-    if (nums[4]) nums[4].textContent = total ? fmt(Math.round(used + (used / Math.max(1, dayOfMonth)) * Math.max(0, 30 - dayOfMonth))) : '0';
-    var bar = document.querySelector('#page-quota .progress-fill');
-    if (bar) bar.style.width = usedPct.toFixed(1) + '%';
-    var progressText = document.getElementById('quotaProgressText');
-    if (progressText) progressText.textContent = fmt(used);
-    var progressTotal = document.getElementById('quotaProgressTotal');
-    if (progressTotal) progressTotal.textContent = fmt(total);
-    var channels = document.getElementById('quotaChannels');
-    if (channels) channels.innerHTML = (state.analytics.channels && state.analytics.channels.length ? state.analytics.channels.map(function (c) {
-      var cUsed = c.calls, cTotal = c.calls; // 调用次数即渠道消耗
-      var cp = Math.min(100, c.calls && total ? (c.calls / Math.max(1, total) * 100) : 0);
-      return '<div><div class="flex justify-between mb-1"><span>'+esc(c.channel)+'</span><span class="font-mono">'+fmt(c.calls)+' 次调用 · '+fmtCost(c.cost)+'</span></div><div class="progress"><div class="progress-fill" style="width:'+cp+'%;background:var(--accent)"></div></div><div class="text-[11px] mt-1" style="color:var(--muted)">成功率 '+pct(c.successRate)+' · 平均延迟 '+fmtMs(c.avgLatencyMs)+'</div></div>';
-    }).join('') : '<div class="text-[12px]" style="color:var(--muted)">暂无调用数据，渠道配额按实际调用统计。</div>');
-    var projects = document.getElementById('quotaProjects');
-    if (projects) projects.innerHTML = state.accounts.map(function (a) {
-      var ql = Number(a.quotaLimit || 0), qr = Number(a.quotaRemaining || 0);
-      var ap = ql > 0 ? Math.min(100, Math.max(0, (ql - qr) / ql * 100)) : 0;
-      return '<div><div class="flex justify-between mb-1"><span class="font-mono">'+esc(a.email)+'</span><span class="font-mono">'+fmt(ql - qr)+' / '+fmt(ql)+'</span></div><div class="progress"><div class="progress-fill" style="width:'+ap+'%;background:var(--accent-2)"></div></div></div>';
-    }).join('') || '<div class="text-[12px]" style="color:var(--muted)">暂无账号</div>';
+    var observed = state.accounts.filter(quotaObserved), tracked = observed.filter(function (a) { return Number(a.quotaLimit || 0) > 0; });
+    var total = tracked.reduce(function (n,a) { return n + Number(a.quotaLimit || 0); }, 0);
+    var remain = tracked.reduce(function (n,a) { return n + Number(a.quotaRemaining || 0); }, 0);
+    var used = tracked.reduce(function (n,a) { var v = Number(a.quotaUsed); return n + (isFinite(v) && v > 0 ? v : Math.max(0, Number(a.quotaLimit || 0) - Number(a.quotaRemaining || 0))); }, 0);
+    var overage = tracked.reduce(function (n,a) { return n + Number(a.quotaOverage || 0); }, 0);
+    var usedPct = total ? Math.min(100, used / total * 100) : 0;
+    setText('#quotaTotal', fmt(total)); setText('#quotaUsed', fmt(used)); setText('#quotaRemaining', fmt(remain));
+    setText('#quotaOverage', fmt(overage)); setText('#quotaTracked', observed.length + ' / ' + state.accounts.length);
+    setText('#quotaProgressText', fmt(used)); setText('#quotaProgressTotal', fmt(total));
+    var bar = document.getElementById('quotaProgressBar'); if (bar) bar.style.width = usedPct.toFixed(1) + '%';
     var near = document.getElementById('quotaNear');
     if (near) near.textContent = usedPct >= 90 ? '已用 ' + usedPct.toFixed(1) + '% · 注意' : usedPct >= 70 ? '已用 ' + usedPct.toFixed(1) + '%' : '已用 ' + usedPct.toFixed(1) + '% · 充足';
+    var cycleEnds = tracked.map(function(a){return a.quotaCycleEnd;}).filter(Boolean).sort(function(a,b){return new Date(a)-new Date(b);});
     var reset = document.getElementById('quotaReset');
-    if (reset) reset.textContent = '按账号 Postman AI 月度额度统计';
+    if (reset) reset.textContent = observed.length < state.accounts.length ? (state.accounts.length - observed.length) + ' 个账号未采集，点击“刷新额度”' : cycleEnds.length ? '最近重置 ' + countdown(cycleEnds[0]) + '后' : '等待额度周期数据';
+    var thresholds = [];
+    tracked.forEach(function(a){ (a.quotaWarningThresholds || []).forEach(function(t){ var label = Number(t.value) + (String(t.unit).toLowerCase() === 'percentage' ? '%' : ' ' + t.unit); if (thresholds.indexOf(label) < 0) thresholds.push(label); }); });
+    setText('#quotaOfficialThresholds', thresholds.length ? thresholds.join(' / ') : '-');
+    setText('#quotaOveragePolicy', tracked.length ? tracked.filter(function(a){return a.quotaAllowOverage;}).length + ' 个允许 / ' + tracked.filter(function(a){return !a.quotaAllowOverage;}).length + ' 个禁止' : '-');
+    setText('#quotaPoolMode', tracked.length ? tracked.filter(function(a){return a.quotaTeamPooled;}).length + ' 个共享 / ' + tracked.filter(function(a){return !a.quotaTeamPooled;}).length + ' 个独立' : '-');
+    var rated = tracked.filter(function(a){return Number(a.rateLimit || 0) > 0;});
+    setText('#quotaRateSummary', rated.length ? '最低 ' + Math.min.apply(null, rated.map(function(a){return Number(a.rateRemaining || 0);})) + ' / ' + rated[0].rateLimit + ' · ' + (rated[0].rateWindowSeconds || 60) + '秒' : '-');
+    var latest = tracked.map(function(a){return a.updatedAt;}).filter(Boolean).sort().pop(); setText('#quotaSnapshotAt', latest ? '最近更新 ' + fmtDate(latest) : '-');
+    var accountBody = document.getElementById('quotaAccountsBody');
+    if (accountBody) accountBody.innerHTML = state.accounts.length ? state.accounts.map(function(a) {
+      if (!quotaObserved(a)) return '<tr><td><div class="font-mono font-semibold">'+esc(a.email)+'</div><div class="text-[11px]" style="color:var(--muted)">'+esc(a.plan || '-')+'</div></td><td><span class="tag tag-gray">未采集</span></td><td colspan="6" style="color:var(--muted)">尚未收到官方额度快照，请点击右上角“刷新额度”</td></tr>';
+      var ql = Number(a.quotaLimit || 0), qr = Number(a.quotaRemaining || 0), qu = Number(a.quotaUsed || 0);
+      if (!qu && ql) qu = Math.max(0, ql - qr);
+      var ap = ql ? Math.min(100, qu / ql * 100) : 0, color = ap >= 90 ? 'var(--danger)' : ap >= 70 ? 'var(--warning)' : 'var(--accent)';
+      var quotaState = a.quotaState || (ql ? 'AVAILABLE' : '未采集'), quotaTag = quotaState === 'AVAILABLE' ? 'tag-green' : quotaState === '未采集' ? 'tag-gray' : 'tag-amber';
+      var policy = '<span class="tag '+(a.quotaAllowOverage?'tag-amber':'tag-gray')+'">'+(a.quotaAllowOverage?'可超额':'禁止超额')+'</span> <span class="tag '+(a.quotaTeamPooled?'tag-blue':'tag-gray')+'">'+(a.quotaTeamPooled?'团队共享':'账号独立')+'</span>';
+      var rate = a.rateLimit ? '<div class="font-mono">'+fmt(a.rateRemaining)+' / '+fmt(a.rateLimit)+'</div><div class="text-[11px]" style="color:var(--muted)">'+(a.rateWindowSeconds || 60)+'秒窗口 · '+countdown(a.rateResetAt)+'</div>' : '-';
+      return '<tr><td><div class="font-mono font-semibold">'+esc(a.email)+'</div><div class="text-[11px]" style="color:var(--muted)">'+esc(a.plan || '-')+'</div></td><td><span class="tag '+quotaTag+'">'+esc(quotaState)+'</span></td><td><div class="flex justify-between text-[11px] mb-1"><span>'+fmt(qu)+'</span><span>'+ap.toFixed(1)+'%</span></div><div class="progress" style="width:150px;height:5px"><div class="progress-fill" style="width:'+ap+'%;background:'+color+'"></div></div><div class="text-[11px] mt-1" style="color:var(--muted)">总量 '+fmt(ql)+'</div></td><td class="font-mono font-semibold" style="color:'+color+'">'+fmt(qr)+'</td><td><div class="font-mono text-[12px]">'+fmtDate(a.quotaCycleStart)+'</div><div class="text-[11px]" style="color:var(--muted)">至 '+fmtDate(a.quotaCycleEnd)+'</div></td><td><div class="font-semibold">'+countdown(a.quotaCycleEnd)+'</div><div class="text-[11px]" style="color:var(--muted)">'+fmtDate(a.quotaCycleEnd)+'</div></td><td><div class="flex gap-1 flex-wrap">'+policy+'</div></td><td>'+rate+'</td></tr>';
+    }).join('') : '<tr><td colspan="8" style="text-align:center;padding:40px;color:var(--muted)">暂无账号，请先导入账号并刷新额度</td></tr>';
     var rules = document.getElementById('quotaRules');
     if (rules) {
       var th = state.settings['alert_quota'] || '0.2';
@@ -281,6 +304,41 @@
     setText('#statCostNote', '按模型单价估算');
     setText('#statP95Note', '来自真实请求日志');
     setText('#statErrNote', (s.totalRequests ? (s.successRequests / s.totalRequests * 100).toFixed(2) : '0') + '% 成功');
+    renderQuotaForecast();
+  }
+
+  function renderQuotaForecast() {
+    var f = state.analytics.quotaForecast || {};
+    var status = document.getElementById('quotaForecastStatus');
+    var panel = document.getElementById('quotaForecastPanel');
+    if (!status || !panel) return;
+    var statusMap = {
+      sufficient: { label: '预计够用', tag: 'tag-green' },
+      refill: { label: '需要补号', tag: 'tag-red' },
+      insufficient_data: { label: '数据不足', tag: 'tag-gray' }
+    };
+    var meta = statusMap[f.status] || statusMap.insufficient_data;
+    status.className = 'tag ' + meta.tag;
+    status.textContent = meta.label;
+    setText('#quotaForecastDaily', f.observedAccounts ? fmtQuota(f.dailyConsumption) : '-');
+    setText('#quotaForecastRemaining', f.observedAccounts ? fmtQuota(f.currentRemaining) : '-');
+    setText('#quotaForecastAtEnd', f.observedAccounts ? fmtQuota(f.forecastRemaining) : '-');
+    setText('#quotaForecastShortfall', f.observedAccounts ? (f.shortfall > 0 ? fmtQuota(f.shortfall) : '0') : '-');
+    setText('#quotaForecastAccounts', f.observedAccounts ? (f.suggestedAccounts || '0') + ' 个' : '-');
+    var atEnd = document.getElementById('quotaForecastAtEnd');
+    var shortfall = document.getElementById('quotaForecastShortfall');
+    if (atEnd) atEnd.style.color = f.forecastRemaining < 0 ? 'var(--danger)' : 'var(--success)';
+    if (shortfall) shortfall.style.color = f.shortfall > 0 ? 'var(--danger)' : 'var(--success)';
+    var detail;
+    if (!f.observedAccounts) {
+      detail = '暂无可用额度快照，请先到“额度管理”点击“刷新额度”。';
+    } else if (f.needsRefill) {
+      detail = '按当前日均消耗，月底前预计还需 ' + fmtQuota(f.forecastAdditional) + '，当前余额不足。';
+    } else {
+      detail = '按当前日均消耗，月底预计仍余 ' + fmtQuota(Math.max(0, f.forecastRemaining)) + '。';
+    }
+    setText('#quotaForecastDetail', detail);
+    setText('#quotaForecastMeta', f.observedAccounts ? f.month + ' · 已采集 ' + f.observedAccounts + '/' + f.totalAccounts + ' 个账号 · 预计覆盖 ' + (f.coverageDays ? f.coverageDays.toFixed(1) + ' 天' : '-') : '-');
   }
 
   function renderTopAccounts() {
@@ -512,7 +570,7 @@
     file.text().then(function (content) {
       return api('/api/accounts/import', { method: 'POST', body: content });
     }).then(function (d) {
-      toast('已导入 ' + d.imported + ' 个账号');
+      toast('已导入 ' + d.imported + ' 个账号，请点击“刷新额度”获取官方快照');
       return loadAll();
     }).catch(function (e) { toast(e.message); }).finally(function () { input.value = ''; });
   };
@@ -569,6 +627,10 @@
       var msg = '探测完成：' + (d.ok || 0) + ' 个账号额度已刷新' + ((d.failed || 0) > 0 ? '，' + d.failed + ' 个失败' : '');
       loadAll().then(function () { toast(msg); });
     }).catch(function (e) { toast('探测失败：' + e.message); });
+  };
+  window.exportQuota = function () {
+    download('postman2api-quota-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify({ exportedAt: new Date().toISOString(), accounts: state.accounts }, null, 2));
+    toast('额度快照已导出');
   };
   window.checkHealth = function () { loadAll().then(function () { toast('主动检查完成'); }); };
   window.toggleLogPause = function () {
