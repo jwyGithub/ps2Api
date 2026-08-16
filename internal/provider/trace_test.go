@@ -12,7 +12,7 @@ func TestTraceWritesJSONLAndRedactsSecrets(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("GATEWAY_TRACE_LOG", "1")
 	t.Setenv("GATEWAY_TRACE_DIR", dir)
-	ctx, id := NewTraceContext(context.Background())
+	ctx, id := NewTraceContext(context.Background(), "openai")
 	if id == "" {
 		t.Fatal("trace id was not created")
 	}
@@ -20,7 +20,7 @@ func TestTraceWritesJSONLAndRedactsSecrets(t *testing.T) {
 		"headers": map[string]interface{}{"Authorization": "Bearer secret-key", "Cookie": "postman.sid=session-secret"},
 		"body":    `{"password":"password-secret","tokens":{"access_token":"token-secret"},"message":"keep me"}`,
 	})
-	files, err := filepath.Glob(filepath.Join(dir, "*", "*.jsonl"))
+	files, err := filepath.Glob(filepath.Join(dir, "openai", "*", "*.jsonl"))
 	if err != nil || len(files) != 1 {
 		t.Fatalf("trace files = %v, %v", files, err)
 	}
@@ -44,7 +44,7 @@ func TestTraceWritesJSONLAndRedactsSecrets(t *testing.T) {
 
 func TestTraceDisabledDoesNotCreateID(t *testing.T) {
 	t.Setenv("GATEWAY_TRACE_LOG", "0")
-	_, id := NewTraceContext(context.Background())
+	_, id := NewTraceContext(context.Background(), "openai")
 	if id != "" {
 		t.Fatalf("disabled trace created id %q", id)
 	}
@@ -54,11 +54,11 @@ func TestEachTraceUsesItsOwnFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("GATEWAY_TRACE_LOG", "1")
 	t.Setenv("GATEWAY_TRACE_DIR", dir)
-	ctx1, id1 := NewTraceContext(context.Background())
-	ctx2, id2 := NewTraceContext(context.Background())
+	ctx1, id1 := NewTraceContext(context.Background(), "openai")
+	ctx2, id2 := NewTraceContext(context.Background(), "anthropic")
 	Trace(ctx1, "first", nil)
 	Trace(ctx2, "second", nil)
-	files, err := filepath.Glob(filepath.Join(dir, "*", "*.jsonl"))
+	files, err := filepath.Glob(filepath.Join(dir, "*", "*", "*.jsonl"))
 	if err != nil || len(files) != 2 {
 		t.Fatalf("trace files = %v, %v", files, err)
 	}
@@ -68,5 +68,12 @@ func TestEachTraceUsesItsOwnFile(t *testing.T) {
 	}
 	if !seen[id1+".jsonl"] || !seen[id2+".jsonl"] {
 		t.Fatalf("trace ids do not have separate files: %v", files)
+	}
+	// 按调用方式分目录：openai/anthropic 各自落在自己的子目录下。
+	if _, err := os.Stat(filepath.Join(dir, "openai")); err != nil {
+		t.Fatalf("openai trace dir missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "anthropic")); err != nil {
+		t.Fatalf("anthropic trace dir missing: %v", err)
 	}
 }

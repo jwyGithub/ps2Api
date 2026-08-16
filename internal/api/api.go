@@ -60,7 +60,11 @@ const maxChatBody = 16 << 20
 
 func traceChat(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx, traceID := provider.NewTraceContext(r.Context())
+		endpoint := "openai"
+		if strings.HasSuffix(r.URL.Path, "/messages") {
+			endpoint = "anthropic"
+		}
+		ctx, traceID := provider.NewTraceContext(r.Context(), endpoint)
 		if traceID == "" {
 			next(w, r)
 			return

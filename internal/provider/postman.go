@@ -915,6 +915,7 @@ func collectToolCalls(toolAcc map[int]*ToolCall) []ToolCall {
 	out := make([]ToolCall, 0, len(idx))
 	for _, i := range idx {
 		if tc, ok := toolAcc[i]; ok {
+			tc.Function.Name = remapCodexToolName(tc.Function.Name)
 			out = append(out, *tc)
 		}
 	}

@@ -23,7 +23,7 @@ func TestTraceChatConnectsRequestAndResponse(t *testing.T) {
 	if response.Code != 200 || traceID == "" {
 		t.Fatalf("response status=%d trace_id=%q", response.Code, traceID)
 	}
-	files, err := filepath.Glob(filepath.Join(dir, "*", "*.jsonl"))
+	files, err := filepath.Glob(filepath.Join(dir, "anthropic", "*", "*.jsonl"))
 	if err != nil || len(files) != 1 {
 		t.Fatalf("trace files=%v err=%v", files, err)
 	}

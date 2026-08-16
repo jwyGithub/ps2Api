@@ -15,6 +15,7 @@ import (
 )
 
 type traceContextKey struct{}
+type traceEndpointKey struct{}
 
 var traceMu sync.Mutex
 
@@ -27,7 +28,8 @@ func TraceEnabled() bool {
 	}
 }
 
-func NewTraceContext(ctx context.Context) (context.Context, string) {
+// endpoint 用作日志子目录（如 openai/anthropic），按调用方式分开存储。
+func NewTraceContext(ctx context.Context, endpoint string) (context.Context, string) {
 	if !TraceEnabled() {
 		return ctx, ""
 	}
@@ -36,7 +38,9 @@ func NewTraceContext(ctx context.Context) (context.Context, string) {
 		return ctx, ""
 	}
 	id := hex.EncodeToString(raw[:])
-	return context.WithValue(ctx, traceContextKey{}, id), id
+	ctx = context.WithValue(ctx, traceContextKey{}, id)
+	ctx = context.WithValue(ctx, traceEndpointKey{}, endpoint)
+	return ctx, id
 }
 
 func Trace(ctx context.Context, event string, data interface{}) {
@@ -57,6 +61,10 @@ func Trace(ctx context.Context, event string, data interface{}) {
 	dir := strings.TrimSpace(os.Getenv("GATEWAY_TRACE_DIR"))
 	if dir == "" {
 		dir = "./data/traces"
+	}
+	// 按调用方式分目录。endpoint 来自内部常量，filepath.Base 兜底防路径穿越。
+	if ep, _ := ctx.Value(traceEndpointKey{}).(string); ep != "" {
+		dir = filepath.Join(dir, filepath.Base(ep))
 	}
 	dateDir := filepath.Join(dir, time.Now().Format("2006-01-02"))
 	traceMu.Lock()
