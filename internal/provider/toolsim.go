@@ -107,6 +107,28 @@ func remapCodexToolName(name string) string {
 	return name
 }
 
+func remapCodexToolCallsForOpenAI(calls []ToolCall, endpoint string) {
+	if endpoint != "openai" {
+		return
+	}
+	for i := range calls {
+		calls[i].Function.Name = remapCodexToolName(calls[i].Function.Name)
+	}
+}
+
+func remapCodexDeltasForOpenAI(deltas []Delta, endpoint string) {
+	if endpoint != "openai" {
+		return
+	}
+	for i := range deltas {
+		for j := range deltas[i].ToolCalls {
+			if fn := deltas[i].ToolCalls[j].Function; fn != nil {
+				fn.Name = remapCodexToolName(fn.Name)
+			}
+		}
+	}
+}
+
 func extractToolName(tool interface{}) string {
 	m, ok := tool.(map[string]interface{})
 	if !ok {
@@ -319,7 +341,7 @@ func parseSimulatedToolCalls(text string, allowed map[string]bool) (string, []To
 		}
 		last = loc[1]
 		tc := ToolCall{ID: newSimToolCallID(), Type: "function"}
-		tc.Function.Name = remapCodexToolName(name)
+		tc.Function.Name = name
 		tc.Function.Arguments = args
 		calls = append(calls, tc)
 	}

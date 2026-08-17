@@ -331,6 +331,10 @@ func UnsupportedToolResult(messages []ChatMessage) (string, bool) {
 			if block["type"] != "tool_result" {
 				continue
 			}
+			failed, _ := block["is_error"].(bool)
+			if !failed {
+				continue
+			}
 			if name := unsupportedToolName(toolResultText(block["content"])); name != "" {
 				return name, true
 			}
@@ -341,11 +345,11 @@ func UnsupportedToolResult(messages []ChatMessage) (string, bool) {
 
 func unsupportedToolName(content string) string {
 	const marker = "unsupported custom tool call:"
-	idx := strings.Index(strings.ToLower(content), marker)
-	if idx < 0 {
+	content = strings.TrimSpace(content)
+	if !strings.HasPrefix(strings.ToLower(content), marker) {
 		return ""
 	}
-	name := strings.TrimSpace(content[idx+len(marker):])
+	name := strings.TrimSpace(content[len(marker):])
 	if fields := strings.Fields(name); len(fields) > 0 {
 		return strings.Trim(fields[0], "`\"'")
 	}
@@ -899,6 +903,7 @@ func (p *Provider) Chat(ctx context.Context, acc *store.Account, req *ChatReques
 	res.ToolCalls = collectToolCalls(toolAcc)
 	p.rememberToolGroups(acc.ID, res.ToolCalls)
 	res.Content = applySimulatedTools(res, res.Content, tools)
+	remapCodexToolCallsForOpenAI(res.ToolCalls, req.Endpoint)
 	res.PromptTokens = EstimateMessagesTokens(req.Messages)
 	res.CompletionTokens = EstimateTokens(res.Content + res.ReasoningContent)
 	p.RememberConversation(acc.ID, req.Messages, res)
@@ -915,7 +920,6 @@ func collectToolCalls(toolAcc map[int]*ToolCall) []ToolCall {
 	out := make([]ToolCall, 0, len(idx))
 	for _, i := range idx {
 		if tc, ok := toolAcc[i]; ok {
-			tc.Function.Name = remapCodexToolName(tc.Function.Name)
 			out = append(out, *tc)
 		}
 	}
@@ -1034,6 +1038,7 @@ func (p *Provider) StreamChat(ctx context.Context, acc *store.Account, req *Chat
 		_ = flushText()
 		res.ToolCalls = collectToolCalls(toolAcc)
 		p.rememberToolGroups(acc.ID, res.ToolCalls)
+		remapCodexToolCallsForOpenAI(res.ToolCalls, req.Endpoint)
 		for i, tc := range res.ToolCalls {
 			_ = emit(Delta{ToolCalls: []DeltaToolCall{{
 				Index: i,
@@ -1051,6 +1056,7 @@ func (p *Provider) StreamChat(ctx context.Context, acc *store.Account, req *Chat
 		return res
 	}
 	cleaned, sim := simulatedDeltas(content.String(), tools)
+	remapCodexDeltasForOpenAI(sim, req.Endpoint)
 	content.Reset()
 	if cleaned != "" {
 		_ = emit(Delta{Content: cleaned})
