@@ -85,6 +85,52 @@
         </div>
       </div>
 
+      <div class="card p-6 mb-6" id="cacheProbePanel">
+        <div class="flex items-start justify-between gap-4 flex-wrap mb-5">
+          <div>
+            <div class="text-[11px] uppercase tracking-wider mb-2" style="color: var(--muted);">Cache probe (shadow)</div>
+            <h3 class="font-display text-[22px] font-medium">缓存探针 · 命中率度量</h3>
+            <p class="text-[12px] mt-1" style="color: var(--muted);">只度量、不改变任何返回值。用真实流量测「若开启缓存能省多少额度」，再决定要不要建。</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="tag" id="cpStatusTag">未开启</span>
+            <button class="btn btn-ghost" id="cpToggleBtn" onclick="toggleCacheProbe()">开启探针</button>
+            <button class="btn btn-ghost" onclick="resetCacheProbe()">重置窗口</button>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 lg:grid-cols-5 gap-4">
+          <div>
+            <div class="text-[11px]" style="color: var(--muted);">潜在命中率</div>
+            <div class="font-display text-[24px] font-medium mt-1" id="cpHitRate">-</div>
+            <div class="text-[11px] mt-0.5" style="color: var(--muted);">响应缓存价值</div>
+          </div>
+          <div>
+            <div class="text-[11px]" style="color: var(--muted);">可命中次数</div>
+            <div class="font-display text-[24px] font-medium mt-1" id="cpHits">-</div>
+            <div class="text-[11px] mt-0.5" style="color: var(--muted);">开缓存本可省</div>
+          </div>
+          <div>
+            <div class="text-[11px]" style="color: var(--muted);">可缓存请求</div>
+            <div class="font-display text-[24px] font-medium mt-1" id="cpCacheable">-</div>
+            <div class="text-[11px] mt-0.5" style="color: var(--muted);">单发无状态</div>
+          </div>
+          <div>
+            <div class="text-[11px]" style="color: var(--muted);">去重后</div>
+            <div class="font-display text-[24px] font-medium mt-1" id="cpDistinct">-</div>
+            <div class="text-[11px] mt-0.5" style="color: var(--muted);">不同请求数</div>
+          </div>
+          <div>
+            <div class="text-[11px]" style="color: var(--muted);">并发去重可省</div>
+            <div class="font-display text-[24px] font-medium mt-1" id="cpSingleflight">-</div>
+            <div class="text-[11px] mt-0.5" style="color: var(--muted);">single-flight · 内存计数</div>
+          </div>
+        </div>
+        <div class="flex items-center justify-between gap-4 flex-wrap mt-5 pt-4" style="border-top:1px solid var(--line);">
+          <span class="text-[12px]" style="color: var(--fg-2);" id="cpDetail">开启后跑几天真实流量，命中率明显 &gt;0 才值得建响应缓存。</span>
+          <span class="text-[11px] font-mono" style="color: var(--muted);" id="cpMeta">-</span>
+        </div>
+      </div>
+
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
         <div class="card p-6">
           <h3 class="font-display text-[20px] font-medium mb-1">每小时调用量</h3>

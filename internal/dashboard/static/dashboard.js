@@ -13,7 +13,7 @@
   var state = {
     stats: {}, accounts: [], logs: [],
     analytics: {}, settings: {}, settingsDefs: [], apiKey: '',
-    alerts: [], alertSummary: {},
+    alerts: [], alertSummary: {}, cacheProbe: {},
     days: 14, page: 'overview', poolQuery: '', poolStatus: 'ALL', alertTab: 'open',
     poolPage: 1, quotaPage: 1
   };
@@ -175,7 +175,8 @@
     alerts: function () { return api('/api/alerts').then(function (data) {
       state.alerts = data.data || [];
       state.alertSummary = data.summary || {};
-    }); }
+    }); },
+    cacheProbe: function () { return api('/api/cache-probe').then(function (data) { state.cacheProbe = data || {}; }); }
   };
 
   function loadResources(names) {
@@ -185,13 +186,13 @@
   }
 
   function loadAll() {
-    return loadResources(['stats', 'accounts', 'logs', 'analytics', 'settings', 'alerts']);
+    return loadResources(['stats', 'accounts', 'logs', 'analytics', 'settings', 'alerts', 'cacheProbe']);
   }
 
   function refreshCurrentPage() {
     var pages = {
       overview: ['stats', 'accounts', 'logs', 'analytics', 'alerts'],
-      stats: ['stats', 'analytics'],
+      stats: ['stats', 'analytics', 'cacheProbe'],
       pools: ['accounts', 'analytics'],
       quota: ['accounts', 'analytics', 'settings', 'alerts'],
       routing: ['settings'],
@@ -206,6 +207,7 @@
     renderRealData(); renderStatsReal(); renderChartsReal(); renderTopAccounts();
     renderPoolsReal(); renderQuotaReal(); renderAlertsReal();
     renderRoutingReal(); renderSettingsReal(); renderOverviewActivity(); renderSidebarBadges();
+    renderCacheProbeReal();
   }
 
   function renderSidebarBadges() {
@@ -324,6 +326,28 @@
   }
 
   // ─── 统计分析页 ─────────────────────────────────────────────
+  function renderCacheProbeReal() {
+    var c = state.cacheProbe || {};
+    var panel = document.getElementById('cacheProbePanel'); if (!panel) return;
+    var on = !!c.enabled;
+    setText('#cpHitRate', c.potentialHitRate != null ? (c.potentialHitRate * 100).toFixed(2) + '%' : '-');
+    setText('#cpHits', fmt(c.potentialHits));
+    setText('#cpCacheable', fmt(c.cacheableRequests));
+    setText('#cpDistinct', fmt(c.distinctRequests));
+    setText('#cpSingleflight', fmt(c.singleflightSaved));
+    var tag = document.getElementById('cpStatusTag');
+    if (tag) { tag.textContent = on ? '采集中' : '未开启'; tag.className = 'tag ' + (on ? 'tag-green' : 'tag-gray'); }
+    var btn = document.getElementById('cpToggleBtn');
+    if (btn) btn.textContent = on ? '停止探针' : '开启探针';
+    var total = Number(c.cacheableRequests || 0);
+    setText('#cpDetail', !on
+      ? '探针未开启。开启后跑几天真实流量，命中率明显 >0 才值得建响应缓存。'
+      : total === 0
+        ? '已开启，尚无可缓存请求样本——等团队发起单发无状态请求后开始累计。'
+        : '基于 ' + fmt(total) + ' 条可缓存请求：命中率 ' + (Number(c.potentialHitRate || 0) * 100).toFixed(2) + '% 决定响应缓存价值，并发去重可省 ' + fmt(c.singleflightSaved) + ' 次。');
+    setText('#cpMeta', on ? 'shadow · 只度量不改返回' : 'cache_probe_enabled=false');
+  }
+
   function renderStatsReal() {
     var s = state.stats;
     var values = document.querySelectorAll('#page-stats .font-display');
@@ -635,6 +659,18 @@
 
   window.loadDashboard = loadAll;
   window.toggleNotif = function () { toast((state.alertSummary.open || 0) ? '有 ' + state.alertSummary.open + ' 条未处理告警' : '暂无未处理告警'); };
+  window.toggleCacheProbe = function () {
+    var next = state.cacheProbe && state.cacheProbe.enabled ? 'false' : 'true';
+    api('/api/settings', {method:'PUT', body:JSON.stringify({settings:{cache_probe_enabled:next}})})
+      .then(function(){ toast(next === 'true' ? '缓存探针已开启' : '缓存探针已停止'); return refreshCurrentPage(); })
+      .catch(function(e){toast(e.message);});
+  };
+  window.resetCacheProbe = function () {
+    if (!confirm('清空探针数据，开始新的度量窗口？')) return;
+    api('/api/cache-probe', {method:'DELETE'})
+      .then(function(){ toast('探针窗口已重置'); return refreshCurrentPage(); })
+      .catch(function(e){toast(e.message);});
+  };
   window.refreshData = function () { loadAll().then(function () { toast('数据已刷新'); }); };
   window.syncStatus = function () { loadAll().then(function () { toast('状态已同步'); }); };
   window.refreshQuota = function () {

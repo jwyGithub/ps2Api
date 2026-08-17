@@ -51,6 +51,8 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/alerts/{id}/resolve", s.resolveAlert)
 	mux.HandleFunc("POST /api/alerts/resolve-all", s.resolveAllAlerts)
 	mux.HandleFunc("POST /api/refresh-quota", s.refreshQuota)
+	mux.HandleFunc("GET /api/cache-probe", s.cacheProbe)
+	mux.HandleFunc("DELETE /api/cache-probe", s.cacheProbeReset)
 	mux.HandleFunc("GET /dashboard.js", s.dashboardAsset)
 	mux.HandleFunc("GET /dashboard/", s.dashboardStatic)
 	mux.HandleFunc("GET /", s.dashboard)
@@ -686,6 +688,27 @@ func (s *Server) toggleAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonWrite(w, 200, map[string]bool{"success": true})
 }
+
+// cacheProbe 返回影子缓存探针的度量结果（潜在命中率 + single-flight 潜在收益）。
+func (s *Server) cacheProbe(w http.ResponseWriter, r *http.Request) {
+	if !s.auth(w, r) {
+		return
+	}
+	jsonWrite(w, 200, s.Router.CacheProbeStats())
+}
+
+// cacheProbeReset 清空探针，开始一个干净的度量窗口。
+func (s *Server) cacheProbeReset(w http.ResponseWriter, r *http.Request) {
+	if !s.auth(w, r) {
+		return
+	}
+	if err := s.Store.ResetCacheProbe(); err != nil {
+		jsonError(w, 500, err.Error(), "internal_error")
+		return
+	}
+	jsonWrite(w, 200, map[string]bool{"success": true})
+}
+
 func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 	v, e := s.Store.GetStats()
 	if e != nil {

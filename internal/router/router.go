@@ -15,10 +15,72 @@ type Router struct {
 	Pool     *pool.Pool
 	Provider *provider.Provider
 	Store    *store.Store
+	shadow   shadowProbe
 }
 
 func New(s *store.Store) *Router {
-	return &Router{Pool: pool.New(s), Provider: provider.New(), Store: s}
+	return &Router{Pool: pool.New(s), Provider: provider.New(), Store: s, shadow: shadowProbe{inflight: map[string]int{}}}
+}
+
+// shadowProbe 影子缓存探针：只度量、不改变任何返回值。
+// 持久信号（重复命中率）落在 store.cache_probe；并发撞车数（single-flight 潜在收益）
+// 是运行时量，内存计数即可——重启归零、多实例各计各的（会低估，见 README）。
+type shadowProbe struct {
+	mu         sync.Mutex
+	inflight   map[string]int
+	collisions int64
+}
+
+// cacheProbeEnabled 读持久化设置（默认关）。探针是「度量窗口」工具而非常开设施：
+// 每个可缓存请求写一行 cache_probe，长期常开会让表无界增长，故 opt-in。
+func (r *Router) cacheProbeEnabled() bool {
+	v, _ := r.Store.GetSetting("cache_probe_enabled")
+	on, _ := strconv.ParseBool(v)
+	return on
+}
+
+// probe 在请求入口记录一次探针，返回出口回调（用于并发在途计数递减）。
+// 非可缓存请求或探针关闭时为空操作。
+func (r *Router) probe(req *provider.ChatRequest) func() {
+	if !r.cacheProbeEnabled() || !provider.IsCacheable(req) {
+		return func() {}
+	}
+	key := provider.CacheKey(req)
+	_ = r.Store.RecordCacheProbe(key)
+	r.shadow.mu.Lock()
+	r.shadow.inflight[key]++
+	if r.shadow.inflight[key] > 1 {
+		r.shadow.collisions++ // 同一指纹并发在途 = single-flight 本可省一次上游调用
+	}
+	r.shadow.mu.Unlock()
+	return func() {
+		r.shadow.mu.Lock()
+		if r.shadow.inflight[key]--; r.shadow.inflight[key] <= 0 {
+			delete(r.shadow.inflight, key)
+		}
+		r.shadow.mu.Unlock()
+	}
+}
+
+// CacheProbeStats 汇总探针数据供只读端点展示。
+func (r *Router) CacheProbeStats() map[string]interface{} {
+	distinct, repeats, _ := r.Store.CacheProbeStats()
+	total := distinct + repeats
+	var rate float64
+	if total > 0 {
+		rate = float64(repeats) / float64(total)
+	}
+	r.shadow.mu.Lock()
+	collisions := r.shadow.collisions
+	r.shadow.mu.Unlock()
+	return map[string]interface{}{
+		"enabled":           r.cacheProbeEnabled(),
+		"cacheableRequests": total,
+		"distinctRequests":  distinct,
+		"potentialHits":     repeats,
+		"potentialHitRate":  rate,
+		"singleflightSaved": collisions,
+	}
 }
 
 // retryCount 从持久化设置读取请求重试次数（默认 3）。
@@ -58,6 +120,7 @@ func (r *Router) pickAccount(excluded map[int64]bool, messages []provider.ChatMe
 }
 
 func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider.Result, *store.Account, error) {
+	defer r.probe(req)()
 	var last string
 	excluded := map[int64]bool{}
 	attempts := r.retryCount()
@@ -103,6 +166,7 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 }
 
 func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit provider.EmitFunc) (*provider.Result, *store.Account, error) {
+	defer r.probe(req)()
 	var last string
 	emitted := false
 	trackedEmit := func(d provider.Delta) error {

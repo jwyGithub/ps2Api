@@ -177,6 +177,12 @@ CREATE TABLE IF NOT EXISTS alerts (
 );
 CREATE INDEX IF NOT EXISTS alerts_status_idx ON alerts(status);
 CREATE INDEX IF NOT EXISTS alerts_created_idx ON alerts(created_at);
+CREATE TABLE IF NOT EXISTS cache_probe (
+  key TEXT PRIMARY KEY,
+  hits INTEGER NOT NULL DEFAULT 0,
+  first_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 `)
 	if err != nil {
 		return err
@@ -599,6 +605,28 @@ func (s *Store) ListSettings() (map[string]string, error) {
 // QueryRowScan 单行查询便捷方法（供评估器等内部逻辑使用）。
 func (s *Store) QueryRowScan(query string, dest ...interface{}) error {
 	return s.db.QueryRow(query).Scan(dest...)
+}
+
+// RecordCacheProbe 记录一次可缓存请求的指纹：首见插入 hits=0，重复则 hits+1。
+// hits 即「若开启响应缓存本可命中的次数」，用于零风险度量真实命中率。
+func (s *Store) RecordCacheProbe(key string) error {
+	now := time.Now()
+	_, err := s.db.Exec(`INSERT INTO cache_probe (key,hits,first_seen,last_seen) VALUES (?,0,?,?)
+ON CONFLICT(key) DO UPDATE SET hits=hits+1,last_seen=excluded.last_seen`, key, now, now)
+	return err
+}
+
+// CacheProbeStats 返回去重后的请求数与可命中次数。
+// 可缓存请求总数 = distinct + repeats；潜在命中率 = repeats/(distinct+repeats)。
+func (s *Store) CacheProbeStats() (distinct, repeats int64, err error) {
+	err = s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(hits),0) FROM cache_probe`).Scan(&distinct, &repeats)
+	return
+}
+
+// ResetCacheProbe 清空探针表，开始一个干净的度量窗口。
+func (s *Store) ResetCacheProbe() error {
+	_, err := s.db.Exec(`DELETE FROM cache_probe`)
+	return err
 }
 
 func (s *Store) ResolveAllOpen() error {
