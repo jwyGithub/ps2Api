@@ -14,8 +14,25 @@
     stats: {}, accounts: [], logs: [],
     analytics: {}, settings: {}, settingsDefs: [], apiKey: '',
     alerts: [], alertSummary: {},
-    days: 14, page: 'overview', paused: false, filter: 'ALL', query: '', poolQuery: '', poolStatus: 'ALL', alertTab: 'open'
+    days: 14, page: 'overview', paused: false, filter: 'ALL', query: '', poolQuery: '', poolStatus: 'ALL', alertTab: 'open',
+    poolPage: 1, quotaPage: 1
   };
+  var PAGE_SIZE = 20;
+  // 通用分页：切片当前页并生成页码控件 HTML（gotoFn 为全局翻页函数名）
+  function paginate(list, page) {
+    var pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE));
+    page = Math.min(Math.max(1, page), pages);
+    return { items: list.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE), page: page, pages: pages, total: list.length };
+  }
+  function pagerHTML(p, gotoFn) {
+    if (p.pages <= 1) return '';
+    var arrow = function (dir, disabled, target) {
+      return '<button class="icon-btn"' + (disabled ? ' disabled style="opacity:0.4;"' : ' onclick="' + gotoFn + '(' + target + ')"') + '><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="' + (dir < 0 ? 'm15 18-6-6 6-6' : 'm9 18 6-6-6-6') + '"/></svg></button>';
+    };
+    var html = arrow(-1, p.page <= 1, p.page - 1);
+    for (var i = 1; i <= p.pages; i++) html += '<button class="icon-btn"' + (i === p.page ? ' style="background: var(--accent); color: white;"' : ' onclick="' + gotoFn + '(' + i + ')"') + '>' + i + '</button>';
+    return html + arrow(1, p.page >= p.pages, p.page + 1);
+  }
   var charts = {};
   var providerModels = ['gpt-5.6-luna','gpt-5.6-sol','gpt-5.6-terra','gpt-5.5','gpt-5.4','gpt-5.2','claude-opus-4-8','claude-sonnet-4-6','claude-haiku-4-5','auto'];
 
@@ -224,7 +241,8 @@
       if (state.poolQuery && (a.email + ' ' + (a.source || '')).toLowerCase().indexOf(state.poolQuery.toLowerCase()) < 0) return false;
       return true;
     });
-    body.innerHTML = list.length ? list.map(function (a) {
+    var pg = paginate(list, state.poolPage); state.poolPage = pg.page;
+    body.innerHTML = list.length ? pg.items.map(function (a) {
       var s = statusInfo(a.status), total = Number(a.quotaLimit || 0), remain = Number(a.quotaRemaining || 0);
       var pct = total > 0 ? Math.max(0, Math.min(100, (remain / total) * 100)) : 0;
       var color = pct < 20 ? 'var(--danger)' : pct < 50 ? 'var(--warning)' : 'var(--accent)';
@@ -235,8 +253,12 @@
     var rings = document.querySelectorAll('#page-pools .ring-stat .value');
     if (rings[0]) rings[0].textContent = counts.active; if (rings[1]) rings[1].textContent = counts.exhausted; if (rings[2]) rings[2].textContent = counts.error; if (rings[3]) rings[3].textContent = counts.disabled;
     var cnt = document.getElementById('poolCount');
-    if (cnt) cnt.textContent = '共 ' + state.accounts.length + ' 条';
+    if (cnt) cnt.textContent = '共 ' + pg.total + ' 条' + (pg.pages > 1 ? ' · 第 ' + pg.page + '/' + pg.pages + ' 页' : '');
+    var pager = document.getElementById('poolPager');
+    if (pager) pager.innerHTML = pagerHTML(pg, 'poolGoto');
   }
+  window.poolGoto = function (n) { state.poolPage = n; renderPoolsReal(); };
+  window.quotaGoto = function (n) { state.quotaPage = n; renderQuotaReal(); };
 
   // ─── 额度管理（真实账号额度 + 配置规则读写）─────────────────
   function quotaObserved(account) {
@@ -267,7 +289,8 @@
     setText('#quotaRateSummary', rated.length ? '最低 ' + Math.min.apply(null, rated.map(function(a){return Number(a.rateRemaining || 0);})) + ' / ' + rated[0].rateLimit + ' · ' + (rated[0].rateWindowSeconds || 60) + '秒' : '-');
     var latest = tracked.map(function(a){return a.updatedAt;}).filter(Boolean).sort().pop(); setText('#quotaSnapshotAt', latest ? '最近更新 ' + fmtDate(latest) : '-');
     var accountBody = document.getElementById('quotaAccountsBody');
-    if (accountBody) accountBody.innerHTML = state.accounts.length ? state.accounts.map(function(a) {
+    var qpg = paginate(state.accounts, state.quotaPage); state.quotaPage = qpg.page;
+    if (accountBody) accountBody.innerHTML = state.accounts.length ? qpg.items.map(function(a) {
       if (!quotaObserved(a)) return '<tr><td><div class="font-mono font-semibold">'+esc(a.email)+'</div><div class="text-[11px]" style="color:var(--muted)">'+esc(a.plan || '-')+'</div></td><td><span class="tag tag-gray">未采集</span></td><td colspan="6" style="color:var(--muted)">尚未收到官方额度快照，请点击右上角“刷新额度”</td></tr>';
       var ql = Number(a.quotaLimit || 0), qr = Number(a.quotaRemaining || 0), qu = Number(a.quotaUsed || 0);
       if (!qu && ql) qu = Math.max(0, ql - qr);
@@ -277,6 +300,10 @@
       var rate = a.rateLimit ? '<div class="font-mono">'+fmt(a.rateRemaining)+' / '+fmt(a.rateLimit)+'</div><div class="text-[11px]" style="color:var(--muted)">'+(a.rateWindowSeconds || 60)+'秒窗口 · '+countdown(a.rateResetAt)+'</div>' : '-';
       return '<tr><td><div class="font-mono font-semibold">'+esc(a.email)+'</div><div class="text-[11px]" style="color:var(--muted)">'+esc(a.plan || '-')+'</div></td><td><span class="tag '+quotaTag+'">'+esc(quotaState)+'</span></td><td><div class="flex justify-between text-[11px] mb-1"><span>'+fmt(qu)+'</span><span>'+ap.toFixed(1)+'%</span></div><div class="progress" style="width:150px;height:5px"><div class="progress-fill" style="width:'+ap+'%;background:'+color+'"></div></div><div class="text-[11px] mt-1" style="color:var(--muted)">总量 '+fmt(ql)+'</div></td><td class="font-mono font-semibold" style="color:'+color+'">'+fmt(qr)+'</td><td><div class="font-mono text-[12px]">'+fmtDate(a.quotaCycleStart)+'</div><div class="text-[11px]" style="color:var(--muted)">至 '+fmtDate(a.quotaCycleEnd)+'</div></td><td><div class="font-semibold">'+countdown(a.quotaCycleEnd)+'</div><div class="text-[11px]" style="color:var(--muted)">'+fmtDate(a.quotaCycleEnd)+'</div></td><td><div class="flex gap-1 flex-wrap">'+policy+'</div></td><td>'+rate+'</td></tr>';
     }).join('') : '<tr><td colspan="8" style="text-align:center;padding:40px;color:var(--muted)">暂无账号，请先导入账号并刷新额度</td></tr>';
+    var qcnt = document.getElementById('quotaCount');
+    if (qcnt) qcnt.textContent = '共 ' + qpg.total + ' 条' + (qpg.pages > 1 ? ' · 第 ' + qpg.page + '/' + qpg.pages + ' 页' : '');
+    var qpager = document.getElementById('quotaPager');
+    if (qpager) qpager.innerHTML = pagerHTML(qpg, 'quotaGoto');
     var rules = document.getElementById('quotaRules');
     if (rules) {
       var th = state.settings['alert_quota'] || '0.2';
@@ -679,10 +706,10 @@
   });
   document.addEventListener('input', function (e) {
     if (e.target && e.target.id === 'logSearch') { state.query = e.target.value; renderLogsReal(); }
-    if (e.target && e.target.id === 'poolSearch') { state.poolQuery = e.target.value; renderPoolsReal(); }
+    if (e.target && e.target.id === 'poolSearch') { state.poolQuery = e.target.value; state.poolPage = 1; renderPoolsReal(); }
   });
   document.addEventListener('change', function (e) {
-    if (e.target && e.target.id === 'poolStatus') { state.poolStatus = e.target.value || 'ALL'; renderPoolsReal(); }
+    if (e.target && e.target.id === 'poolStatus') { state.poolStatus = e.target.value || 'ALL'; state.poolPage = 1; renderPoolsReal(); }
     if (e.target && e.target.id === 'statsRange') {
       var v = e.target.value;
       var days = v === 'month' ? new Date().getDate() : parseInt(v, 10);
