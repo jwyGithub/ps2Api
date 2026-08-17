@@ -91,44 +91,6 @@ func selectedTools(tools []interface{}, choice interface{}) ([]interface{}, stri
 	return nil, ""
 }
 
-// codexToolNamespaces 是 Codex 内部带点号的工具命名空间。OpenAI 工具名不允许点号，
-// Codex 把 functions.exec 序列化成 functions__exec 发出；但它的执行器只认带点号的原名，
-// 不做反向映射，于是网关转发的 functions__exec 被判为 “unsupported custom tool call”，
-// 模型反复重发同一调用。这里在出站方向把已知命名空间的第一个 __ 还原成 . 让 Codex 认得。
-// 仅限这两个命名空间，避免误伤 MCP 惯用的 server__tool 这类字面 __ 工具名。
-var codexToolNamespaces = []string{"functions", "collaboration"}
-
-func remapCodexToolName(name string) string {
-	for _, ns := range codexToolNamespaces {
-		if strings.HasPrefix(name, ns+"__") {
-			return ns + "." + strings.TrimPrefix(name, ns+"__")
-		}
-	}
-	return name
-}
-
-func remapCodexToolCallsForOpenAI(calls []ToolCall, endpoint string) {
-	if endpoint != "openai" {
-		return
-	}
-	for i := range calls {
-		calls[i].Function.Name = remapCodexToolName(calls[i].Function.Name)
-	}
-}
-
-func remapCodexDeltasForOpenAI(deltas []Delta, endpoint string) {
-	if endpoint != "openai" {
-		return
-	}
-	for i := range deltas {
-		for j := range deltas[i].ToolCalls {
-			if fn := deltas[i].ToolCalls[j].Function; fn != nil {
-				fn.Name = remapCodexToolName(fn.Name)
-			}
-		}
-	}
-}
-
 func extractToolName(tool interface{}) string {
 	m, ok := tool.(map[string]interface{})
 	if !ok {

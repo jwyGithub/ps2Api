@@ -14,7 +14,7 @@
     stats: {}, accounts: [], logs: [],
     analytics: {}, settings: {}, settingsDefs: [], apiKey: '',
     alerts: [], alertSummary: {},
-    days: 14, page: 'overview', paused: false, filter: 'ALL', query: '', poolQuery: '', poolStatus: 'ALL', alertTab: 'open',
+    days: 14, page: 'overview', poolQuery: '', poolStatus: 'ALL', alertTab: 'open',
     poolPage: 1, quotaPage: 1
   };
   var PAGE_SIZE = 20;
@@ -44,7 +44,7 @@
   }
 
   function bootstrapDashboard() {
-    var names = ['fragments/topnav.html', 'fragments/sidebar.html', 'fragments/page-overview.html', 'fragments/page-stats.html', 'fragments/page-logs.html', 'fragments/page-pools.html', 'fragments/page-quota.html', 'fragments/page-routing.html', 'fragments/page-alerts.html', 'fragments/page-settings.html', 'fragments/drawer.html'];
+    var names = ['fragments/topnav.html', 'fragments/sidebar.html', 'fragments/page-overview.html', 'fragments/page-stats.html', 'fragments/page-pools.html', 'fragments/page-quota.html', 'fragments/page-routing.html', 'fragments/page-alerts.html', 'fragments/page-settings.html', 'fragments/drawer.html'];
     return Promise.all(names.map(loadFragment)).then(function (parts) {
       var app = document.getElementById('dashboard-app');
       if (!app) return;
@@ -135,11 +135,10 @@
     state.page = page;
     document.querySelectorAll('.page').forEach(function (el) { el.classList.toggle('active', el.id === 'page-' + page); });
     document.querySelectorAll('.sidebar-item[data-page]').forEach(function (el) { el.classList.toggle('active', el.dataset.page === page); });
-    var names = { overview:'概览', stats:'统计分析', logs:'实时日志', pools:'号池管理', quota:'额度管理', routing:'路由策略', alerts:'告警中心', settings:'系统设置' };
+    var names = { overview:'概览', stats:'统计分析', pools:'号池管理', quota:'额度管理', routing:'路由策略', alerts:'告警中心', settings:'系统设置' };
     setText('#crumb', names[page] || page);
     if (page === 'pools') renderPoolsReal();
     if (page === 'quota') renderQuotaReal();
-    if (page === 'logs') renderLogsReal();
     if (page === 'alerts') renderAlertsReal();
     if (page === 'routing') renderRoutingReal();
     if (page === 'settings') renderSettingsReal();
@@ -185,7 +184,6 @@
     var pages = {
       overview: ['stats', 'accounts', 'logs', 'analytics', 'alerts'],
       stats: ['stats', 'analytics'],
-      logs: ['logs'],
       pools: ['accounts', 'analytics'],
       quota: ['accounts', 'analytics', 'settings', 'alerts'],
       routing: ['settings'],
@@ -198,13 +196,11 @@
 
   function renderAll() {
     renderRealData(); renderStatsReal(); renderChartsReal(); renderTopAccounts();
-    renderPoolsReal(); renderQuotaReal(); renderLogsReal(); renderAlertsReal();
+    renderPoolsReal(); renderQuotaReal(); renderAlertsReal();
     renderRoutingReal(); renderSettingsReal(); renderOverviewActivity(); renderSidebarBadges();
   }
 
   function renderSidebarBadges() {
-    var lb = document.querySelector('.sidebar-item[data-page="logs"] .badge');
-    if (lb) lb.textContent = state.logs.length;
     var pb = document.querySelector('.sidebar-item[data-page="pools"] .badge');
     if (pb) pb.textContent = state.accounts.length;
     var ab = document.querySelector('.sidebar-item[data-page="alerts"] .badge');
@@ -385,31 +381,6 @@
       var detail = l.model || l.errorMessage || '未知请求';
       return '<div class="timeline-item"><div class="flex items-start justify-between gap-3"><div><div class="text-[13px] font-semibold">'+label+' <span class="font-mono" style="color:var(--accent)">'+esc(detail)+'</span></div><div class="text-[12px] mt-0.5" style="color:var(--fg-2)">账号 #'+(l.accountId || '-')+' · '+(l.totalTokens || 0)+' tokens · '+(l.durationMs || 0)+'ms</div></div><span class="text-[11px] font-mono whitespace-nowrap" style="color:var(--muted)">'+ago(l.createdAt)+'</span></div></div>';
     }).join('') || '<div style="padding:20px;color:var(--muted)">暂无活动</div>';
-  }
-
-  // ─── 实时日志 ───────────────────────────────────────────────
-  function endpointLabel(ep) {
-    return ep === 'anthropic' ? 'Anthropic' : ep === 'openai' ? 'OpenAI' : '—';
-  }
-  function renderLogsReal() {
-    var stream = document.getElementById('logStream'); if (!stream) return;
-    var rows = state.logs.filter(function (l) {
-      var lv = l.status === 'success' ? 'SUCCESS' : 'ERROR';
-      if (state.filter !== 'ALL' && lv !== state.filter) return false;
-      if (!state.query) return true;
-      var q = state.query.toLowerCase();
-      return (l.model || '').toLowerCase().indexOf(q) >= 0
-        || (l.errorMessage || '').toLowerCase().indexOf(q) >= 0
-        || (l.endpoint || '').toLowerCase().indexOf(q) >= 0
-        || (l.accountId || '').toString().indexOf(q) >= 0;
-    });
-    var count = document.getElementById('logCount');
-    if (count) count.textContent = rows.length + ' 条';
-    stream.innerHTML = rows.map(function (l) {
-      var level = l.status === 'success' ? 'SUCCESS' : 'ERROR';
-      var ep = endpointLabel(l.endpoint);
-      return '<div class="log-line"><span class="log-time">'+new Date(l.createdAt).toLocaleTimeString()+'</span><span class="log-level '+level+'">'+level+'</span><span class="log-tag log-tag-ep">'+ep+'</span><span class="log-msg" style="flex:1">'+esc((l.model || '-')+' · '+(l.errorMessage || (l.totalTokens || 0)+' tokens · '+(l.durationMs || 0)+'ms'))+'</span></div>';
-    }).join('') || '<div style="padding:30px;color:var(--muted);text-align:center">暂无请求日志</div>';
   }
 
   // ─── 告警中心（真实告警记录）───────────────────────────────
@@ -670,31 +641,15 @@
     toast('额度快照已导出');
   };
   window.checkHealth = function () { loadAll().then(function () { toast('主动检查完成'); }); };
-  window.toggleLogPause = function () {
-    state.paused = !state.paused;
-    var btn = document.getElementById('pauseBtn');
-    if (btn) btn.innerHTML = state.paused
-      ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg> 继续'
-      : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect width="4" height="16" x="6" y="4"/><rect width="4" height="16" x="14" y="4"/></svg> 暂停';
-    toast(state.paused ? '日志轮询已暂停' : '日志轮询已恢复');
-  };
-  window.clearLogs = function () { state.logs = []; renderLogsReal(); toast('日志已清空（仅本次会话，后端日志保留）'); };
   window.exportReport = function () {
     var data = JSON.stringify({ exported: new Date().toISOString(), stats: state.stats, accounts: state.accounts, analytics: state.analytics, alerts: state.alerts }, null, 2);
     download('postman2api-report-' + new Date().toISOString().slice(0, 10) + '.json', data);
     toast('报表已导出（真实数据）');
   };
-  window.exportLogs = function () {
-    var data = JSON.stringify({ exported: new Date().toISOString(), logs: state.logs }, null, 2);
-    download('postman2api-logs-' + new Date().toISOString().slice(0, 10) + '.json', data);
-    toast('明细已导出');
-  };
   window.setTrafficRange = function (days) { state.days = days; loadAll().then(function () { toast('已切换为最近 ' + days + ' 天'); }); };
 
   // ─── 事件绑定 ───────────────────────────────────────────────
   document.addEventListener('click', function (e) {
-    var filter = e.target.closest && e.target.closest('.log-filter');
-    if (filter) { state.filter = filter.dataset.level || 'ALL'; renderLogsReal(); return; }
     var range = e.target.closest && e.target.closest('[data-range]');
     if (range) { var d = parseInt((range.dataset.range || '14').replace('d', ''), 10); if (d > 0) setTrafficRange(d); return; }
     var alertTab = e.target.closest && e.target.closest('#page-alerts .tab');
@@ -705,7 +660,6 @@
     }
   });
   document.addEventListener('input', function (e) {
-    if (e.target && e.target.id === 'logSearch') { state.query = e.target.value; renderLogsReal(); }
     if (e.target && e.target.id === 'poolSearch') { state.poolQuery = e.target.value; state.poolPage = 1; renderPoolsReal(); }
   });
   document.addEventListener('change', function (e) {
@@ -723,7 +677,7 @@
   function startDashboard() {
     bootstrapDashboard().then(function () {
       loadAll();
-      setInterval(function () { if (!state.paused) refreshCurrentPage(); }, 5000);
+      setInterval(function () { refreshCurrentPage(); }, 5000);
     }).catch(function (err) {
       var app = document.getElementById('dashboard-app');
       if (app) app.innerHTML = '<div style="padding:32px;color:#B91C1C;font-family:monospace">Dashboard load failed: ' + esc(err.message) + '</div>';

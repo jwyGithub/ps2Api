@@ -7,38 +7,6 @@ import (
 	"testing"
 )
 
-func TestRemapCodexToolName(t *testing.T) {
-	cases := map[string]string{
-		"functions__exec":               "functions.exec",
-		"functions__wait":               "functions.wait",
-		"functions__request_user_input": "functions.request_user_input", // 只还原命名空间分隔符
-		"collaboration__handoff":        "collaboration.handoff",
-		"get_weather":                   "get_weather",             // 普通工具不变
-		"mcp__codegraph__explore":       "mcp__codegraph__explore", // 非目标命名空间的字面 __ 不动
-	}
-	for in, want := range cases {
-		if got := remapCodexToolName(in); got != want {
-			t.Errorf("remapCodexToolName(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-func TestRemapCodexToolCallsForOpenAIOnly(t *testing.T) {
-	openAI := []ToolCall{{ID: "call_1", Type: "function"}}
-	openAI[0].Function.Name = "functions__exec"
-	remapCodexToolCallsForOpenAI(openAI, "openai")
-	if openAI[0].Function.Name != "functions.exec" {
-		t.Fatalf("openai name = %q", openAI[0].Function.Name)
-	}
-
-	anthropic := []ToolCall{{ID: "toolu_1", Type: "function"}}
-	anthropic[0].Function.Name = "functions__exec"
-	remapCodexToolCallsForOpenAI(anthropic, "anthropic")
-	if anthropic[0].Function.Name != "functions__exec" {
-		t.Fatalf("anthropic name = %q", anthropic[0].Function.Name)
-	}
-}
-
 func TestParseSimulatedToolCalls(t *testing.T) {
 	text := `I'll look that up.
 

@@ -903,7 +903,6 @@ func (p *Provider) Chat(ctx context.Context, acc *store.Account, req *ChatReques
 	res.ToolCalls = collectToolCalls(toolAcc)
 	p.rememberToolGroups(acc.ID, res.ToolCalls)
 	res.Content = applySimulatedTools(res, res.Content, tools)
-	remapCodexToolCallsForOpenAI(res.ToolCalls, req.Endpoint)
 	res.PromptTokens = EstimateMessagesTokens(req.Messages)
 	res.CompletionTokens = EstimateTokens(res.Content + res.ReasoningContent)
 	p.RememberConversation(acc.ID, req.Messages, res)
@@ -1038,7 +1037,6 @@ func (p *Provider) StreamChat(ctx context.Context, acc *store.Account, req *Chat
 		_ = flushText()
 		res.ToolCalls = collectToolCalls(toolAcc)
 		p.rememberToolGroups(acc.ID, res.ToolCalls)
-		remapCodexToolCallsForOpenAI(res.ToolCalls, req.Endpoint)
 		for i, tc := range res.ToolCalls {
 			_ = emit(Delta{ToolCalls: []DeltaToolCall{{
 				Index: i,
@@ -1056,7 +1054,6 @@ func (p *Provider) StreamChat(ctx context.Context, acc *store.Account, req *Chat
 		return res
 	}
 	cleaned, sim := simulatedDeltas(content.String(), tools)
-	remapCodexDeltasForOpenAI(sim, req.Endpoint)
 	content.Reset()
 	if cleaned != "" {
 		_ = emit(Delta{Content: cleaned})
