@@ -365,7 +365,7 @@ func (p *Provider) buildThirdPartyTools(tools []interface{}) map[string]interfac
 	var mcpTools []map[string]interface{}
 	for _, tool := range tools {
 		name := extractToolName(tool)
-		if name == "" {
+		if name == "" || isClientReservedTool(name) {
 			continue
 		}
 		desc := extractToolDesc(tool)

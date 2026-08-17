@@ -29,8 +29,16 @@
     var arrow = function (dir, disabled, target) {
       return '<button class="icon-btn"' + (disabled ? ' disabled style="opacity:0.4;"' : ' onclick="' + gotoFn + '(' + target + ')"') + '><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="' + (dir < 0 ? 'm15 18-6-6 6-6' : 'm9 18 6-6-6-6') + '"/></svg></button>';
     };
+    var btn = function (i) { return '<button class="icon-btn"' + (i === p.page ? ' style="background: var(--accent); color: white;"' : ' onclick="' + gotoFn + '(' + i + ')"') + '>' + i + '</button>'; };
+    var ell = '<button class="icon-btn" disabled style="opacity:0.4;">…</button>';
+    // 窗口化页码：首页 … 当前±2 … 末页（仿 element-ui / ant-design-vue）
+    var nums = [];
+    for (var i = 1; i <= p.pages; i++) {
+      if (i === 1 || i === p.pages || (i >= p.page - 2 && i <= p.page + 2)) nums.push(i);
+      else if (nums[nums.length - 1] !== '…') nums.push('…');
+    }
     var html = arrow(-1, p.page <= 1, p.page - 1);
-    for (var i = 1; i <= p.pages; i++) html += '<button class="icon-btn"' + (i === p.page ? ' style="background: var(--accent); color: white;"' : ' onclick="' + gotoFn + '(' + i + ')"') + '>' + i + '</button>';
+    for (var j = 0; j < nums.length; j++) html += nums[j] === '…' ? ell : btn(nums[j]);
     return html + arrow(1, p.page >= p.pages, p.page + 1);
   }
   var charts = {};

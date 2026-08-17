@@ -16,6 +16,7 @@
 - [配置](#配置)
 - [API 参考](#api-参考)
 - [支持的模型](#支持的模型)
+- [已知限制](#已知限制)
 - [开发](#开发)
 - [目录结构](#目录结构)
 - [许可](#许可)
@@ -192,6 +193,28 @@ Base URL：`http://127.0.0.1:1930`。除面板只读接口外，均需 `Authoriz
 | `gpt-5.6-sol` / `terra` / `luna`          | 128K   | 32K      | ✓    |
 | `gpt-5.5` / `5.4` / `5.2`                 | 128K   | 32K      | —    |
 | `auto`                                    | 200K   | 64K      | —    |
+
+## 已知限制
+
+### 不支持"客户端本地执行工具"型的 Agent 客户端（如 Codex CLI）
+
+本网关的上游只有一条链路——Postman **Agent Mode**（`gateway.postman.com/chat` / `{sub}.postman.co/_gw/chat`，`x-pstmn-req-service: agent-mode-service`）。Postman 没有暴露任何"纯 completion / 非 Agent Mode"端点，所以服务端的 harness（系统提示词 + 原生工具目录 + exec 运行时）是强制的，无法关闭。
+
+这带来一个根本性的不兼容：**把网关接给"自己在本地执行工具"的 Agent 客户端（如 Codex CLI）时，工具调用无法闭环。**
+
+现象与成因：
+
+- 客户端会注册自己的保留工具（`functions__*`、`collaboration__*`）。Agent Mode 模型（`gpt-5.6-sol` 等）收到后，会以**服务端 exec 编排格式**回调它们——`functions__exec` 的参数是一段调用 `tools.exec_command` / `apply_patch` 的 **JavaScript 程序**（含 `Promise.all`、变量绑定、对结果的后续计算），而不是一次结构化的命令调用。
+- 客户端无法执行这种调用，回 `unsupported custom tool call` → 网关据此熔断（`400 tool_execution_error`，见 [internal/api/api.go](internal/api/api.go)）→ 客户端重发同一调用 → 死循环。
+- 该调用的 `toolCallGroupId` 恒为 `null`，无法经 Postman 原生工具回传协议闭环。
+
+已做的处理与边界：
+
+- **止血（已实现）**：出站构造第三方工具时过滤掉客户端保留命名空间（`functions__` / `collaboration__`，见 [internal/provider/toolsim.go](internal/provider/toolsim.go) 的 `isClientReservedTool`）。这样不再向上游播发这些必然无法经代理执行的工具，**死循环被彻底消除**。
+- **无法做到**："让 Codex 在本机执行命令"。这不是难度问题——Postman 只有 Agent Mode 一条路由，服务端 harness 拿不掉。
+- **注入提示词也改不了**：注入的系统提示词能影响回复语言 / persona，但**改不了 exec 的编排格式**（很可能已 fine-tune 进模型），实测仍为 `functions__exec`。
+
+**正确定位**：本网关是 **Postman Agent 的 OpenAI / Anthropic 兼容外壳**——适合当对话后端、Postman 工作区后端使用；不适合作为"让本地 Agent 客户端借 Postman 额度在本机干活"的桥接。
 
 ## 开发
 

@@ -7,6 +7,41 @@ import (
 	"testing"
 )
 
+func TestIsClientReservedTool(t *testing.T) {
+	cases := map[string]bool{
+		"functions__exec":            true,
+		"functions.exec":             true,
+		"collaboration__spawn_agent": true,
+		"collaboration.handoff":      true,
+		"get_weather":                false,
+		"mcp__codegraph__explore":    false, // 非保留命名空间的字面 __ 不误伤
+		"functionsX":                 false, // 前缀必须带分隔符
+	}
+	for name, want := range cases {
+		if got := isClientReservedTool(name); got != want {
+			t.Errorf("isClientReservedTool(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestBuildThirdPartyToolsDropsReserved(t *testing.T) {
+	var p Provider
+	tools := []interface{}{
+		map[string]interface{}{"type": "function", "function": map[string]interface{}{"name": "functions__exec"}},
+		map[string]interface{}{"type": "function", "function": map[string]interface{}{"name": "collaboration__wait_agent"}},
+		map[string]interface{}{"type": "function", "function": map[string]interface{}{"name": "get_weather"}},
+	}
+	out := p.buildThirdPartyTools(tools)
+	proxy, ok := out["proxy-tools"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("proxy-tools missing: %#v", out)
+	}
+	list, _ := proxy["tools"].([]map[string]interface{})
+	if len(list) != 1 || list[0]["name"] != "get_weather" {
+		t.Fatalf("reserved tools not filtered, got %#v", list)
+	}
+}
+
 func TestParseSimulatedToolCalls(t *testing.T) {
 	text := `I'll look that up.
 

@@ -91,6 +91,23 @@ func selectedTools(tools []interface{}, choice interface{}) ([]interface{}, stri
 	return nil, ""
 }
 
+// clientReservedToolPrefixes 是 Codex 等客户端只在本地执行的保留工具命名空间。
+// 客户端会把它们上报到 tools 里，但不接受经外部端点回传的调用：一旦转发给上游让
+// 模型调用，回传后必被客户端判为 "unsupported custom tool call"，触发 api.go 里的
+// UnsupportedToolResult 熔断（400）与客户端重发，形成死循环（见 traces：functions__exec
+// 被上游发出 1367 次、toolCallGroupId 恒为 null，且点号/下划线两种名字均被拒）。
+// 不向上游播发这些工具即可从根上消除死循环——它们本就 100% 无法经代理执行。
+var clientReservedToolPrefixes = []string{"functions__", "functions.", "collaboration__", "collaboration."}
+
+func isClientReservedTool(name string) bool {
+	for _, p := range clientReservedToolPrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func extractToolName(tool interface{}) string {
 	m, ok := tool.(map[string]interface{})
 	if !ok {
