@@ -46,6 +46,31 @@ func TestBuildThirdPartyToolsDropsReserved(t *testing.T) {
 	}
 }
 
+func TestBuildThirdPartyToolsCompactsClaudeCodePayload(t *testing.T) {
+	p := New()
+	out := p.buildThirdPartyTools([]interface{}{map[string]interface{}{
+		"name":        "large_tool",
+		"description": strings.Repeat("long description ", 100),
+		"input_schema": map[string]interface{}{
+			"type":        "object",
+			"description": "schema docs",
+			"required":    []interface{}{"command"},
+			"properties": map[string]interface{}{
+				"command": map[string]interface{}{"type": "string", "description": "property docs", "default": "pwd"},
+			},
+		},
+	}})
+	tool := out["proxy-tools"].(map[string]interface{})["tools"].([]map[string]interface{})[0]
+	if len(tool["description"].(string)) > MaxToolDescLen {
+		t.Fatalf("tool description was not bounded: %d", len(tool["description"].(string)))
+	}
+	schema := tool["parameters"].(map[string]interface{})
+	command := schema["properties"].(map[string]interface{})["command"].(map[string]interface{})
+	if schema["description"] != nil || command["description"] != nil || command["default"] != nil || command["type"] != "string" {
+		t.Fatalf("tool schema was not safely compacted: %#v", schema)
+	}
+}
+
 func TestParseSimulatedToolCalls(t *testing.T) {
 	text := `I'll look that up.
 

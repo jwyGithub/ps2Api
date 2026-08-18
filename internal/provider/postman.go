@@ -33,6 +33,7 @@ const (
 
 	RequestTimeout = 300 * time.Second
 	MaxQueryLen    = 9500
+	MaxToolDescLen = 512
 )
 
 // Tokens 兼容桌面（access_token）和 web（postman.sid）两种登录态。
@@ -379,8 +380,10 @@ func (p *Provider) buildThirdPartyTools(tools []interface{}) map[string]interfac
 		desc := extractToolDesc(tool)
 		if desc == "" {
 			desc = name
+		} else if len(desc) > MaxToolDescLen {
+			desc = strings.ToValidUTF8(desc[:MaxToolDescLen], "")
 		}
-		params := extractToolSchema(tool)
+		params := compactToolSchema(extractToolSchema(tool))
 		mcpTools = append(mcpTools, map[string]interface{}{
 			"name": name, "description": desc, "parameters": params,
 		})
@@ -389,6 +392,29 @@ func (p *Provider) buildThirdPartyTools(tools []interface{}) map[string]interfac
 		return map[string]interface{}{}
 	}
 	return map[string]interface{}{"proxy-tools": map[string]interface{}{"tools": mcpTools}}
+}
+
+func compactToolSchema(value interface{}) interface{} {
+	switch v := value.(type) {
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(v))
+		for key, child := range v {
+			switch key {
+			case "description", "title", "examples", "default", "$comment":
+				continue
+			}
+			out[key] = compactToolSchema(child)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(v))
+		for i, child := range v {
+			out[i] = compactToolSchema(child)
+		}
+		return out
+	default:
+		return value
+	}
 }
 
 type splitResult struct {
@@ -430,7 +456,7 @@ func formatAssistantToolCalls(raw json.RawMessage) string {
 	}
 	var out []string
 	for _, call := range calls {
-		out = append(out, fmt.Sprintf("[Assistant Tool Call id=%s name=%s]\n%s", call.ID, call.Function.Name, call.Function.Arguments))
+		out = append(out, fmt.Sprintf("[Assistant Tool Call id=%s name=%s]", call.ID, call.Function.Name))
 	}
 	return strings.Join(out, "\n\n")
 }
@@ -511,6 +537,10 @@ func (p *Provider) splitMessages(messages []ChatMessage, convID string) splitRes
 		if i == queryIdx || i >= skipFrom {
 			continue
 		}
+		if msg.Role == "tool" || isAnthropicToolResult(msg) {
+			contextParts = append(contextParts, "[Previous tool result omitted]")
+			continue
+		}
 		text := ExtractText(msg.Content)
 		switch msg.Role {
 		case "system":
@@ -530,8 +560,6 @@ func (p *Provider) splitMessages(messages []ChatMessage, convID string) splitRes
 				block += "\n\n" + calls
 			}
 			contextParts = append(contextParts, block)
-		case "tool":
-			contextParts = append(contextParts, fmt.Sprintf("Tool result for id=%s:\n%s", msg.ToolCallID, text))
 		}
 	}
 	context := strings.Join(contextParts, "\n\n")
@@ -1225,6 +1253,11 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 		res.AuthFailed = true
 		return fmt.Errorf("%s", res.Error)
 	}
+	if isCloudflareHTMLRejection(resp.StatusCode, resp.Header) {
+		res.Error = "Postman gateway rejected request (403, Cloudflare)"
+		res.RequestRejected = true
+		return fmt.Errorf("%s", res.Error)
+	}
 
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
 		res.Error = fmt.Sprintf("Postman auth failed (%d)", resp.StatusCode)
@@ -1301,6 +1334,12 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 	}
 	res.Success = true
 	return nil
+}
+
+func isCloudflareHTMLRejection(status int, headers http.Header) bool {
+	return status == http.StatusForbidden &&
+		strings.EqualFold(strings.TrimSpace(headers.Get("Server")), "cloudflare") &&
+		strings.Contains(strings.ToLower(headers.Get("Content-Type")), "text/html")
 }
 
 // ---------- token 估算 ----------

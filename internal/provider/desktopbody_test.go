@@ -94,3 +94,14 @@ func TestPostmanIdentityErrorDetectsSuccessfulHTTPAuthFailure(t *testing.T) {
 		t.Fatal("expected Postman identity failure from X-Pm-Error headers")
 	}
 }
+
+func TestCloudflareHTML403IsRequestRejected(t *testing.T) {
+	h := http.Header{"Server": {"cloudflare"}, "Content-Type": {"text/html; charset=UTF-8"}}
+	if !isCloudflareHTMLRejection(http.StatusForbidden, h) {
+		t.Fatal("expected Cloudflare HTML 403 to be request-level rejection")
+	}
+	h.Set("Content-Type", "application/json")
+	if isCloudflareHTMLRejection(http.StatusForbidden, h) {
+		t.Fatal("Postman JSON 403 must remain an authentication failure")
+	}
+}

@@ -263,6 +263,20 @@ func TestBuildBodyTruncatesOversizedSeedContext(t *testing.T) {
 	}
 }
 
+func TestBuildBodyOmitsHistoricalToolPayloadsFromSeed(t *testing.T) {
+	p := New()
+	body := p.buildBody(&ChatRequest{Messages: []ChatMessage{
+		mustMsg(t, "user", "start"),
+		{Role: "assistant", ToolCalls: rawJSON(t, `[{"id":"call_1","type":"function","function":{"name":"shell","arguments":"{\"command\":\"cat secrets\"}"}}]`)},
+		{Role: "tool", ToolCallID: "call_1", Content: rawText(t, "sensitive command output")},
+		mustMsg(t, "user", "continue"),
+	}}, &Tokens{PostmanSID: "sid", UserID: "u", WorkspaceID: "w", WorkspaceSubdomain: "sub"}, "test", 1)
+	seed := body["input"].(map[string]interface{})["seedingMessages"].([]map[string]string)[0]["content"]
+	if strings.Contains(seed, "sensitive command output") || strings.Contains(seed, "cat secrets") || !strings.Contains(seed, "Previous tool result omitted") {
+		t.Fatalf("historical tool payload leaked into seed: %q", seed)
+	}
+}
+
 func TestToolResultWithTrailingTokenMetadataReplaysHistory(t *testing.T) {
 	p := New()
 	first := []ChatMessage{mustMsg(t, "user", "read file")}
