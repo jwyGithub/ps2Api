@@ -13,6 +13,10 @@ func TestIsClientReservedTool(t *testing.T) {
 		"functions.exec":             true,
 		"collaboration__spawn_agent": true,
 		"collaboration.handoff":      true,
+		"executeShellCommand":        true, // Agent Mode 原生工具，thirdParty 重名会被上游整个拒绝
+		"readFile":                   true,
+		"listDirectory":              true,
+		"searchInFiles":              true,
 		"get_weather":                false,
 		"mcp__codegraph__explore":    false, // 非保留命名空间的字面 __ 不误伤
 		"functionsX":                 false, // 前缀必须带分隔符
@@ -196,5 +200,26 @@ func TestSelectedToolsHonorsChoice(t *testing.T) {
 	got, instruction := selectedTools(tools, map[string]interface{}{"type": "function", "function": map[string]interface{}{"name": "second"}})
 	if len(got) != 1 || extractToolName(got[0]) != "second" || !strings.Contains(instruction, "second") {
 		t.Fatalf("specific selection = %#v, %q", got, instruction)
+	}
+}
+
+func TestIsRequestRejectionMessage(t *testing.T) {
+	reject := []string{
+		"Some of your MCP servers have tool names that are reseved for Agent Mode. Try removing the MCP servers with these tools: executeShellCommand",
+		"unsupported custom tool call: functions__exec",
+		"unsupported call: mcp__postman_local__executeShellCommand",
+		"No tools available for this request",
+	}
+	for _, m := range reject {
+		if !isRequestRejectionMessage(m) {
+			t.Errorf("expected request-rejection for %q", m)
+		}
+	}
+	// 账号/网络类错误不能被误判为请求拒绝(否则不会触发换号/重试)
+	keep := []string{"Postman AI quota exceeded", "Postman rate limited", `write tcp 192.1.1.1: broken pipe`, "Upstream timeout"}
+	for _, m := range keep {
+		if isRequestRejectionMessage(m) {
+			t.Errorf("must NOT classify as request-rejection: %q", m)
+		}
 	}
 }

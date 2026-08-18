@@ -99,7 +99,49 @@ func selectedTools(tools []interface{}, choice interface{}) ([]interface{}, stri
 // 不向上游播发这些工具即可从根上消除死循环——它们本就 100% 无法经代理执行。
 var clientReservedToolPrefixes = []string{"functions__", "functions.", "collaboration__", "collaboration."}
 
+// agentModeNativeTools 是 Postman Agent Mode 的原生工具名（desktop local-mode 经
+// nativeToolsHash 已声明）。客户端（如 Codex 的本地 MCP）会把同名工具作为 thirdParty
+// 重复上报，而上游对这些保留名会整个拒绝请求：
+//
+//	"Some of your MCP servers have tool names that are reserved for Agent Mode.
+//	 Try removing the MCP servers with these tools: executeShellCommand"
+//
+// 从 thirdParty 过滤掉即可——模型仍经原生 nativeToolsHash 发出这些工具（带真实
+// groupId），客户端靠工具名匹配在本地执行，与是否上报 thirdParty 无关（已验证：
+// 直连上游 thirdParty 为空时 gpt-5.6-sol 照样吐结构化 executeShellCommand）。
+var agentModeNativeTools = map[string]bool{
+	"executeShellCommand": true,
+	"readFile":            true,
+	"listDirectory":       true,
+	"searchInFiles":       true,
+}
+
+// requestRejectionMarkers 是上游因「请求内容」而拒绝时的 failure 文案特征(工具名冲突、
+// 无可用工具等)。这类失败与账号健康无关,换账号重试无用且会污染整个号池,应直接返回。
+var requestRejectionMarkers = []string{
+	"reserved for agent mode", // MCP/thirdParty 工具名与 Agent Mode 原生工具重名
+	"reseved for agent mode",  // 上游原文 typo,一并匹配
+	"remove the mcp servers",
+	"no tools available",
+	"no available tool",
+	"unsupported custom tool call",
+	"unsupported call:",
+}
+
+func isRequestRejectionMessage(msg string) bool {
+	m := strings.ToLower(msg)
+	for _, s := range requestRejectionMarkers {
+		if strings.Contains(m, s) {
+			return true
+		}
+	}
+	return false
+}
+
 func isClientReservedTool(name string) bool {
+	if agentModeNativeTools[name] {
+		return true
+	}
 	for _, p := range clientReservedToolPrefixes {
 		if strings.HasPrefix(name, p) {
 			return true

@@ -35,6 +35,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("GET /v1/models", s.models)
 	mux.HandleFunc("POST /v1/chat/completions", traceChat(s.openAI))
+	mux.HandleFunc("POST /v1/responses", traceChat(s.responses))
 	mux.HandleFunc("POST /v1/messages", traceChat(s.anthropic))
 	mux.HandleFunc("GET /api/accounts", s.accounts)
 	mux.HandleFunc("POST /api/accounts", s.addAccount)

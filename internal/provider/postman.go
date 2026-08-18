@@ -19,9 +19,12 @@ import (
 )
 
 const (
-	DesktopAppVersion  = "12.23.1"
-	DesktopToolsHash   = "clienttools-workspace_localmode_v12-desktop-win32-12.23.1-ui-260811-0231-828d6b3ed37b"
-	DesktopKBTermsHash = "kbterms-workspace_localmode_v12-desktop-win32-12.23.1-ui-260811-0231-828d6b3ed37b"
+	// Desktop* 取自真实 macOS 桌面端「本地模式(localmode)」会话抓包(native/openai/openai.chls)——
+	// 只有 localmode workspace 才暴露 executeShellCommand/readFile/listDirectory/searchInFiles
+	// 这些本地工具。hash 是工具目录快照的指纹,随桌面构建版本漂移;换新版桌面端重新抓包对齐即可。
+	DesktopAppVersion  = "12.23.7"
+	DesktopToolsHash   = "clienttools-workspace_localmode_v12-desktop-darwin-12.23.7-ui-260814-0232-a0d1149cc7c7"
+	DesktopKBTermsHash = "kbterms-workspace_localmode_v12-desktop-darwin-12.23.7-ui-260814-0232-2ebdcef5a027"
 	DesktopChatURL     = "https://gateway.postman.com/chat"
 
 	WebAppVersion  = "12.15.4-260616-1202"
@@ -539,6 +542,29 @@ func (p *Provider) splitMessages(messages []ChatMessage, convID string) splitRes
 	}
 }
 
+// desktopLocalModeExcludedTools 取自真实 localmode 桌面会话抓包里 clientTools.excludedTools。
+// 它只是「隐藏这些工具不给模型」的客户端清单,不影响 executeShellCommand 等本地工具的可用性;
+// 原样对齐是为了让网关 desktop 请求与已验证能跑 shell 的抓包一致,减少实测变量。
+var desktopLocalModeExcludedTools = []string{
+	"listDatasets", "createDataset", "previewDataset", "queryDatasetView", "deleteDataset",
+	"getDatasetSchema", "createDatasetView", "deleteDatasetView", "runQuery", "insertDatasetRows",
+	"modifyDatasetView", "refreshDatasource", "addDatasetSource", "editDatasetSource",
+	"removeDatasetSource", "testDatasourceConnection", "readDatasetRunForScenario",
+	"attachDatasetToScenario", "setDatasetInputMapping", "setDatasetInputLiteral",
+	"clearDatasetInputMapping", "runFlowWithDataset", "listCloudCodeMocks", "getCloudCodeMock",
+	"createCloudCodeMock", "updateCloudCodeMock", "deleteCloudCodeMock", "deployMockServer",
+	"listCloudMockServers", "getCloudMockServer", "getMockServerLogs", "getMockServerState",
+	"setMockServerEnableSession", "clearMockServerSession", "deleteMockServerStateKey",
+	"updateMockServer", "unpublishMockServer", "deleteMockServer", "checkMockServerSlugAvailability",
+	"createCloudSimulation", "listCloudSimulations", "getCloudSimulation", "updateCloudSimulation",
+	"deleteCloudSimulation", "startCloudSimulation", "stopCloudSimulation", "getCloudSimulationLogs",
+	"checkSimulationSlugAvailability", "validateMockForCloud", "publishMockToCloud",
+	"runCollectionWithSimulation", "getCollectionRunWithSimulationResults", "configureScenarios",
+	"startSimulation", "stopSimulation", "stopSimulationCollectionRun",
+	"analyzeCollectionRunWithSimulationResults", "listSimulations", "getSimulationConfig",
+	"createSimulationConfig", "updateSimulationConfig", "deleteSimulation", "askUser",
+}
+
 var desktopExcludedTools = []string{
 	"listDatasets", "createDataset", "previewDataset", "queryDatasetView", "deleteDataset",
 	"getDatasetSchema", "createDatasetView", "deleteDatasetView", "runQuery", "insertDatasetRows",
@@ -681,10 +707,10 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 		input["product"] = "workspace_localmode_v12"
 		body = map[string]interface{}{
 			"input":    input,
-			"platform": "DESKTOP_WINDOWS",
+			"platform": "DESKTOP_MACOS",
 			"clientTools": map[string]interface{}{
 				"nativeToolsHash": DesktopToolsHash,
-				"excludedTools":   []string{},
+				"excludedTools":   desktopLocalModeExcludedTools,
 				"thirdParty":      thirdParty,
 			},
 			"clientKBTerms": map[string]interface{}{
@@ -793,6 +819,9 @@ type Result struct {
 	RateLimited      bool
 	QuotaExhausted   bool
 	AuthFailed       bool
+	// RequestRejected 表示失败源于请求内容本身(坏请求、工具名冲突等),而非账号健康。
+	// 这种错误换账号重试无用、且会污染整个号池,router 应直接返回、不标记账号。
+	RequestRejected bool
 }
 
 func parseRateLimit(headers http.Header, now time.Time) *RateLimit {
@@ -1142,6 +1171,11 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2000))
 		Trace(ctx, "upstream.response.body", map[string]interface{}{"body": string(b), "account_id": acc.ID})
 		res.Error = fmt.Sprintf("Postman API error (%d): %s", resp.StatusCode, string(b))
+		// 4xx(除已处理的 401/403/429)是请求内容问题——坏请求、工具名冲突等,
+		// 换账号重试无用,标记为 RequestRejected 让 router 直接返回、不污染账号。
+		if resp.StatusCode < 500 {
+			res.RequestRejected = true
+		}
 		return fmt.Errorf("%s", res.Error)
 	}
 
@@ -1176,6 +1210,11 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 	if reader.Err != "" {
 		res.Error = reader.Err
 		res.Usage = reader.Usage
+		// 工具相关的 failure(工具名冲突、无可用工具等)是请求内容问题,不是账号故障——
+		// 换账号重试无用,标记 RequestRejected 让 router 直接返回、不把账号踢出池。
+		if isRequestRejectionMessage(reader.Err) {
+			res.RequestRejected = true
+		}
 		return fmt.Errorf("%s", res.Error)
 	}
 

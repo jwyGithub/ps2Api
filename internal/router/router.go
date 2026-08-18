@@ -151,6 +151,11 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 		}
 		last = res.Error
 		provider.Trace(ctx, "router.failure", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "error": res.Error})
+		if res.RequestRejected {
+			// 请求内容被拒(坏请求、工具名冲突等)——账号本身可用,不标记、不换号重试,直接返回。
+			provider.Trace(ctx, "router.request_rejected", map[string]interface{}{"account_id": acc.ID, "error": res.Error})
+			return nil, nil, &RouteError{Message: res.Error}
+		}
 		if res.QuotaExhausted {
 			excluded[acc.ID] = true
 			r.Pool.MarkExhausted(acc.ID)
@@ -199,6 +204,11 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 		}
 		last = res.Error
 		provider.Trace(ctx, "router.failure", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "error": res.Error, "stream": true})
+		if res.RequestRejected {
+			// 请求内容被拒——账号可用,不标记、不换号,直接返回。
+			provider.Trace(ctx, "router.request_rejected", map[string]interface{}{"account_id": acc.ID, "error": res.Error, "stream": true})
+			return nil, nil, &RouteError{Message: res.Error}
+		}
 		if res.QuotaExhausted {
 			excluded[acc.ID] = true
 			r.Pool.MarkExhausted(acc.ID)

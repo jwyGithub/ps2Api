@@ -12,6 +12,10 @@ var PostmanModelMap = map[string]string{
 	"claude-sonnet-4-5": "CLAUDE_45_SONNET_BEDROCK",
 	"claude-haiku-4-5":  "CLAUDE_45_HAIKU_BEDROCK",
 	"gpt-5.6-sol":       "GPT_56_SOL",
+	// codex-mini-latest 是 Codex CLI 用来激活内建 local_shell 执行器的模型名 gate:
+	// 自定义 provider 下 Codex 只按这个字符串判断要不要接线 local_shell,与真实模型无关。
+	// 映射到 GPT_56_SOL,让 Codex 以为在用 codex-mini(从而启用 local_shell),上游仍走 gpt-5.6-sol。
+	"codex-mini-latest": "GPT_56_SOL",
 	"gpt-5.6-terra":     "GPT_56_TERRA",
 	"gpt-5.6-luna":      "GPT_56_LUNA",
 	"gpt-5.5":           "GPT_55",
@@ -57,6 +61,7 @@ var PostmanModels = []ModelInfo{
 	pm("claude-sonnet-4-5", 200000, 64000, true),
 	pm("claude-haiku-4-5", 200000, 64000, false),
 	pm("gpt-5.6-sol", 128000, 32000, true),
+	pm("codex-mini-latest", 128000, 32000, true),
 	pm("gpt-5.6-terra", 128000, 32000, true),
 	pm("gpt-5.6-luna", 128000, 32000, true),
 	pm("gpt-5.5", 128000, 32000, false),
