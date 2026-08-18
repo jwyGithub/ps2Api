@@ -58,16 +58,17 @@ type RateLimit struct {
 
 // StreamReader 逐行解析 Postman agent-mode SSE 流。
 type StreamReader struct {
-	finished       bool
-	QuotaExceeded  bool
-	Usage          *Usage
-	Err            string
-	ActualModel    string
-	ConversationID string
-	sawToolCall    bool
-	toolCallIndex  map[string]int
-	toolCallGroup  map[string]string
-	lastToolID     string
+	finished        bool
+	QuotaExceeded   bool
+	Usage           *Usage
+	Err             string
+	RequestRejected bool
+	ActualModel     string
+	ConversationID  string
+	sawToolCall     bool
+	toolCallIndex   map[string]int
+	toolCallGroup   map[string]string
+	lastToolID      string
 }
 
 func NewStreamReader() *StreamReader {
@@ -286,6 +287,9 @@ func (r *StreamReader) handleFailure(data json.RawMessage) []Delta {
 	}
 	if d.ErrorType == "USAGE_LIMIT_EXCEEDED" {
 		r.QuotaExceeded = true
+	}
+	if d.ErrorType == "INPUT_VALIDATION_ERROR" {
+		r.RequestRejected = true
 	}
 	return nil
 }

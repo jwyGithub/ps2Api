@@ -27,9 +27,9 @@ const (
 	DesktopKBTermsHash = "kbterms-workspace_localmode_v12-desktop-darwin-12.23.7-ui-260814-0232-2ebdcef5a027"
 	DesktopChatURL     = "https://gateway.postman.com/chat"
 
-	WebAppVersion  = "12.15.4-260616-1202"
-	WebToolsHash   = "clienttools-workspace_v12-browser-12.15.4-260616-1202-d5808662718f"
-	WebKBTermsHash = "kbterms-workspace_v12-browser-12.15.4-260616-1202-4755650f241c"
+	WebAppVersion = "12.24.0-260817-0232"
+	WebToolsHash  = "clienttools-api_catalog-browser-12.24.0-260817-0232-8580e5ac399e"
+	WebProduct    = "api_catalog"
 
 	RequestTimeout = 300 * time.Second
 	MaxQueryLen    = 9500
@@ -41,11 +41,13 @@ type Tokens struct {
 	PostmanSID         string `json:"postman_sid,omitempty"`
 	UserID             string `json:"user_id"`
 	WorkspaceID        string `json:"workspace_id"`
+	WorkspaceUUID      string `json:"workspace_uuid,omitempty"`
 	WorkspaceSubdomain string `json:"workspace_subdomain,omitempty"`
 	UserName           string `json:"user_name,omitempty"`
 }
 
-func (t *Tokens) IsDesktop() bool { return t.AccessToken != "" }
+func (t *Tokens) IsWeb() bool     { return t.PostmanSID != "" && t.WorkspaceSubdomain != "" }
+func (t *Tokens) IsDesktop() bool { return t.AccessToken != "" && !t.IsWeb() }
 
 type ChatMessage struct {
 	Role       string          `json:"role"`
@@ -91,6 +93,9 @@ func (p *Provider) GetTokens(acc *store.Account) (*Tokens, error) {
 	}
 	if t.AccessToken == "" && t.PostmanSID == "" {
 		return nil, fmt.Errorf("tokens missing access_token or postman_sid")
+	}
+	if t.PostmanSID != "" && t.WorkspaceSubdomain == "" {
+		return nil, fmt.Errorf("tokens missing workspace_subdomain for postman.sid")
 	}
 	return &t, nil
 }
@@ -533,6 +538,13 @@ func (p *Provider) splitMessages(messages []ChatMessage, convID string) splitRes
 	if context == "" {
 		return splitResult{Query: query}
 	}
+	if len(context) > MaxQueryLen {
+		const marker = "\n...[conversation context truncated]...\n"
+		budget := MaxQueryLen - len(marker)
+		head := budget / 2
+		context = strings.ToValidUTF8(context[:head], "") + marker +
+			strings.ToValidUTF8(context[len(context)-(budget-head):], "")
+	}
 	return splitResult{
 		Query: query,
 		SeedingMessages: []map[string]string{
@@ -717,7 +729,7 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 				"nativeTermsHash": DesktopKBTermsHash,
 				"excludedKBTerms": []string{"DATASETS"},
 			},
-			"mandatoryContext": map[string]interface{}{"workspaceId": tokens.WorkspaceID},
+			"mandatoryContext": workspaceContext(tokens),
 			"selectedContext":  []interface{}{},
 			"backgroundContext": []interface{}{
 				map[string]interface{}{"type": "ACTIVE_ENVIRONMENT", "value": nil},
@@ -727,8 +739,7 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 			"availableSkills": []interface{}{},
 		}
 	} else {
-		input["product"] = "workspace_v12"
-		input["startedFrom"] = "CHAT_INPUT"
+		input["product"] = WebProduct
 		body = map[string]interface{}{
 			"input":    input,
 			"platform": "WEB",
@@ -738,10 +749,10 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 				"thirdParty":      thirdParty,
 			},
 			"clientKBTerms": map[string]interface{}{
-				"nativeTermsHash": WebKBTermsHash,
-				"excludedKBTerms": []string{"DATASETS"},
+				"nativeTermsHash": nil,
+				"excludedKBTerms": []string{},
 			},
-			"mandatoryContext":  map[string]interface{}{"workspaceId": tokens.WorkspaceID},
+			"mandatoryContext":  workspaceContext(tokens),
 			"selectedContext":   []interface{}{},
 			"backgroundContext": []interface{}{},
 			"availableSkills":   []interface{}{},
@@ -781,14 +792,20 @@ func (p *Provider) buildHeaders(tokens *Tokens) http.Header {
 	h.Set("Content-Type", "application/json")
 	h.Set("Accept", "text/event-stream")
 	h.Set("x-pstmn-req-service", "agent-mode-service")
+	h.Set("accept-language", "en-US,en;q=0.9")
 	if tokens.IsDesktop() {
 		h.Set("x-access-token", tokens.AccessToken)
 		h.Set("x-app-version", DesktopAppVersion)
-		h.Set("User-Agent", "PostmanDesktop/"+DesktopAppVersion)
+		h.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Postman/"+DesktopAppVersion+" Electron/37.10.3 Safari/537.36")
 	} else {
-		h.Set("Cookie", "postman.sid="+tokens.PostmanSID)
+		if tokens.PostmanSID != "" {
+			h.Set("Cookie", "postman.sid="+tokens.PostmanSID)
+		}
+		if tokens.AccessToken != "" {
+			h.Set("x-access-token", tokens.AccessToken)
+		}
 		h.Set("x-app-version", WebAppVersion)
-		h.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+		h.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Edg/151.0.0.0")
 		h.Set("Origin", "https://"+tokens.WorkspaceSubdomain+".postman.co")
 		h.Set("Referer", "https://"+tokens.WorkspaceSubdomain+".postman.co/")
 	}
@@ -800,6 +817,53 @@ func (p *Provider) chatURL(tokens *Tokens) string {
 		return DesktopChatURL
 	}
 	return "https://" + tokens.WorkspaceSubdomain + ".postman.co/_gw/chat"
+}
+
+func workspaceContext(tokens *Tokens) map[string]interface{} {
+	if isUUID(tokens.WorkspaceUUID) {
+		return map[string]interface{}{"workspaceId": tokens.WorkspaceUUID}
+	}
+	return map[string]interface{}{}
+}
+
+func isUUID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for i, r := range value {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if r != '-' {
+				return false
+			}
+			continue
+		}
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func postmanIdentityError(headers http.Header) string {
+	var errors []string
+	for key, values := range headers {
+		if !strings.HasPrefix(strings.ToLower(key), "x-pm-error-") {
+			continue
+		}
+		errors = append(errors, values...)
+	}
+	if len(errors) == 0 {
+		return ""
+	}
+	sort.Strings(errors)
+	joined := strings.Join(errors, "; ")
+	lower := strings.ToLower(joined)
+	if strings.Contains(lower, "identity_status") ||
+		strings.Contains(lower, "guest_unusable") ||
+		strings.Contains(lower, "jwt is missing") {
+		return joined
+	}
+	return ""
 }
 
 // ---------- 结果类型 ----------
@@ -1156,6 +1220,11 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 		"status": resp.StatusCode, "headers": resp.Header, "account_id": acc.ID,
 	})
 	res.RateLimit = parseRateLimit(resp.Header, time.Now())
+	if identityError := postmanIdentityError(resp.Header); identityError != "" {
+		res.Error = "Postman authentication failed: " + identityError
+		res.AuthFailed = true
+		return fmt.Errorf("%s", res.Error)
+	}
 
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
 		res.Error = fmt.Sprintf("Postman auth failed (%d)", resp.StatusCode)
@@ -1212,7 +1281,7 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 		res.Usage = reader.Usage
 		// 工具相关的 failure(工具名冲突、无可用工具等)是请求内容问题,不是账号故障——
 		// 换账号重试无用,标记 RequestRejected 让 router 直接返回、不把账号踢出池。
-		if isRequestRejectionMessage(reader.Err) {
+		if reader.RequestRejected || isRequestRejectionMessage(reader.Err) {
 			res.RequestRejected = true
 		}
 		return fmt.Errorf("%s", res.Error)

@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -47,7 +48,49 @@ func TestBuildBodyWebShape(t *testing.T) {
 		t.Fatalf("platform = %v, want WEB", got)
 	}
 	input := body["input"].(map[string]interface{})
-	if got := input["product"]; got != "workspace_v12" {
-		t.Fatalf("product = %v, want workspace_v12", got)
+	if got := input["product"]; got != "api_catalog" {
+		t.Fatalf("product = %v, want api_catalog", got)
+	}
+	if _, ok := input["startedFrom"]; ok {
+		t.Fatal("startedFrom should not be sent by the current web client")
+	}
+	if got := body["mandatoryContext"].(map[string]interface{}); len(got) != 0 {
+		t.Fatalf("mandatoryContext = %#v, want empty object", got)
+	}
+	kb := body["clientKBTerms"].(map[string]interface{})
+	if got := kb["nativeTermsHash"]; got != nil {
+		t.Fatalf("nativeTermsHash = %v, want null", got)
+	}
+	if got := kb["excludedKBTerms"].([]string); len(got) != 0 {
+		t.Fatalf("excludedKBTerms = %#v, want empty list", got)
+	}
+	if got := body["clientTools"].(map[string]interface{})["nativeToolsHash"]; got != WebToolsHash {
+		t.Fatalf("nativeToolsHash = %v, want %s", got, WebToolsHash)
+	}
+}
+
+func TestWebSessionWinsWhenBothTokensArePresent(t *testing.T) {
+	tokens := &Tokens{AccessToken: "access", PostmanSID: "sid", UserID: "u", WorkspaceID: "team", WorkspaceSubdomain: "sub"}
+	if tokens.IsDesktop() {
+		t.Fatal("postman.sid session should use the Web Agent Mode route")
+	}
+	h := New().buildHeaders(tokens)
+	if got := h.Get("x-app-version"); got != WebAppVersion {
+		t.Fatalf("x-app-version = %q, want %q", got, WebAppVersion)
+	}
+	if got := h.Get("Cookie"); got != "postman.sid=sid" {
+		t.Fatalf("Cookie = %q, want postman.sid cookie", got)
+	}
+	if got := h.Get("x-access-token"); got != "access" {
+		t.Fatalf("x-access-token = %q, want access token", got)
+	}
+}
+
+func TestPostmanIdentityErrorDetectsSuccessfulHTTPAuthFailure(t *testing.T) {
+	h := http.Header{}
+	h.Set("X-Pm-Error-1", "identity_status: sessions returned 401")
+	h.Set("X-Pm-Error-2", "guest_unusable: Jwt is missing")
+	if got := postmanIdentityError(h); got == "" {
+		t.Fatal("expected Postman identity failure from X-Pm-Error headers")
 	}
 }

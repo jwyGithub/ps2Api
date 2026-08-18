@@ -250,6 +250,19 @@ func TestToolResultReplaysCompleteHistoryWithoutPendingConversation(t *testing.T
 	}
 }
 
+func TestBuildBodyTruncatesOversizedSeedContext(t *testing.T) {
+	p := New()
+	body := p.buildBody(&ChatRequest{Messages: []ChatMessage{
+		mustMsg(t, "system", "HEAD"+strings.Repeat("x", MaxQueryLen*5)+"TAIL"),
+		mustMsg(t, "user", "hello"),
+	}}, &Tokens{PostmanSID: "sid", UserID: "u", WorkspaceID: "w", WorkspaceSubdomain: "sub"}, "test", 1)
+	input := body["input"].(map[string]interface{})
+	seed := input["seedingMessages"].([]map[string]string)[0]["content"]
+	if len(seed) > MaxQueryLen || !strings.Contains(seed, "HEAD") || !strings.Contains(seed, "TAIL") || !strings.Contains(seed, "context truncated") {
+		t.Fatalf("oversized seed was not safely bounded: len=%d", len(seed))
+	}
+}
+
 func TestToolResultWithTrailingTokenMetadataReplaysHistory(t *testing.T) {
 	p := New()
 	first := []ChatMessage{mustMsg(t, "user", "read file")}

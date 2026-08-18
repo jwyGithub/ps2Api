@@ -47,6 +47,14 @@ func TestUsageAndRateLimitMetadata(t *testing.T) {
 	}
 }
 
+func TestInputValidationFailureIsRequestRejected(t *testing.T) {
+	r := NewStreamReader()
+	r.Feed(`data: {"eventType":"failure","data":{"errorType":"INPUT_VALIDATION_ERROR","userMessage":"Forbidden"}}`)
+	if r.Err != "Forbidden" || !r.RequestRejected {
+		t.Fatalf("input validation failure = err %q, requestRejected %v", r.Err, r.RequestRejected)
+	}
+}
+
 func TestNormalizeArgumentsHandlesObjectAndString(t *testing.T) {
 	raw := json.RawMessage(`{"city":"Tokyo","unit":"c"}`)
 	if got, want := normalizeArguments(raw), `{"city":"Tokyo","unit":"c"}`; got != want {
