@@ -34,6 +34,11 @@ const (
 	RequestTimeout = 300 * time.Second
 	MaxQueryLen    = 9500
 	MaxToolDescLen = 512
+
+	// MaxRequestBodyWarnBytes 是出站请求体的软告警阈值。超过此值时记录告警，
+	// 因为过大的 body 更容易触发 Postman 网关侧的 Cloudflare WAF（返回 403 HTML）。
+	// 仅告警、不阻断，避免误伤合法的大请求。
+	MaxRequestBodyWarnBytes = 80 * 1024
 )
 
 // Tokens 兼容桌面（access_token）和 web（postman.sid）两种登录态。
@@ -1217,6 +1222,15 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 		res.Error = err.Error()
 		return err
 	}
+	// 出站 body 体检：超大 payload 是触发 Cloudflare WAF 403 的常见诱因，
+	// 提前告警以便定位（如历史工具原文、超大 schema 未压缩等）。仅告警不阻断。
+	if len(bodyBytes) > MaxRequestBodyWarnBytes {
+		Trace(ctx, "upstream.request.oversize", map[string]interface{}{
+			"account_id":      acc.ID,
+			"body_bytes":      len(bodyBytes),
+			"threshold_bytes": MaxRequestBodyWarnBytes,
+		})
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, RequestTimeout)
 	defer cancel()
@@ -1285,9 +1299,20 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 256*1024), 4*1024*1024)
 
+	firstPayloadLine := true
 	for scanner.Scan() {
 		line := scanner.Text()
 		Trace(ctx, "upstream.response.sse", map[string]interface{}{"line": line, "account_id": acc.ID})
+		// 首包内容探测：某些 Cloudflare 拦截会以 200/无 text/html 头返回 HTML 挑战页，
+		// 头部判定(isCloudflareHTMLRejection)漏掉，此处按流式首个非空行内容兜底。
+		if firstPayloadLine && strings.TrimSpace(line) != "" {
+			firstPayloadLine = false
+			if looksLikeHTML(line) {
+				res.Error = "Postman gateway rejected request (Cloudflare HTML in stream)"
+				res.RequestRejected = true
+				return fmt.Errorf("%s", res.Error)
+			}
+		}
 		for _, d := range reader.Feed(line) {
 			if err := emit(d); err != nil {
 				res.Error = "Client disconnected"
@@ -1340,6 +1365,16 @@ func isCloudflareHTMLRejection(status int, headers http.Header) bool {
 	return status == http.StatusForbidden &&
 		strings.EqualFold(strings.TrimSpace(headers.Get("Server")), "cloudflare") &&
 		strings.Contains(strings.ToLower(headers.Get("Content-Type")), "text/html")
+}
+
+// looksLikeHTML 判断一行流式内容是否是 HTML 文档开头。用于兜底识别未带
+// text/html 头的 Cloudflare 拦截页（挑战/阻断），此时上游本应是 SSE(data: ...)。
+func looksLikeHTML(line string) bool {
+	s := strings.ToLower(strings.TrimSpace(line))
+	return strings.HasPrefix(s, "<!doctype html") ||
+		strings.HasPrefix(s, "<html") ||
+		strings.HasPrefix(s, "<head") ||
+		strings.HasPrefix(s, "<!doctype")
 }
 
 // ---------- token 估算 ----------
