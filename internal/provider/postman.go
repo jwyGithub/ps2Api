@@ -166,6 +166,14 @@ func hasReusableHistory(messages []ChatMessage) bool {
 	return false
 }
 
+// HasReusableHistory 报告消息里是否含可复用的会话历史（assistant / tool / Anthropic tool_result）。
+// router 用它区分两类请求，对网关(Cloudflare 403)拦截采取截然不同的策略：
+//   - true（续聊）：Postman 服务端已有该会话，绑定在首次使用的账号上。换号会丢掉服务端会话
+//     上下文（请求被降级为 USER_QUERY 且历史被截断到 MaxQueryLen），故遇 403 必须原号退避重试、
+//     绝不换号、也不得改写 req.Messages（改写会破坏会话指纹 → 触发静默换号与降级）。
+//   - false（新对话）：无服务端会话可丢，遇 403 可安全换号 failover。
+func HasReusableHistory(messages []ChatMessage) bool { return hasReusableHistory(messages) }
+
 // LookupConversation 按消息历史前缀匹配已有 Postman 会话。
 // 新对话（没有 assistant/tool）一律开新会话，避免不同 agent 串上下文。
 func (p *Provider) LookupConversation(accountID int64, messages []ChatMessage) string {

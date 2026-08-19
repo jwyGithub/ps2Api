@@ -126,33 +126,6 @@ func (r *Router) gatewayCooldownDur() time.Duration {
 	return time.Duration(n) * time.Second
 }
 
-// maxGatewayCompactTries 限制「压缩后原号重试」的次数，把剩余重试额度留给换号 failover——
-// 压缩是首选(对症)修复，但若压到底仍被拦，就该退回换号，故不能吃光所有 attempt。
-const maxGatewayCompactTries = 2
-
-// gatewayCompactBudget 读取网关拦截后压缩 tool_result 正文的单块字节预算（默认 8192，下限 1024）。
-// 首次压缩用此预算，之后每次减半到下限，逐步收紧。
-func (r *Router) gatewayCompactBudget() int {
-	v, _ := r.Store.GetSetting("gateway_compact_bytes")
-	n, err := strconv.Atoi(v)
-	if err != nil || n < gatewayCompactFloor {
-		return 8192
-	}
-	return n
-}
-
-// gatewayCompactFloor 是压缩预算的下限：低于它就不再压缩(避免把 tool_result 削到无意义)，
-// 转而回退换号 failover。
-const gatewayCompactFloor = 1024
-
-// nextCompactBudget 把压缩预算减半，但不低于下限，供逐步收紧的多次压缩重试使用。
-func nextCompactBudget(b int) int {
-	if b /= 2; b < gatewayCompactFloor {
-		b = gatewayCompactFloor
-	}
-	return b
-}
-
 // gatewayBlockedError 生成面向调用方(agent 终端/模型)的明确错误：说明这是上游网关(Cloudflare)
 // 风控拦截、已尝试多少个账号、且本次「未产生任何输出」，便于终端干净停止任务、模型安全重做。
 func gatewayBlockedError(triedAccounts int) string {
@@ -186,13 +159,25 @@ func (r *Router) pickAccount(excluded map[int64]bool, messages []provider.ChatMe
 	return acc, true, err
 }
 
+// selectAccount 在 pickAccount 之上加一层「钉住」：当 pinned 非空且未被排除、账号仍可用时，
+// 强制返回它。续聊遇网关(403)拦截时用它把重试牢牢固定在原账号上——换号会丢失 Postman 服务端
+// 会话上下文（降级为 USER_QUERY + 历史截断），比单纯依赖会话指纹粘性更可靠（指纹粘性在服务重启
+// 后可能失效）。pinned 为空时退回常规的粘性 / 号池轮询选择。
+func (r *Router) selectAccount(pinned *store.Account, excluded map[int64]bool, messages []provider.ChatMessage) (*store.Account, bool, error) {
+	if pinned != nil && !excluded[pinned.ID] {
+		if acc, err := r.Store.GetAccount(pinned.ID); err == nil && acc.Status == "active" && acc.Enabled {
+			return acc, false, nil
+		}
+	}
+	return r.pickAccount(excluded, messages)
+}
+
 func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider.Result, *store.Account, error) {
 	defer r.probe(req)()
 	var last string
 	excluded := map[int64]bool{}
 	gatewayBlocks := 0
-	compactBudget := r.gatewayCompactBudget()
-	compactTries := 0
+	var pinnedAcc *store.Account // 续聊遇网关拦截时钉住原账号，绝不换号（换号会丢服务端会话上下文）
 	attempts := r.retryCount()
 	if !r.failoverEnabled() {
 		attempts = 1
@@ -201,7 +186,7 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 		if attempt > 0 {
 			time.Sleep(time.Duration(100*(1<<attempt)) * time.Millisecond)
 		}
-		acc, poolUsed, err := r.pickAccount(excluded, req.Messages)
+		acc, poolUsed, err := r.selectAccount(pinnedAcc, excluded, req.Messages)
 		if err != nil {
 			provider.Trace(ctx, "router.error", map[string]interface{}{"attempt": attempt + 1, "error": err.Error()})
 			// 因网关拦截逐个排除账号后耗尽了可用账号：返回明确的网关拦截错误(而非笼统的
@@ -228,25 +213,26 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 		last = res.Error
 		provider.Trace(ctx, "router.failure", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "error": res.Error})
 		if res.GatewayBlocked {
-			// 真实诱因是 Cloudflare WAF 托管内容规则命中请求体里累积的类 HTML/JS 文本(巨型
-			// tool_result:原始文件转储、网页抓取等),随 tool_use↔tool_result 往返轮次增多而累积
-			// ——不是账号身份、也不单纯是字节数。故首选「压缩掉这些巨型 tool_result 正文后原号重试」
-			// (对症):既缩体积又剥离触发规则的标记文本。压到下限仍被拦才回退换号 failover(兜底)。
 			provider.Trace(ctx, "router.gateway_blocked", map[string]interface{}{"account_id": acc.ID, "error": res.Error})
 			r.alertRequestRejected(acc, res)
-			if compactTries < maxGatewayCompactTries && attempt < attempts-1 {
-				if newMsgs, ok := provider.CompactMessages(req.Messages, compactBudget); ok {
-					provider.Trace(ctx, "router.gateway_compact_retry", map[string]interface{}{"account_id": acc.ID, "budget": compactBudget, "try": compactTries + 1})
-					req.Messages = newMsgs
-					compactBudget = nextCompactBudget(compactBudget)
-					compactTries++
+			if provider.HasReusableHistory(req.Messages) {
+				// 续聊：Postman 服务端会话绑定在原账号，换号必然丢上下文（请求被降级为 USER_QUERY 且
+				// 历史被截断到 MaxQueryLen，模型「失忆」）。且历史里的旧 tool_result 对 TOOL_RESPONSE 续聊
+				// 根本不出站（只发最新一轮增量，历史在服务端），压缩它们既不缩小请求体、又会改写 req.Messages
+				// 破坏会话指纹 → 触发静默换号与降级。故：钉住原账号、退避后原样重试，绝不换号、不改 req.Messages
+				// （保住指纹 → 维持 TOOL_RESPONSE + conversationId）。原号试满仍被拦才返回明确错误，由客户端「继续」。
+				if attempt < attempts-1 {
+					pinnedAcc = acc
+					provider.Trace(ctx, "router.gateway_sticky_retry", map[string]interface{}{"account_id": acc.ID})
 					time.Sleep(gatewayBackoff(attempt))
-					continue // 原号重试(不排除、不冷却):诱因是请求体而非账号
+					continue
 				}
+				return nil, nil, &RouteError{Message: gatewayBlockedError(1), GatewayBlocked: true}
 			}
-			// 压缩已到底/无可压 → 回退换号 failover:排除当前账号并打冷却标记,退避后换其他账号。
+			// 新对话：无服务端会话可丢，换号 failover 安全——排除当前账号并打冷却标记，退避后换其他账号。
 			gatewayBlocks++
 			excluded[acc.ID] = true
+			pinnedAcc = nil
 			r.Pool.MarkGatewayBlocked(acc.ID, r.gatewayCooldownDur())
 			if attempt < attempts-1 {
 				time.Sleep(gatewayBackoff(attempt))
@@ -284,14 +270,13 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 	}
 	excluded := map[int64]bool{}
 	gatewayBlocks := 0
-	compactBudget := r.gatewayCompactBudget()
-	compactTries := 0
+	var pinnedAcc *store.Account // 续聊遇网关拦截时钉住原账号，绝不换号（换号会丢服务端会话上下文）
 	attempts := r.retryCount()
 	if !r.failoverEnabled() {
 		attempts = 1
 	}
 	for attempt := 0; attempt < attempts; attempt++ {
-		acc, poolUsed, err := r.pickAccount(excluded, req.Messages)
+		acc, poolUsed, err := r.selectAccount(pinnedAcc, excluded, req.Messages)
 		if err != nil {
 			provider.Trace(ctx, "router.error", map[string]interface{}{"attempt": attempt + 1, "error": err.Error()})
 			// 因网关拦截逐个排除账号后耗尽了可用账号：返回明确的网关拦截错误(而非笼统的
@@ -318,27 +303,29 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 		last = res.Error
 		provider.Trace(ctx, "router.failure", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "error": res.Error, "stream": true})
 		if res.GatewayBlocked {
-			// 诱因是请求体里累积的巨型 tool_result(类 HTML/JS 文本触发 Cloudflare WAF 托管规则),
-			// 而非账号身份(见 Chat 内说明)。首选压缩 tool_result 正文后原号重试,压到底再回退换号。
-			// 但若已吐出过内容则不能重试(会重复输出),此时返回错误、由客户端侧发起「继续」。
-			// 注:延迟开流(首个 delta 前不落 200/不发事件)保证网关 403 时 emitted 仍为 false,故压缩/换号重试可行。
+			// 诱因是有状态的 Cloudflare 风控（WAF/Bot 评分/速率），退避后重试常能成功；见 Chat 内说明。
+			// 延迟开流（首个 delta 前不落 200 / 不发事件）保证网关 403 时 emitted 仍为 false，故可重试；
+			// 若已吐出过内容则不能重试（会重复输出），返回错误、由客户端侧发起「继续」。
 			provider.Trace(ctx, "router.gateway_blocked", map[string]interface{}{"account_id": acc.ID, "error": res.Error, "stream": true})
 			r.alertRequestRejected(acc, res)
 			if emitted {
 				return nil, nil, &RouteError{Message: "Stream failed after output started: " + last}
 			}
-			if compactTries < maxGatewayCompactTries && attempt < attempts-1 {
-				if newMsgs, ok := provider.CompactMessages(req.Messages, compactBudget); ok {
-					provider.Trace(ctx, "router.gateway_compact_retry", map[string]interface{}{"account_id": acc.ID, "budget": compactBudget, "try": compactTries + 1, "stream": true})
-					req.Messages = newMsgs
-					compactBudget = nextCompactBudget(compactBudget)
-					compactTries++
+			if provider.HasReusableHistory(req.Messages) {
+				// 续聊：钉住原账号退避重试，绝不换号、不改 req.Messages（换号/改写会丢服务端会话
+				// 上下文并降级为 USER_QUERY，见 Chat 内详注）。原号试满仍被拦才返回明确错误。
+				if attempt < attempts-1 {
+					pinnedAcc = acc
+					provider.Trace(ctx, "router.gateway_sticky_retry", map[string]interface{}{"account_id": acc.ID, "stream": true})
 					time.Sleep(gatewayBackoff(attempt))
-					continue // 原号重试(不排除、不冷却):诱因是请求体而非账号
+					continue
 				}
+				return nil, nil, &RouteError{Message: gatewayBlockedError(1), GatewayBlocked: true}
 			}
+			// 新对话：无服务端会话可丢，换号 failover 安全。
 			gatewayBlocks++
 			excluded[acc.ID] = true
+			pinnedAcc = nil
 			r.Pool.MarkGatewayBlocked(acc.ID, r.gatewayCooldownDur())
 			if attempt < attempts-1 {
 				time.Sleep(gatewayBackoff(attempt))

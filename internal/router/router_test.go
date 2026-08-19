@@ -325,10 +325,10 @@ func TestStreamQuotaExhaustedSwitchesAccountBeforeOutput(t *testing.T) {
 	}
 }
 
-// 网关 403 的真实诱因是请求体里累积的巨型 tool_result(类 HTML/JS 文本触发 Cloudflare WAF
-// 托管规则),而非账号身份。故遇 403 应「压缩掉 tool_result 正文后原号重试」而非急着换号。
-// 本例只留一个可用账号:若走换号 failover 必然因无其他账号而失败;能恢复即证明是原号压缩重试生效。
-func TestStreamGatewayBlockedCompactsAndRetriesSameAccount(t *testing.T) {
+// 续聊(带 tool_result 历史)遇网关 403 时,诱因是有状态的 Cloudflare 风控而非账号身份;
+// 且换号会丢掉 Postman 服务端会话上下文。故应「原号退避重试」而非换号。
+// 本例只留一个可用账号:若走换号 failover 必然因无其他账号而失败;能恢复即证明是原号重试生效。
+func TestStreamGatewayBlockedRetriesSameAccount(t *testing.T) {
 	r := newTestRouter(t)
 	accounts, err := r.Store.ListAccounts()
 	if err != nil || len(accounts) != 2 {
@@ -350,7 +350,7 @@ func TestStreamGatewayBlockedCompactsAndRetriesSameAccount(t *testing.T) {
 			body := "<!doctype html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>"
 			return &http.Response{StatusCode: 403, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
 		}
-		// 压缩后重试:正常 SSE 成功。
+		// 原号退避重试:正常 SSE 成功。
 		body := "data: {\"eventType\":\"conversation\",\"data\":{\"id\":\"conv-1\"}}\n\n" +
 			"data: {\"eventType\":\"textChunk\",\"data\":{\"textContent\":\"ok\"}}\n\n" +
 			"data: [DONE]\n\n"
@@ -373,13 +373,13 @@ func TestStreamGatewayBlockedCompactsAndRetriesSameAccount(t *testing.T) {
 		return nil
 	})
 	if err != nil || res == nil || !res.Success || account == nil {
-		t.Fatalf("gateway block should compact and recover on the same account: res=%+v account=%+v err=%v", res, account, err)
+		t.Fatalf("gateway block should retry and recover on the same account: res=%+v account=%+v err=%v", res, account, err)
 	}
 	if account.ID != accounts[0].ID {
 		t.Fatalf("must recover on the only enabled account %d, got %d", accounts[0].ID, account.ID)
 	}
 	if got := atomic.LoadInt32(&calls); got != 2 {
-		t.Fatalf("expected exactly 2 upstream calls (403 then compacted success), got %d", got)
+		t.Fatalf("expected exactly 2 upstream calls (403 then same-account retry success), got %d", got)
 	}
 	if output.String() != "ok" {
 		t.Fatalf("client should see recovered output, got %q", output.String())
@@ -387,7 +387,90 @@ func TestStreamGatewayBlockedCompactsAndRetriesSameAccount(t *testing.T) {
 	// 诱因是请求体而非账号:被拦账号不应被冷却/标记异常,仍可用。
 	same, err := r.Store.GetAccount(accounts[0].ID)
 	if err != nil || same.Status == "error" || same.Status == "exhausted" {
-		t.Fatalf("blocked account must stay healthy (compaction, not account fault): %+v err=%v", same, err)
+		t.Fatalf("blocked account must stay healthy (request-triggered, not account fault): %+v err=%v", same, err)
+	}
+}
+
+// 回归：续聊(有可复用历史)遇网关 403 时，必须钉住原账号退避重试，绝不换号——即使此刻有另一个
+// 健康账号可用。换号会丢失 Postman 服务端会话上下文（请求被降级为 USER_QUERY 且历史被截断），
+// 正是此前「压缩改写 req.Messages → 破坏会话指纹 → 静默换号 → 降级失忆」的根因。
+// 同时断言 req.Messages 未被就地改写（保住指纹 → 维持 TOOL_RESPONSE + conversationId）。
+func TestStreamGatewayBlockedContinuationStaysOnOriginalAccountNoDowngrade(t *testing.T) {
+	r := newTestRouter(t)
+	accounts, err := r.Store.ListAccounts()
+	if err != nil || len(accounts) != 2 {
+		t.Fatalf("accounts=%v err=%v", accounts, err)
+	}
+	for i, account := range accounts {
+		tokens, _ := json.Marshal(provider.Tokens{AccessToken: "token-" + string(rune('1'+i)), UserID: "u", WorkspaceID: "w"})
+		if err := r.Store.UpdateTokens(account.ID, string(tokens)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	acc1 := accounts[0] // token-1：会话粘性绑定的原账号
+
+	// 建立会话粘性：记住 token-1 账号上「首轮 + 助手回复」这段前缀的会话。
+	first := []provider.ChatMessage{mustMsg(t, "user", "read the file")}
+	r.Provider.RememberConversation(acc1.ID, first, &provider.Result{ConversationID: "conv-A", Content: "reading"})
+
+	big := strings.Repeat("<div>dump</div>", 4000) // ~60KB 类 HTML 的巨型 tool_result
+	toolResult := `[{"type":"tool_result","tool_use_id":"toolu_1","content":` + jsonStringT(t, big) + `}]`
+	cont := []provider.ChatMessage{
+		first[0],
+		{Role: "assistant", Content: mustRaw(t, `"reading"`)},
+		{Role: "user", Content: mustRaw(t, toolResult)}, // Anthropic tool_result → 可复用历史
+	}
+
+	var token1Calls, token2Calls int32
+	r.Provider.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Header.Get("x-access-token") == "token-2" {
+			atomic.AddInt32(&token2Calls, 1) // 若发生此调用即说明错误地换了号
+			body := "data: {\"eventType\":\"conversation\",\"data\":{\"id\":\"conv-B\"}}\n\n" +
+				"data: {\"eventType\":\"textChunk\",\"data\":{\"textContent\":\"WRONG\"}}\n\n" +
+				"data: [DONE]\n\n"
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+		}
+		if atomic.AddInt32(&token1Calls, 1) == 1 {
+			h := make(http.Header)
+			h.Set("Server", "cloudflare")
+			h.Set("Content-Type", "text/html; charset=UTF-8")
+			h.Set("Cf-Ray", "a2d562e1bc2349d4-LAX")
+			body := "<!doctype html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>"
+			return &http.Response{StatusCode: 403, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+		}
+		body := "data: {\"eventType\":\"conversation\",\"data\":{\"id\":\"conv-A\"}}\n\n" +
+			"data: {\"eventType\":\"textChunk\",\"data\":{\"textContent\":\"ok\"}}\n\n" +
+			"data: [DONE]\n\n"
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	})}
+
+	req := &provider.ChatRequest{Model: "claude-opus-4-8", Messages: cont}
+	var output strings.Builder
+	res, account, err := r.Stream(context.Background(), req, func(delta provider.Delta) error {
+		output.WriteString(delta.Content)
+		return nil
+	})
+	if err != nil || res == nil || !res.Success || account == nil {
+		t.Fatalf("continuation gateway block should retry same account and recover: res=%+v account=%+v err=%v", res, account, err)
+	}
+	if account.ID != acc1.ID {
+		t.Fatalf("must recover on the ORIGINAL account %d (no switch), got %d", acc1.ID, account.ID)
+	}
+	if n := atomic.LoadInt32(&token2Calls); n != 0 {
+		t.Fatalf("must NOT fail over to the other account on a continuation (would lose server-side session), but token-2 was called %d time(s)", n)
+	}
+	if n := atomic.LoadInt32(&token1Calls); n != 2 {
+		t.Fatalf("expected exactly 2 calls to the original account (403 then success), got %d", n)
+	}
+	if output.String() != "ok" {
+		t.Fatalf("client should see recovered output from the original account, got %q", output.String())
+	}
+	// 关键：req.Messages 不得被就地改写——改写会破坏会话指纹并触发降级为 USER_QUERY。
+	if len(req.Messages) != 3 {
+		t.Fatalf("req.Messages must not be mutated, got %d messages", len(req.Messages))
+	}
+	if string(req.Messages[2].Content) != toolResult {
+		t.Fatalf("tool_result content must stay intact (no compaction/mutation), got %q", string(req.Messages[2].Content))
 	}
 }
 
