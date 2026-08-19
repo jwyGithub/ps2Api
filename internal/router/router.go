@@ -126,6 +126,33 @@ func (r *Router) gatewayCooldownDur() time.Duration {
 	return time.Duration(n) * time.Second
 }
 
+// maxGatewayCompactTries 限制「压缩后原号重试」的次数，把剩余重试额度留给换号 failover——
+// 压缩是首选(对症)修复，但若压到底仍被拦，就该退回换号，故不能吃光所有 attempt。
+const maxGatewayCompactTries = 2
+
+// gatewayCompactBudget 读取网关拦截后压缩 tool_result 正文的单块字节预算（默认 8192，下限 1024）。
+// 首次压缩用此预算，之后每次减半到下限，逐步收紧。
+func (r *Router) gatewayCompactBudget() int {
+	v, _ := r.Store.GetSetting("gateway_compact_bytes")
+	n, err := strconv.Atoi(v)
+	if err != nil || n < gatewayCompactFloor {
+		return 8192
+	}
+	return n
+}
+
+// gatewayCompactFloor 是压缩预算的下限：低于它就不再压缩(避免把 tool_result 削到无意义)，
+// 转而回退换号 failover。
+const gatewayCompactFloor = 1024
+
+// nextCompactBudget 把压缩预算减半，但不低于下限，供逐步收紧的多次压缩重试使用。
+func nextCompactBudget(b int) int {
+	if b /= 2; b < gatewayCompactFloor {
+		b = gatewayCompactFloor
+	}
+	return b
+}
+
 // gatewayBlockedError 生成面向调用方(agent 终端/模型)的明确错误：说明这是上游网关(Cloudflare)
 // 风控拦截、已尝试多少个账号、且本次「未产生任何输出」，便于终端干净停止任务、模型安全重做。
 func gatewayBlockedError(triedAccounts int) string {
@@ -164,6 +191,8 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 	var last string
 	excluded := map[int64]bool{}
 	gatewayBlocks := 0
+	compactBudget := r.gatewayCompactBudget()
+	compactTries := 0
 	attempts := r.retryCount()
 	if !r.failoverEnabled() {
 		attempts = 1
@@ -199,11 +228,23 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 		last = res.Error
 		provider.Trace(ctx, "router.failure", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "error": res.Error})
 		if res.GatewayBlocked {
-			// 网关(Cloudflare)按「账号身份」风控拦截(403)——日志实证：拦截高度集中在特定账号,
-			// 重试同号必然再被拦、换出口 IP 也无效,唯有换成健康账号才有效。故此处排除当前账号并
-			// 打冷却标记(号池后续优先跳过该「被烧」账号),退避后 failover 到其他账号重试。
+			// 真实诱因是 Cloudflare WAF 托管内容规则命中请求体里累积的类 HTML/JS 文本(巨型
+			// tool_result:原始文件转储、网页抓取等),随 tool_use↔tool_result 往返轮次增多而累积
+			// ——不是账号身份、也不单纯是字节数。故首选「压缩掉这些巨型 tool_result 正文后原号重试」
+			// (对症):既缩体积又剥离触发规则的标记文本。压到下限仍被拦才回退换号 failover(兜底)。
 			provider.Trace(ctx, "router.gateway_blocked", map[string]interface{}{"account_id": acc.ID, "error": res.Error})
 			r.alertRequestRejected(acc, res)
+			if compactTries < maxGatewayCompactTries && attempt < attempts-1 {
+				if newMsgs, ok := provider.CompactMessages(req.Messages, compactBudget); ok {
+					provider.Trace(ctx, "router.gateway_compact_retry", map[string]interface{}{"account_id": acc.ID, "budget": compactBudget, "try": compactTries + 1})
+					req.Messages = newMsgs
+					compactBudget = nextCompactBudget(compactBudget)
+					compactTries++
+					time.Sleep(gatewayBackoff(attempt))
+					continue // 原号重试(不排除、不冷却):诱因是请求体而非账号
+				}
+			}
+			// 压缩已到底/无可压 → 回退换号 failover:排除当前账号并打冷却标记,退避后换其他账号。
 			gatewayBlocks++
 			excluded[acc.ID] = true
 			r.Pool.MarkGatewayBlocked(acc.ID, r.gatewayCooldownDur())
@@ -243,6 +284,8 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 	}
 	excluded := map[int64]bool{}
 	gatewayBlocks := 0
+	compactBudget := r.gatewayCompactBudget()
+	compactTries := 0
 	attempts := r.retryCount()
 	if !r.failoverEnabled() {
 		attempts = 1
@@ -275,13 +318,24 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 		last = res.Error
 		provider.Trace(ctx, "router.failure", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "error": res.Error, "stream": true})
 		if res.GatewayBlocked {
-			// 网关(Cloudflare)按「账号身份」风控拦截(403)——换成健康账号才有效(见 Chat 内说明)。
-			// 排除当前账号并打冷却标记,退避后 failover 到其他账号。但若已吐出过内容则不能重试
-			// (会重复输出),此时返回错误、由客户端侧发起「继续」。
+			// 诱因是请求体里累积的巨型 tool_result(类 HTML/JS 文本触发 Cloudflare WAF 托管规则),
+			// 而非账号身份(见 Chat 内说明)。首选压缩 tool_result 正文后原号重试,压到底再回退换号。
+			// 但若已吐出过内容则不能重试(会重复输出),此时返回错误、由客户端侧发起「继续」。
+			// 注:延迟开流(首个 delta 前不落 200/不发事件)保证网关 403 时 emitted 仍为 false,故压缩/换号重试可行。
 			provider.Trace(ctx, "router.gateway_blocked", map[string]interface{}{"account_id": acc.ID, "error": res.Error, "stream": true})
 			r.alertRequestRejected(acc, res)
 			if emitted {
 				return nil, nil, &RouteError{Message: "Stream failed after output started: " + last}
+			}
+			if compactTries < maxGatewayCompactTries && attempt < attempts-1 {
+				if newMsgs, ok := provider.CompactMessages(req.Messages, compactBudget); ok {
+					provider.Trace(ctx, "router.gateway_compact_retry", map[string]interface{}{"account_id": acc.ID, "budget": compactBudget, "try": compactTries + 1, "stream": true})
+					req.Messages = newMsgs
+					compactBudget = nextCompactBudget(compactBudget)
+					compactTries++
+					time.Sleep(gatewayBackoff(attempt))
+					continue // 原号重试(不排除、不冷却):诱因是请求体而非账号
+				}
 			}
 			gatewayBlocks++
 			excluded[acc.ID] = true

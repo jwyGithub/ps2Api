@@ -27,6 +27,7 @@ var settingDefs = []settingDef{
 	{Key: "retry_count", Label: "请求重试次数", Type: "number", Default: "3", Description: "单次请求失败后最多重试几次（在号池内切换账号）"},
 	{Key: "failover_enabled", Label: "失败自动切换账号", Type: "bool", Default: "true", Description: "关闭后单次请求失败不再换号重试"},
 	{Key: "gateway_cooldown_seconds", Label: "网关拦截冷却(秒)", Type: "number", Default: "300", Description: "账号被上游 Cloudflare 风控拦截(403)后进入冷却，此时长内号池优先跳过该账号、改用健康账号；到期自动恢复"},
+	{Key: "gateway_compact_bytes", Label: "网关压缩单块字节预算", Type: "number", Default: "8192", Description: "被网关(403)拦截后，压缩请求体里过大 tool_result 正文的单块字节预算(下限 1024)；先压缩原号重试，多次重试逐步减半，压不动再换号"},
 	{Key: "alert_error_rate", Label: "错误率告警阈值", Type: "number", Default: "0.5", Description: "最近 10 分钟错误率超过该比例（0~1）时触发告警"},
 	{Key: "alert_quota", Label: "额度告警阈值", Type: "number", Default: "0.2", Description: "账号剩余额度低于总配额该比例（0~1）时触发告警"},
 	{Key: "log_retention", Label: "日志页展示条数", Type: "number", Default: "100", Description: "实时日志与部分聚合最多展示的最近日志条数"},

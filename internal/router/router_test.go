@@ -324,3 +324,75 @@ func TestStreamQuotaExhaustedSwitchesAccountBeforeOutput(t *testing.T) {
 		t.Fatalf("first account was not marked exhausted: %+v err=%v", exhausted, err)
 	}
 }
+
+// 网关 403 的真实诱因是请求体里累积的巨型 tool_result(类 HTML/JS 文本触发 Cloudflare WAF
+// 托管规则),而非账号身份。故遇 403 应「压缩掉 tool_result 正文后原号重试」而非急着换号。
+// 本例只留一个可用账号:若走换号 failover 必然因无其他账号而失败;能恢复即证明是原号压缩重试生效。
+func TestStreamGatewayBlockedCompactsAndRetriesSameAccount(t *testing.T) {
+	r := newTestRouter(t)
+	accounts, err := r.Store.ListAccounts()
+	if err != nil || len(accounts) != 2 {
+		t.Fatalf("accounts=%v err=%v", accounts, err)
+	}
+	// 只保留一个可用账号,断掉换号 failover 这条路。
+	if err := r.Store.SetAccountEnabled(accounts[1].ID, false); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls int32
+	r.Provider.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			// 首次:请求体带巨型 tool_result → Cloudflare 403(HTML 风控页)。
+			h := make(http.Header)
+			h.Set("Server", "cloudflare")
+			h.Set("Content-Type", "text/html; charset=UTF-8")
+			h.Set("Cf-Ray", "a2d562e1bc2349d4-LAX")
+			body := "<!doctype html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>"
+			return &http.Response{StatusCode: 403, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+		}
+		// 压缩后重试:正常 SSE 成功。
+		body := "data: {\"eventType\":\"conversation\",\"data\":{\"id\":\"conv-1\"}}\n\n" +
+			"data: {\"eventType\":\"textChunk\",\"data\":{\"textContent\":\"ok\"}}\n\n" +
+			"data: [DONE]\n\n"
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	})}
+
+	big := strings.Repeat("<div>dump</div>", 4000) // ~60KB 类 HTML 的巨型 tool_result
+	toolResult := `[{"type":"tool_result","tool_use_id":"toolu_1","content":` + jsonStringT(t, big) + `}]`
+	msgs := []provider.ChatMessage{
+		mustMsg(t, "user", "read the file"),
+		{Role: "assistant", Content: mustRaw(t, `"reading"`)},
+		{Role: "user", Content: mustRaw(t, toolResult)},
+	}
+
+	var output strings.Builder
+	res, account, err := r.Stream(context.Background(), &provider.ChatRequest{
+		Model: "claude-opus-4-8", Messages: msgs,
+	}, func(delta provider.Delta) error {
+		output.WriteString(delta.Content)
+		return nil
+	})
+	if err != nil || res == nil || !res.Success || account == nil {
+		t.Fatalf("gateway block should compact and recover on the same account: res=%+v account=%+v err=%v", res, account, err)
+	}
+	if account.ID != accounts[0].ID {
+		t.Fatalf("must recover on the only enabled account %d, got %d", accounts[0].ID, account.ID)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected exactly 2 upstream calls (403 then compacted success), got %d", got)
+	}
+	if output.String() != "ok" {
+		t.Fatalf("client should see recovered output, got %q", output.String())
+	}
+	// 诱因是请求体而非账号:被拦账号不应被冷却/标记异常,仍可用。
+	same, err := r.Store.GetAccount(accounts[0].ID)
+	if err != nil || same.Status == "error" || same.Status == "exhausted" {
+		t.Fatalf("blocked account must stay healthy (compaction, not account fault): %+v err=%v", same, err)
+	}
+}
+
+func jsonStringT(t *testing.T, s string) string {
+	t.Helper()
+	b, _ := json.Marshal(s)
+	return string(b)
+}
