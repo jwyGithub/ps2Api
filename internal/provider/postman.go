@@ -27,13 +27,23 @@ const (
 	DesktopKBTermsHash = "kbterms-workspace_localmode_v12-desktop-darwin-12.23.7-ui-260814-0232-2ebdcef5a027"
 	DesktopChatURL     = "https://gateway.postman.com/chat"
 
-	WebAppVersion = "12.24.0-260817-0232"
-	WebToolsHash  = "clienttools-api_catalog-browser-12.24.0-260817-0232-8580e5ac399e"
-	WebProduct    = "api_catalog"
+	// Web* 取自真实浏览器 Web 会话抓包(native/claude/web-chat-1.txt，已知正常、未触发 403)。
+	// product/toolsHash/termsHash 必须是同一个 workspace_v12 三元组，与真实浏览器逐字段一致——
+	// 三者错配会导致服务端路由异常。换新版 Web 构建重新抓包对齐即可。
+	WebAppVersion  = "12.24.0-260817-0232"
+	WebToolsHash   = "clienttools-workspace_v12-browser-12.24.0-260817-0232-e18c30182b36"
+	WebKBTermsHash = "kbterms-workspace_v12-browser-12.24.0-260817-0232-02e13a7c1aeb"
+	WebProduct     = "workspace_v12"
 
 	RequestTimeout = 300 * time.Second
 	MaxQueryLen    = 9500
 	MaxToolDescLen = 512
+
+	// MaxToolResponseContentLen 是 TOOL_RESPONSE 续期时单条 toolResponses[].content 的上限。
+	// 该字段此前不设限，续期时容易把出站 body 顶过 ~80KB 的 Cloudflare WAF 信封而触发 403
+	// （精确解释了「只有带工具续期才 403、单条新消息不 403」的现象）。原生客户端本身也会裁剪
+	// tool result，这里对齐该行为，保留头尾、中段截断。
+	MaxToolResponseContentLen = 16 * 1024
 
 	// MaxRequestBodyWarnBytes 是出站请求体的软告警阈值。超过此值时记录告警，
 	// 因为过大的 body 更容易触发 Postman 网关侧的 Cloudflare WAF（返回 403 HTML）。
@@ -624,6 +634,9 @@ var desktopLocalModeExcludedTools = []string{
 	"createSimulationConfig", "updateSimulationConfig", "deleteSimulation", "askUser",
 }
 
+// desktopExcludedTools 是旧 api_catalog Web 分支曾用的 excludedTools 清单。Web 分支已切回
+// workspace_v12 三元组(excludedTools 对齐真实浏览器的 ["askUser"]),此清单目前未被引用,
+// 仅保留作参考/回滚依据。
 var desktopExcludedTools = []string{
 	"listDatasets", "createDataset", "previewDataset", "queryDatasetView", "deleteDataset",
 	"getDatasetSchema", "createDatasetView", "deleteDatasetView", "runQuery", "insertDatasetRows",
@@ -667,6 +680,15 @@ func (p *Provider) nativeToolResponse(accountID int64, messages []ChatMessage) (
 		if !json.Valid([]byte(payload)) {
 			encoded, _ := json.Marshal(map[string]string{"status": status, "message": content})
 			payload = string(encoded)
+		}
+		// 给 content 上限，避免续期时把出站 body 顶过 Cloudflare WAF 信封（触发 403）。
+		// 保留头尾、中段截断,并修正可能被切断的 UTF-8。
+		if len(payload) > MaxToolResponseContentLen {
+			head := 512
+			tail := MaxToolResponseContentLen - head - 32
+			payload = strings.ToValidUTF8(payload[:head], "") +
+				"\n...[tool result truncated]...\n" +
+				strings.ToValidUTF8(payload[len(payload)-tail:], "")
 		}
 		summary := content
 		if len(summary) > 512 {
@@ -792,11 +814,11 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 			"platform": "WEB",
 			"clientTools": map[string]interface{}{
 				"nativeToolsHash": WebToolsHash,
-				"excludedTools":   desktopExcludedTools,
+				"excludedTools":   []string{"askUser"},
 				"thirdParty":      thirdParty,
 			},
 			"clientKBTerms": map[string]interface{}{
-				"nativeTermsHash": nil,
+				"nativeTermsHash": WebKBTermsHash,
 				"excludedKBTerms": []string{},
 			},
 			"mandatoryContext":  workspaceContext(tokens),
@@ -855,6 +877,16 @@ func (p *Provider) buildHeaders(tokens *Tokens) http.Header {
 		h.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Edg/151.0.0.0")
 		h.Set("Origin", "https://"+tokens.WorkspaceSubdomain+".postman.co")
 		h.Set("Referer", "https://"+tokens.WorkspaceSubdomain+".postman.co/")
+		// 浏览器指纹头:UA 自称 Edge 151 却不发 sec-ch-ua*/sec-fetch-* 是 Cloudflare Bot
+		// Management 的教科书级机器人信号。逐字段对齐真实浏览器抓包(web-chat-1.txt),压低基线 bot 分。
+		h.Set("Accept", "*/*")
+		h.Set("sec-ch-ua", `"Not=A?Brand";v="99", "Microsoft Edge";v="151", "Chromium";v="151"`)
+		h.Set("sec-ch-ua-mobile", "?0")
+		h.Set("sec-ch-ua-platform", `"macOS"`)
+		h.Set("sec-fetch-dest", "empty")
+		h.Set("sec-fetch-mode", "cors")
+		h.Set("sec-fetch-site", "same-origin")
+		h.Set("priority", "u=1, i")
 	}
 	return h
 }

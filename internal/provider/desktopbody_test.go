@@ -48,8 +48,8 @@ func TestBuildBodyWebShape(t *testing.T) {
 		t.Fatalf("platform = %v, want WEB", got)
 	}
 	input := body["input"].(map[string]interface{})
-	if got := input["product"]; got != "api_catalog" {
-		t.Fatalf("product = %v, want api_catalog", got)
+	if got := input["product"]; got != "workspace_v12" {
+		t.Fatalf("product = %v, want workspace_v12", got)
 	}
 	if _, ok := input["startedFrom"]; ok {
 		t.Fatal("startedFrom should not be sent by the current web client")
@@ -58,14 +58,18 @@ func TestBuildBodyWebShape(t *testing.T) {
 		t.Fatalf("mandatoryContext = %#v, want empty object", got)
 	}
 	kb := body["clientKBTerms"].(map[string]interface{})
-	if got := kb["nativeTermsHash"]; got != nil {
-		t.Fatalf("nativeTermsHash = %v, want null", got)
+	if got := kb["nativeTermsHash"]; got != WebKBTermsHash {
+		t.Fatalf("nativeTermsHash = %v, want %s", got, WebKBTermsHash)
 	}
 	if got := kb["excludedKBTerms"].([]string); len(got) != 0 {
 		t.Fatalf("excludedKBTerms = %#v, want empty list", got)
 	}
-	if got := body["clientTools"].(map[string]interface{})["nativeToolsHash"]; got != WebToolsHash {
+	tools := body["clientTools"].(map[string]interface{})
+	if got := tools["nativeToolsHash"]; got != WebToolsHash {
 		t.Fatalf("nativeToolsHash = %v, want %s", got, WebToolsHash)
+	}
+	if got := tools["excludedTools"].([]string); len(got) != 1 || got[0] != "askUser" {
+		t.Fatalf("excludedTools = %#v, want [askUser]", got)
 	}
 }
 
