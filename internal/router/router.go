@@ -116,6 +116,23 @@ func gatewayBackoff(attempt int) time.Duration {
 	return d
 }
 
+// gatewayCooldownDur 读取被网关拦截账号的冷却时长（默认 5 分钟）。冷却期内号池优先跳过该账号。
+func (r *Router) gatewayCooldownDur() time.Duration {
+	v, _ := r.Store.GetSetting("gateway_cooldown_seconds")
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 5 * time.Minute
+	}
+	return time.Duration(n) * time.Second
+}
+
+// gatewayBlockedError 生成面向调用方(agent 终端/模型)的明确错误：说明这是上游网关(Cloudflare)
+// 风控拦截、已尝试多少个账号、且本次「未产生任何输出」，便于终端干净停止任务、模型安全重做。
+func gatewayBlockedError(triedAccounts int) string {
+	return "上游网关(Cloudflare)持续拦截：已尝试 " + strconv.Itoa(triedAccounts) +
+		" 个账号仍返回 403(风控/Bot 校验)。本次请求已中断，未产生任何输出。可稍后重试，或发送\"继续\"以恢复此前任务。"
+}
+
 // failoverEnabled 从持久化设置读取「失败自动切换账号」开关（默认开启）。
 func (r *Router) failoverEnabled() bool {
 	v, _ := r.Store.GetSetting("failover_enabled")
@@ -146,6 +163,7 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 	defer r.probe(req)()
 	var last string
 	excluded := map[int64]bool{}
+	gatewayBlocks := 0
 	attempts := r.retryCount()
 	if !r.failoverEnabled() {
 		attempts = 1
@@ -157,6 +175,11 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 		acc, poolUsed, err := r.pickAccount(excluded, req.Messages)
 		if err != nil {
 			provider.Trace(ctx, "router.error", map[string]interface{}{"attempt": attempt + 1, "error": err.Error()})
+			// 因网关拦截逐个排除账号后耗尽了可用账号：返回明确的网关拦截错误(而非笼统的
+			// "无可用账号")，让调用方知道根因是上游 Cloudflare 风控、且本次未产生任何输出。
+			if gatewayBlocks > 0 {
+				return nil, nil, &RouteError{Message: gatewayBlockedError(gatewayBlocks), GatewayBlocked: true}
+			}
 			return nil, nil, err
 		}
 		provider.Trace(ctx, "router.attempt", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "model": req.Model})
@@ -176,15 +199,19 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 		last = res.Error
 		provider.Trace(ctx, "router.failure", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "error": res.Error})
 		if res.GatewayBlocked {
-			// 网关(Cloudflare)安全/风控拦截——账号本身健康,不标记、不换号,退避后重试同一(粘性)账号,
-			// 保住会话上下文。这类 403 按评分/速率判定,退避重试常能成功。
+			// 网关(Cloudflare)按「账号身份」风控拦截(403)——日志实证：拦截高度集中在特定账号,
+			// 重试同号必然再被拦、换出口 IP 也无效,唯有换成健康账号才有效。故此处排除当前账号并
+			// 打冷却标记(号池后续优先跳过该「被烧」账号),退避后 failover 到其他账号重试。
 			provider.Trace(ctx, "router.gateway_blocked", map[string]interface{}{"account_id": acc.ID, "error": res.Error})
 			r.alertRequestRejected(acc, res)
+			gatewayBlocks++
+			excluded[acc.ID] = true
+			r.Pool.MarkGatewayBlocked(acc.ID, r.gatewayCooldownDur())
 			if attempt < attempts-1 {
 				time.Sleep(gatewayBackoff(attempt))
 				continue
 			}
-			return nil, nil, &RouteError{Message: res.Error}
+			return nil, nil, &RouteError{Message: gatewayBlockedError(gatewayBlocks), GatewayBlocked: true}
 		}
 		if res.RequestRejected {
 			// 请求内容被拒(坏请求、工具名冲突等)——账号本身可用,不标记、不换号重试,直接返回。
@@ -215,6 +242,7 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 		return emit(d)
 	}
 	excluded := map[int64]bool{}
+	gatewayBlocks := 0
 	attempts := r.retryCount()
 	if !r.failoverEnabled() {
 		attempts = 1
@@ -223,6 +251,11 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 		acc, poolUsed, err := r.pickAccount(excluded, req.Messages)
 		if err != nil {
 			provider.Trace(ctx, "router.error", map[string]interface{}{"attempt": attempt + 1, "error": err.Error()})
+			// 因网关拦截逐个排除账号后耗尽了可用账号：返回明确的网关拦截错误(而非笼统的
+			// "无可用账号")，让调用方知道根因是上游 Cloudflare 风控、且本次未产生任何输出。
+			if gatewayBlocks > 0 {
+				return nil, nil, &RouteError{Message: gatewayBlockedError(gatewayBlocks), GatewayBlocked: true}
+			}
 			return nil, nil, err
 		}
 		provider.Trace(ctx, "router.attempt", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "model": req.Model, "stream": true})
@@ -242,18 +275,22 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 		last = res.Error
 		provider.Trace(ctx, "router.failure", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "error": res.Error, "stream": true})
 		if res.GatewayBlocked {
-			// 网关(Cloudflare)安全/风控拦截——账号健康,退避后重试同一(粘性)账号。但若已经吐出过
-			// 内容则不能重试(会重复输出),此时返回错误由客户端侧发起「继续」。
+			// 网关(Cloudflare)按「账号身份」风控拦截(403)——换成健康账号才有效(见 Chat 内说明)。
+			// 排除当前账号并打冷却标记,退避后 failover 到其他账号。但若已吐出过内容则不能重试
+			// (会重复输出),此时返回错误、由客户端侧发起「继续」。
 			provider.Trace(ctx, "router.gateway_blocked", map[string]interface{}{"account_id": acc.ID, "error": res.Error, "stream": true})
 			r.alertRequestRejected(acc, res)
 			if emitted {
 				return nil, nil, &RouteError{Message: "Stream failed after output started: " + last}
 			}
+			gatewayBlocks++
+			excluded[acc.ID] = true
+			r.Pool.MarkGatewayBlocked(acc.ID, r.gatewayCooldownDur())
 			if attempt < attempts-1 {
 				time.Sleep(gatewayBackoff(attempt))
 				continue
 			}
-			return nil, nil, &RouteError{Message: res.Error}
+			return nil, nil, &RouteError{Message: gatewayBlockedError(gatewayBlocks), GatewayBlocked: true}
 		}
 		if res.RequestRejected {
 			// 请求内容被拒——账号可用,不标记、不换号,直接返回。
@@ -350,7 +387,12 @@ func (r *Router) persistQuota(acc *store.Account, res *provider.Result) {
 	}
 }
 
-type RouteError struct{ Message string }
+type RouteError struct {
+	Message string
+	// GatewayBlocked 标记该失败源于上游网关(Cloudflare)风控拦截(403)且所有尝试账号均被拦。
+	// 供 HTTP 层选择合适的状态码/文案,让 agent 终端能明确「上游拦截、非本地错误」。
+	GatewayBlocked bool
+}
 
 func (e *RouteError) Error() string { return e.Message }
 

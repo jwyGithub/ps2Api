@@ -191,9 +191,6 @@ func (s *Server) openAI(w http.ResponseWriter, r *http.Request) {
 	jsonWrite(w, 200, openAIResponse(res, req.Model))
 }
 func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, req *provider.ChatRequest) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		jsonError(w, 500, "stream unsupported", "internal_error")
@@ -201,7 +198,20 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, req *provi
 	}
 	id := newID("chatcmpl-")
 	created := nowUnix()
+	// started：延迟提交 SSE 响应头到首个增量到达。失败若发生在任何输出之前，可回退为干净的
+	// HTTP 503 JSON 错误，而不是一个空的 SSE 流，便于调用方明确识别失败。
+	started := false
+	ensureStarted := func() {
+		if started {
+			return
+		}
+		started = true
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+	}
 	emit := func(d provider.Delta) error {
+		ensureStarted()
 		chunk := map[string]interface{}{"id": id, "object": "chat.completion.chunk", "created": created, "model": req.Model, "choices": []interface{}{map[string]interface{}{"index": 0, "delta": deltaMap(d), "finish_reason": nil}}}
 		if d.HasFinish {
 			chunk["choices"] = []interface{}{map[string]interface{}{"index": 0, "delta": map[string]interface{}{}, "finish_reason": d.FinishReason}}
@@ -209,6 +219,10 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, req *provi
 		return sse(w, fl, chunk)
 	}
 	_, _, err := s.Router.Stream(r.Context(), req, emit)
+	if err != nil && !started {
+		jsonError(w, 503, err.Error(), "provider_error")
+		return
+	}
 	if err != nil {
 		_ = sse(w, fl, map[string]interface{}{"error": map[string]string{"message": err.Error()}})
 	}
@@ -412,19 +426,31 @@ func openAIToAnthropic(res *provider.Result, model string) map[string]interface{
 	return map[string]interface{}{"id": newID("msg_"), "type": "message", "role": "assistant", "model": model, "content": blocks, "stop_reason": stop, "stop_sequence": nil, "usage": map[string]int{"input_tokens": res.PromptTokens, "output_tokens": res.CompletionTokens}}
 }
 func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, req *provider.ChatRequest, ar AnthropicReq) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		jsonError(w, 500, "stream unsupported", "internal_error")
 		return
 	}
 	id := newID("msg_")
+	// started 表示是否已向客户端提交 SSE 响应头 + message_start。
+	// 关键修复：延迟到「首个真实增量到达」时才开流，而不是联系上游前就乐观开流。
+	// 这样若所有账号在产出任何输出前就被网关拦截(403)，可回退为一个干净的 HTTP 503 JSON 错误，
+	// 客户端(agent 终端)据此明确停止任务；不会留下一个已发 message_start 却无 message_stop 的
+	// 半截流导致终端永久挂起。
+	started := false
 	writeEvent := func(name string, v interface{}) {
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", name, mustJSON(v))
 		fl.Flush()
 	}
-	writeEvent("message_start", map[string]interface{}{"type": "message_start", "message": map[string]interface{}{"id": id, "type": "message", "role": "assistant", "model": ar.Model, "content": []interface{}{}, "stop_reason": nil, "usage": map[string]int{"input_tokens": provider.EstimateMessagesTokens(req.Messages), "output_tokens": 0}}})
+	ensureStarted := func() {
+		if started {
+			return
+		}
+		started = true
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		writeEvent("message_start", map[string]interface{}{"type": "message_start", "message": map[string]interface{}{"id": id, "type": "message", "role": "assistant", "model": ar.Model, "content": []interface{}{}, "stop_reason": nil, "usage": map[string]int{"input_tokens": provider.EstimateMessagesTokens(req.Messages), "output_tokens": 0}}})
+	}
 	thinkingOpen := false
 	thinkingIndex := -1
 	textOpen := false
@@ -447,6 +473,7 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, req *pr
 		}
 	}
 	_, _, err := s.Router.Stream(r.Context(), req, func(d provider.Delta) error {
+		ensureStarted() // 首个增量到达才真正开流（提交 200 + message_start）
 		if d.ReasoningContent != "" {
 			closeText()
 			if !thinkingOpen {
@@ -493,13 +520,23 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, req *pr
 		}
 		return nil
 	})
+	// 尚未产生任何输出就失败：还没开流，回退为干净的 HTTP 503 JSON 错误，终端可明确停止任务。
+	if err != nil && !started {
+		status := 503
+		jsonError(w, status, err.Error(), "api_error")
+		return
+	}
 	closeThinking()
 	closeText()
 	for _, toolIndex := range toolOrder {
 		writeEvent("content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": toolIndexes[toolIndex]})
 	}
 	if err != nil {
+		// 已开流(发过 message_start/内容)后失败：补发 error + message_delta + message_stop，
+		// 让 SSE 流按 Anthropic 协议干净终止，避免终端等不到终止事件而永久挂起。
 		writeEvent("error", map[string]interface{}{"type": "error", "error": map[string]string{"type": "api_error", "message": err.Error()}})
+		writeEvent("message_delta", map[string]interface{}{"type": "message_delta", "delta": map[string]interface{}{"stop_reason": "error"}, "usage": map[string]int{"output_tokens": 0}})
+		writeEvent("message_stop", map[string]string{"type": "message_stop"})
 		return
 	}
 	stop := "end_turn"

@@ -148,7 +148,7 @@ func TestStickyFallsBackWhenAccountDisabled(t *testing.T) {
 }
 
 // Cloudflare 403(HTML 风控拦截)以前被当成 RequestRejected 直接返回,任务卡死。
-// 现在归类为 GatewayBlocked:账号健康,退避后重试,第二次即恢复成功——且写入一条告警。
+// 现在归类为 GatewayBlocked:排除被拦账号并 failover 到其他账号,第二次即恢复成功——且写入一条告警。
 func TestStreamCloudflare403RetriesAndRecovers(t *testing.T) {
 	r := newTestRouter(t)
 	var calls int32
@@ -185,6 +185,101 @@ func TestStreamCloudflare403RetriesAndRecovers(t *testing.T) {
 	}
 	if alerts, err := r.Store.ListAlerts("", 10); err != nil || len(alerts) == 0 {
 		t.Fatalf("expected a gateway-rejected alert to be recorded: alerts=%v err=%v", alerts, err)
+	}
+}
+
+// 403 集中在被烧账号(token-1)时,应 failover 到健康账号(token-2)成功,且不把被拦账号
+// 标记成 error/exhausted(账号本身健康,仅进入路由层冷却)。验证「换账号」这一核心缓解手段。
+func TestStreamGatewayBlockedFailsOverToHealthyAccount(t *testing.T) {
+	r := newTestRouter(t)
+	accounts, err := r.Store.ListAccounts()
+	if err != nil || len(accounts) != 2 {
+		t.Fatalf("accounts=%v err=%v", accounts, err)
+	}
+	for i, account := range accounts {
+		tokens, _ := json.Marshal(provider.Tokens{AccessToken: "token-" + string(rune('1'+i)), UserID: "u", WorkspaceID: "w"})
+		if err := r.Store.UpdateTokens(account.ID, string(tokens)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var blocked int32
+	r.Provider.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Header.Get("x-access-token") == "token-1" {
+			atomic.AddInt32(&blocked, 1)
+			h := make(http.Header)
+			h.Set("Server", "cloudflare")
+			h.Set("Content-Type", "text/html; charset=UTF-8")
+			h.Set("Cf-Ray", "a2d562e1bc2349d4-LAX")
+			body := "<!doctype html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>"
+			return &http.Response{StatusCode: 403, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+		}
+		body := "data: {\"eventType\":\"conversation\",\"data\":{\"id\":\"conv-2\"}}\n\n" +
+			"data: {\"eventType\":\"textChunk\",\"data\":{\"textContent\":\"ok\"}}\n\n" +
+			"data: [DONE]\n\n"
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	})}
+
+	var output strings.Builder
+	res, account, err := r.Stream(context.Background(), &provider.ChatRequest{
+		Model: "claude-opus-4-8", Messages: []provider.ChatMessage{mustMsg(t, "user", "hello")},
+	}, func(delta provider.Delta) error {
+		output.WriteString(delta.Content)
+		return nil
+	})
+	if err != nil || res == nil || !res.Success || account == nil {
+		t.Fatalf("gateway block should fail over and recover: res=%+v account=%+v err=%v", res, account, err)
+	}
+	if output.String() != "ok" {
+		t.Fatalf("client should see recovered output, got %q", output.String())
+	}
+	// 被拦账号(token-1)不应被标记为 error/exhausted——它健康,只是被上游风控临时拦截。
+	blockedAcc, err := r.Store.GetAccount(accounts[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blockedAcc.Status == "error" || blockedAcc.Status == "exhausted" {
+		t.Fatalf("gateway-blocked account must not be marked %q (it is healthy, only cooled down)", blockedAcc.Status)
+	}
+}
+
+// 所有账号都被网关拦截且尚未产出任何输出时,必须返回明确的错误(而非挂起或空流),
+// 且不能向客户端 emit 任何增量,便于调用方(agent 终端)干净停止任务。
+func TestStreamAllAccountsBlockedReturnsClearError(t *testing.T) {
+	r := newTestRouter(t)
+	var calls int32
+	r.Provider.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		h := make(http.Header)
+		h.Set("Server", "cloudflare")
+		h.Set("Content-Type", "text/html; charset=UTF-8")
+		h.Set("Cf-Ray", "a2d562e1bc2349d4-LAX")
+		body := "<!doctype html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>"
+		return &http.Response{StatusCode: 403, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	})}
+
+	var output strings.Builder
+	res, account, err := r.Stream(context.Background(), &provider.ChatRequest{
+		Model: "claude-opus-4-8", Messages: []provider.ChatMessage{mustMsg(t, "user", "hello")},
+	}, func(delta provider.Delta) error {
+		output.WriteString(delta.Content)
+		return nil
+	})
+	if err == nil || res != nil || account != nil {
+		t.Fatalf("all-blocked should return an error with no result: res=%+v account=%+v err=%v", res, account, err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("no output should be emitted to client on total block, got %q", output.String())
+	}
+	re, ok := err.(*RouteError)
+	if !ok || !re.GatewayBlocked {
+		t.Fatalf("error should be *RouteError with GatewayBlocked=true, got %T %v", err, err)
+	}
+	if !strings.Contains(re.Message, "403") {
+		t.Fatalf("error message should clearly mention the 403 gateway block, got %q", re.Message)
+	}
+	// failover 逐个排除被拦账号：2 个账号各被试一次(共 2 次 403)后账号耗尽,不再空转。
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("should try each of the 2 accounts once before giving up, got %d upstream calls", got)
 	}
 }
 

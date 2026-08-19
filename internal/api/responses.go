@@ -243,9 +243,6 @@ func extractResponsesText(raw json.RawMessage) string {
 // ---- 流式:把内部 Delta 流转成 Responses SSE 事件 ----
 
 func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *provider.ChatRequest) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		jsonError(w, 500, "stream unsupported", "internal_error")
@@ -263,7 +260,19 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *pr
 	skeleton := func(status string, output []interface{}) map[string]interface{} {
 		return map[string]interface{}{"id": respID, "object": "response", "status": status, "model": req.Model, "output": output}
 	}
-	emit("response.created", map[string]interface{}{"response": skeleton("in_progress", []interface{}{})})
+	// started：延迟提交 SSE 响应头 + response.created 到首个增量到达。若产出任何输出前就失败，
+	// 回退为干净的 HTTP 503 JSON 错误，避免半截流让调用方挂起。
+	started := false
+	ensureStarted := func() {
+		if started {
+			return
+		}
+		started = true
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		emit("response.created", map[string]interface{}{"response": skeleton("in_progress", []interface{}{})})
+	}
 
 	// 输出项累积:一个可选的 message 项 + 若干 function_call 项,按创建顺序排列。
 	var output []interface{}
@@ -313,6 +322,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *pr
 	}
 
 	_, _, err := s.Router.Stream(r.Context(), req, func(d provider.Delta) error {
+		ensureStarted() // 首个增量到达才真正开流（提交 200 + response.created）
 		if d.ReasoningContent != "" {
 			if !rsOpen {
 				rsIndex = nextIndex
@@ -394,6 +404,12 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *pr
 	}
 
 	if err != nil {
+		// 产出任何输出前就失败：还没开流，回退为干净的 HTTP 503 JSON 错误，调用方可明确停止任务。
+		if !started {
+			jsonError(w, 503, err.Error(), "provider_error")
+			return
+		}
+		// 已开流后失败：发 response.failed 作为终止事件，让流干净收尾。
 		emit("response.failed", map[string]interface{}{"response": map[string]interface{}{"id": respID, "object": "response", "status": "failed", "model": req.Model, "error": map[string]string{"code": "provider_error", "message": err.Error()}}})
 		return
 	}
