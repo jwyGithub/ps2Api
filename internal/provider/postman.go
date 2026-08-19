@@ -919,6 +919,10 @@ type Result struct {
 	// RequestRejected 表示失败源于请求内容本身(坏请求、工具名冲突等),而非账号健康。
 	// 这种错误换账号重试无用、且会污染整个号池,router 应直接返回、不标记账号。
 	RequestRejected bool
+	// RejectionDetail 是请求被网关拒绝时采集的排查上下文(如 Cloudflare Ray ID、
+	// 出站 body 大小、响应体片段)。非空时 router 会据此写入一条告警展示到仪表盘,
+	// 方便定位 403 的具体诱因。仅诊断用,不影响重试/路由决策。
+	RejectionDetail string
 }
 
 func parseRateLimit(headers http.Header, now time.Time) *RateLimit {
@@ -1270,6 +1274,9 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 	if isCloudflareHTMLRejection(resp.StatusCode, resp.Header) {
 		res.Error = "Postman gateway rejected request (403, Cloudflare)"
 		res.RequestRejected = true
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2000))
+		Trace(ctx, "upstream.response.body", map[string]interface{}{"body": string(body), "account_id": acc.ID})
+		res.RejectionDetail = cloudflareRejectionDetail(resp.StatusCode, resp.Header, string(body), len(bodyBytes))
 		return fmt.Errorf("%s", res.Error)
 	}
 
@@ -1310,6 +1317,7 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 			if looksLikeHTML(line) {
 				res.Error = "Postman gateway rejected request (Cloudflare HTML in stream)"
 				res.RequestRejected = true
+				res.RejectionDetail = cloudflareRejectionDetail(resp.StatusCode, resp.Header, line, len(bodyBytes))
 				return fmt.Errorf("%s", res.Error)
 			}
 		}
@@ -1359,6 +1367,60 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 	}
 	res.Success = true
 	return nil
+}
+
+// cloudflareRejectionDetail 汇总一条可读的 403 排查上下文：出站请求体大小、
+// Cloudflare Ray ID、命中的 WAF 规则头，以及拦截页正文里的关键行。用于写入告警，
+// 让排查者不必翻日志就能判断诱因（如超大 body 触发 WAF、账号被封、规则误伤等）。
+func cloudflareRejectionDetail(status int, headers http.Header, body string, reqBodyBytes int) string {
+	var lines []string
+	lines = append(lines, fmt.Sprintf("HTTP 状态: %d", status))
+	lines = append(lines, fmt.Sprintf("出站请求体: %d 字节 (软告警阈值 %d 字节)", reqBodyBytes, MaxRequestBodyWarnBytes))
+	if reqBodyBytes > MaxRequestBodyWarnBytes {
+		lines = append(lines, "提示: 请求体超过软告警阈值，超大 payload 是触发 Cloudflare WAF 403 的常见诱因")
+	}
+	if ray := strings.TrimSpace(headers.Get("Cf-Ray")); ray != "" {
+		lines = append(lines, "Cf-Ray: "+ray)
+	}
+	if mitigated := strings.TrimSpace(headers.Get("Cf-Mitigated")); mitigated != "" {
+		lines = append(lines, "Cf-Mitigated: "+mitigated)
+	}
+	if snippet := cloudflareBodySnippet(body); snippet != "" {
+		lines = append(lines, "响应体片段: "+snippet)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// cloudflareBodySnippet 从 Cloudflare 拦截页/挑战页正文里提取最有信息量的一小段：
+// 优先 <title>，否则截取首个非空文本行，控制在 300 字符内避免撑爆告警。
+func cloudflareBodySnippet(body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return ""
+	}
+	lower := strings.ToLower(body)
+	if i := strings.Index(lower, "<title>"); i >= 0 {
+		if j := strings.Index(lower[i:], "</title>"); j >= 0 {
+			title := strings.TrimSpace(body[i+len("<title>") : i+j])
+			if title != "" {
+				return truncateRunes(title, 300)
+			}
+		}
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			return truncateRunes(line, 300)
+		}
+	}
+	return ""
+}
+
+func truncateRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
 }
 
 func isCloudflareHTMLRejection(status int, headers http.Header) bool {

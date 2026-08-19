@@ -154,6 +154,7 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 		if res.RequestRejected {
 			// 请求内容被拒(坏请求、工具名冲突等)——账号本身可用,不标记、不换号重试,直接返回。
 			provider.Trace(ctx, "router.request_rejected", map[string]interface{}{"account_id": acc.ID, "error": res.Error})
+			r.alertRequestRejected(acc, res)
 			return nil, nil, &RouteError{Message: res.Error}
 		}
 		if res.QuotaExhausted {
@@ -207,6 +208,7 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 		if res.RequestRejected {
 			// 请求内容被拒——账号可用,不标记、不换号,直接返回。
 			provider.Trace(ctx, "router.request_rejected", map[string]interface{}{"account_id": acc.ID, "error": res.Error, "stream": true})
+			r.alertRequestRejected(acc, res)
 			return nil, nil, &RouteError{Message: res.Error}
 		}
 		if res.QuotaExhausted {
@@ -231,6 +233,18 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 		break
 	}
 	return nil, nil, &RouteError{Message: "All accounts failed. Last error: " + last}
+}
+
+// alertRequestRejected 在请求被网关拒绝且带有排查上下文（如 Cloudflare 403 的 Ray ID、
+// 出站 body 大小、响应体片段）时写入一条告警，展示到仪表盘的告警面板，方便定位 403 诱因。
+// 无诊断详情（普通坏请求/工具名冲突等）时不打扰。按账号去重，避免同号连续 403 刷屏。
+func (r *Router) alertRequestRejected(acc *store.Account, res *provider.Result) {
+	if res == nil || res.RejectionDetail == "" {
+		return
+	}
+	title := "请求被网关拒绝: " + acc.Email
+	msg := res.Error + "\n" + res.RejectionDetail
+	_ = r.Store.CreateAlert("warning", title, msg, "account", &acc.ID, "gateway_rejected")
 }
 
 // logAttempt 把每次上游调用（无论成败）都写入 request_logs，

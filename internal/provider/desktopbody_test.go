@@ -105,3 +105,21 @@ func TestCloudflareHTML403IsRequestRejected(t *testing.T) {
 		t.Fatal("Postman JSON 403 must remain an authentication failure")
 	}
 }
+
+func TestCloudflareRejectionDetail(t *testing.T) {
+	h := http.Header{"Server": {"cloudflare"}, "Content-Type": {"text/html"}}
+	h.Set("Cf-Ray", "8b2c1d3e4f5a6b7c-SJC")
+	body := "<!doctype html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>"
+	detail := cloudflareRejectionDetail(http.StatusForbidden, h, body, 90*1024)
+
+	for _, want := range []string{"HTTP 状态: 403", "8b2c1d3e4f5a6b7c-SJC", "Attention Required", "触发 Cloudflare WAF"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("rejection detail missing %q\ngot: %s", want, detail)
+		}
+	}
+
+	// body 片段应优先取 <title> 而非整段 HTML
+	if strings.Contains(detail, "doctype") {
+		t.Fatalf("snippet should prefer <title>, not raw HTML: %s", detail)
+	}
+}
