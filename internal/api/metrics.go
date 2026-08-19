@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -29,6 +30,8 @@ var settingDefs = []settingDef{
 	{Key: "alert_quota", Label: "额度告警阈值", Type: "number", Default: "0.2", Description: "账号剩余额度低于总配额该比例（0~1）时触发告警"},
 	{Key: "log_retention", Label: "日志页展示条数", Type: "number", Default: "100", Description: "实时日志与部分聚合最多展示的最近日志条数"},
 	{Key: "cache_probe_enabled", Label: "缓存探针（影子度量）", Type: "bool", Default: "false", Description: "只度量不改返回：记录可缓存请求指纹，用真实流量测潜在命中率。长期开启会让探针表增长，测完可关"},
+	{Key: "proxy_enabled", Label: "启用出口代理", Type: "bool", Default: "false", Description: "开启后上游请求经代理池出站，遇 Cloudflare 403 重试时自动轮换出口 IP；仅对纯源 IP 限速有效"},
+	{Key: "proxy_urls", Label: "代理出口列表", Type: "text", Default: "", Description: "换行或逗号分隔的代理 URL，支持 http/https/socks5，如 socks5://127.0.0.1:1080、http://user:pass@host:port。同一账号默认粘同一出口，403 才换下一个，全部试完回退直连"},
 }
 
 func defaultSettings() map[string]string {
@@ -104,6 +107,33 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	jsonWrite(w, 200, map[string]interface{}{"success": true, "settings": s.allSettings()})
+}
+
+// proxyCheck 检测出口代理连通性与响应速度。
+// 请求体可选传 {"urls":"..."}（换行/逗号分隔）临时检测未保存的配置；
+// 未传则检测已保存的 proxy_urls。返回每个出口的 ok/latencyMs/error。
+func (s *Server) proxyCheck(w http.ResponseWriter, r *http.Request) {
+	if !s.auth(w, r) {
+		return
+	}
+	var q struct {
+		URLs string `json:"urls"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&q) // body 可选，忽略解析错误
+	raw := strings.TrimSpace(q.URLs)
+	if raw == "" {
+		raw, _ = s.Store.GetSetting("proxy_urls")
+		raw = strings.TrimSpace(raw)
+	}
+	if raw == "" {
+		jsonError(w, 400, "未配置代理 URL，请先在代理出口列表中填写", "invalid_request")
+		return
+	}
+	// 总超时兜住并发检测（单个代理 8s，此处给足余量应对多个出口）。
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	results := s.Router.Provider.CheckProxies(ctx, []string{raw})
+	jsonWrite(w, 200, map[string]interface{}{"results": results})
 }
 
 // ─── 统计分析聚合 ───────────────────────────────────────────────

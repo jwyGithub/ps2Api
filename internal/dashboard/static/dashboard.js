@@ -479,7 +479,7 @@
           ? '<label class="switch"><input type="checkbox" data-key="'+d.key+'" '+(val === 'true' ? 'checked' : '')+'><div class="slider"></div></label>'
           : '<input class="input font-mono" data-key="'+d.key+'" value="'+esc(val)+'" style="max-width:220px">';
         return '<div class="flex items-center justify-between p-3 rounded-lg" style="background:var(--bg)"><div><div class="text-[13px] font-semibold">'+esc(d.label)+'</div><div class="text-[12px] mt-0.5" style="color:var(--fg-2)">'+esc(d.description)+'</div></div>'+input+'</div>';
-      }).join('') + '<div class="pt-2"><button class="btn btn-primary" onclick="saveSettings()">保存配置</button></div>';
+      }).join('') + '<div class="pt-2 flex items-center gap-2"><button class="btn btn-primary" onclick="saveSettings()">保存配置</button><button class="btn" onclick="checkProxy()">检测代理</button></div><div id="proxyCheckResult" class="text-[12px] mt-2" style="color:var(--fg-2)"></div>';
     }
   }
 
@@ -647,6 +647,22 @@
       payload[el.dataset.key] = el.type === 'checkbox' ? (el.checked ? 'true' : 'false') : el.value;
     });
     api('/api/settings', {method:'PUT', body:JSON.stringify({settings:payload})}).then(function(){toast('配置已保存并生效');return loadAll();}).catch(function(e){toast(e.message);});
+  };
+  // checkProxy 检测代理出口连通性：读取当前输入框里的代理列表（可含未保存改动），
+  // 逐个探测能否连上上游网关并测耗时，结果直接展示在设置页。
+  window.checkProxy = function () {
+    var box = document.getElementById('proxyCheckResult');
+    var input = document.querySelector('#settingsForm [data-key="proxy_urls"]');
+    var urls = input ? input.value : '';
+    if (box) box.innerHTML = '检测中…';
+    api('/api/proxy-check', {method:'POST', body:JSON.stringify({urls:urls})}).then(function(data){
+      var rows = (data.results || []).map(function(r){
+        var color = r.ok ? 'var(--ok, #16a34a)' : 'var(--err, #dc2626)';
+        var status = r.ok ? ('连通 · ' + r.latencyMs + 'ms') : ('失败 · ' + (r.error || '未知错误'));
+        return '<div style="color:'+color+'">'+esc(r.url)+' — '+esc(status)+'</div>';
+      }).join('');
+      if (box) box.innerHTML = rows || '无检测结果';
+    }).catch(function(e){ if (box) box.innerHTML = '<span style="color:var(--err,#dc2626)">'+esc(e.message)+'</span>'; });
   };
   window.saveRouting = function () {
     var retry = document.getElementById('routingRetry');

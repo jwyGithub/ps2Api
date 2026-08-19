@@ -48,6 +48,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/analytics", s.analytics)
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
+	mux.HandleFunc("POST /api/proxy-check", s.proxyCheck)
 	mux.HandleFunc("GET /api/alerts", s.alerts)
 	mux.HandleFunc("POST /api/alerts/{id}/resolve", s.resolveAlert)
 	mux.HandleFunc("POST /api/alerts/resolve-all", s.resolveAllAlerts)

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"ps2api/internal/provider"
@@ -143,6 +144,47 @@ func TestStickyFallsBackWhenAccountDisabled(t *testing.T) {
 	}
 	if _, used, err := r.pickAccount(nil, cont); err != nil || !used {
 		t.Fatalf("disabled sticky account must fall back to pool: used=%v err=%v", used, err)
+	}
+}
+
+// Cloudflare 403(HTML 风控拦截)以前被当成 RequestRejected 直接返回,任务卡死。
+// 现在归类为 GatewayBlocked:账号健康,退避后重试,第二次即恢复成功——且写入一条告警。
+func TestStreamCloudflare403RetriesAndRecovers(t *testing.T) {
+	r := newTestRouter(t)
+	var calls int32
+	r.Provider.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			h := make(http.Header)
+			h.Set("Server", "cloudflare")
+			h.Set("Content-Type", "text/html; charset=UTF-8")
+			h.Set("Cf-Ray", "a2d562e1bc2349d4-LAX")
+			body := "<!doctype html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>"
+			return &http.Response{StatusCode: 403, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+		}
+		body := "data: {\"eventType\":\"conversation\",\"data\":{\"id\":\"conv-1\"}}\n\n" +
+			"data: {\"eventType\":\"textChunk\",\"data\":{\"textContent\":\"ok\"}}\n\n" +
+			"data: [DONE]\n\n"
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	})}
+
+	var output strings.Builder
+	res, account, err := r.Stream(context.Background(), &provider.ChatRequest{
+		Model: "claude-opus-4-8", Messages: []provider.ChatMessage{mustMsg(t, "user", "hello")},
+	}, func(delta provider.Delta) error {
+		output.WriteString(delta.Content)
+		return nil
+	})
+	if err != nil || res == nil || !res.Success || account == nil {
+		t.Fatalf("Cloudflare 403 should retry and recover: res=%+v account=%+v err=%v", res, account, err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected exactly 2 upstream calls (403 then success), got %d", got)
+	}
+	if output.String() != "ok" {
+		t.Fatalf("client should see recovered output, got %q", output.String())
+	}
+	if alerts, err := r.Store.ListAlerts("", 10); err != nil || len(alerts) == 0 {
+		t.Fatalf("expected a gateway-rejected alert to be recorded: alerts=%v err=%v", alerts, err)
 	}
 }
 

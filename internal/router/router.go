@@ -19,7 +19,20 @@ type Router struct {
 }
 
 func New(s *store.Store) *Router {
-	return &Router{Pool: pool.New(s), Provider: provider.New(), Store: s, shadow: shadowProbe{inflight: map[string]int{}}}
+	r := &Router{Pool: pool.New(s), Provider: provider.New(), Store: s, shadow: shadowProbe{inflight: map[string]int{}}}
+	// 出口代理池：仅当 proxy_enabled=true 且配置了 proxy_urls 时启用，否则返回 nil → 走本机直连。
+	// 每次请求实时读设置，面板改动即时生效、无需重启。
+	r.Provider.SetProxyList(func() []string {
+		if on, _ := r.Store.GetSetting("proxy_enabled"); on != "true" {
+			return nil
+		}
+		v, _ := r.Store.GetSetting("proxy_urls")
+		if v == "" {
+			return nil
+		}
+		return []string{v}
+	})
+	return r
 }
 
 // shadowProbe 影子缓存探针：只度量、不改变任何返回值。
@@ -93,6 +106,16 @@ func (r *Router) retryCount() int {
 	return n
 }
 
+// gatewayBackoff 为网关(Cloudflare)风控拦截的重试提供退避,比普通失败重试更长,
+// 给速率/评分窗口降温时间:0.5s、1s、2s… 上限 5s。
+func gatewayBackoff(attempt int) time.Duration {
+	d := time.Duration(1<<attempt) * 500 * time.Millisecond
+	if d > 5*time.Second {
+		d = 5 * time.Second
+	}
+	return d
+}
+
 // failoverEnabled 从持久化设置读取「失败自动切换账号」开关（默认开启）。
 func (r *Router) failoverEnabled() bool {
 	v, _ := r.Store.GetSetting("failover_enabled")
@@ -137,6 +160,7 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 			return nil, nil, err
 		}
 		provider.Trace(ctx, "router.attempt", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "model": req.Model})
+		req.EgressAttempt = attempt // 遇 403 重试时递增，逐个切换代理出口 IP
 		started := time.Now()
 		res := r.Provider.Chat(ctx, acc, req)
 		if poolUsed {
@@ -151,6 +175,17 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 		}
 		last = res.Error
 		provider.Trace(ctx, "router.failure", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "error": res.Error})
+		if res.GatewayBlocked {
+			// 网关(Cloudflare)安全/风控拦截——账号本身健康,不标记、不换号,退避后重试同一(粘性)账号,
+			// 保住会话上下文。这类 403 按评分/速率判定,退避重试常能成功。
+			provider.Trace(ctx, "router.gateway_blocked", map[string]interface{}{"account_id": acc.ID, "error": res.Error})
+			r.alertRequestRejected(acc, res)
+			if attempt < attempts-1 {
+				time.Sleep(gatewayBackoff(attempt))
+				continue
+			}
+			return nil, nil, &RouteError{Message: res.Error}
+		}
 		if res.RequestRejected {
 			// 请求内容被拒(坏请求、工具名冲突等)——账号本身可用,不标记、不换号重试,直接返回。
 			provider.Trace(ctx, "router.request_rejected", map[string]interface{}{"account_id": acc.ID, "error": res.Error})
@@ -191,6 +226,7 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 			return nil, nil, err
 		}
 		provider.Trace(ctx, "router.attempt", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "model": req.Model, "stream": true})
+		req.EgressAttempt = attempt // 遇 403 重试时递增，逐个切换代理出口 IP
 		started := time.Now()
 		res := r.Provider.StreamChat(ctx, acc, req, trackedEmit)
 		if poolUsed {
@@ -205,6 +241,20 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 		}
 		last = res.Error
 		provider.Trace(ctx, "router.failure", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "error": res.Error, "stream": true})
+		if res.GatewayBlocked {
+			// 网关(Cloudflare)安全/风控拦截——账号健康,退避后重试同一(粘性)账号。但若已经吐出过
+			// 内容则不能重试(会重复输出),此时返回错误由客户端侧发起「继续」。
+			provider.Trace(ctx, "router.gateway_blocked", map[string]interface{}{"account_id": acc.ID, "error": res.Error, "stream": true})
+			r.alertRequestRejected(acc, res)
+			if emitted {
+				return nil, nil, &RouteError{Message: "Stream failed after output started: " + last}
+			}
+			if attempt < attempts-1 {
+				time.Sleep(gatewayBackoff(attempt))
+				continue
+			}
+			return nil, nil, &RouteError{Message: res.Error}
+		}
 		if res.RequestRejected {
 			// 请求内容被拒——账号可用,不标记、不换号,直接返回。
 			provider.Trace(ctx, "router.request_rejected", map[string]interface{}{"account_id": acc.ID, "error": res.Error, "stream": true})
@@ -244,13 +294,20 @@ func (r *Router) alertRequestRejected(acc *store.Account, res *provider.Result) 
 	}
 	title := "请求被网关拒绝: " + acc.Email
 	msg := res.Error + "\n" + res.RejectionDetail
+	// 网关(Cloudflare)拦截时附上近 1 小时 403 按请求体大小的分布，用真实数据佐证
+	// body 大小与 403 是否相关，而非仅凭当前单条请求臆测。
+	if res.GatewayBlocked {
+		if dist, err := r.Store.Cloudflare403BodySizeSummary(60 * time.Minute); err == nil && dist != "" {
+			msg += "\n\n" + dist
+		}
+	}
 	_ = r.Store.CreateAlert("warning", title, msg, "account", &acc.ID, "gateway_rejected")
 }
 
 // logAttempt 把每次上游调用（无论成败）都写入 request_logs，
 // 失败次数、错误率、平均延迟、P95 等指标全部来自真实日志。
 func (r *Router) logAttempt(acc *store.Account, model string, res *provider.Result, started time.Time, endpoint string) {
-	l := &store.RequestLog{AccountID: &acc.ID, Model: model, Endpoint: endpoint, DurationMs: time.Since(started).Milliseconds()}
+	l := &store.RequestLog{AccountID: &acc.ID, Model: model, Endpoint: endpoint, DurationMs: time.Since(started).Milliseconds(), RequestBytes: res.RequestBytes}
 	if res.Success {
 		l.Status = "success"
 		l.PromptTokens = res.PromptTokens

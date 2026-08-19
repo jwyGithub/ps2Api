@@ -86,6 +86,7 @@ type RequestLog struct {
 	Status           string    `json:"status"` // success | error
 	DurationMs       int64     `json:"durationMs"`
 	ErrorMessage     string    `json:"errorMessage"`
+	RequestBytes     int       `json:"requestBytes"` // 出站请求体字节数，用于 403 与体积相关性分析
 	CreatedAt        time.Time `json:"createdAt"`
 }
 
@@ -202,7 +203,11 @@ CREATE TABLE IF NOT EXISTS cache_probe (
 		}
 	}
 	// 兼容旧库：补齐 request_logs.endpoint（调用来源端点）
-	return s.ensureColumn("request_logs", "endpoint", "TEXT NOT NULL DEFAULT ''")
+	if err := s.ensureColumn("request_logs", "endpoint", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	// 兼容旧库：补齐 request_logs.request_bytes（出站请求体大小，供 403 体积相关性分析）
+	return s.ensureColumn("request_logs", "request_bytes", "INTEGER NOT NULL DEFAULT 0")
 }
 
 // ensureColumn 检查表是否已有指定列，没有则 ALTER TABLE 补齐（SQLite 无 IF NOT EXISTS）。
@@ -401,17 +406,59 @@ func (s *Store) UpdateTokens(id int64, tokens string) error {
 }
 
 func (s *Store) LogRequest(l *RequestLog) error {
-	_, err := s.db.Exec(`INSERT INTO request_logs (account_id,model,endpoint,prompt_tokens,completion_tokens,total_tokens,status,duration_ms,error_message,created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?)`,
-		l.AccountID, l.Model, l.Endpoint, l.PromptTokens, l.CompletionTokens, l.TotalTokens, l.Status, l.DurationMs, l.ErrorMessage, time.Now())
+	_, err := s.db.Exec(`INSERT INTO request_logs (account_id,model,endpoint,prompt_tokens,completion_tokens,total_tokens,status,duration_ms,error_message,request_bytes,created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		l.AccountID, l.Model, l.Endpoint, l.PromptTokens, l.CompletionTokens, l.TotalTokens, l.Status, l.DurationMs, l.ErrorMessage, l.RequestBytes, time.Now())
 	return err
+}
+
+// Cloudflare403BodySizeSummary 统计最近 window 内 Cloudflare 网关拒绝(403)错误日志，
+// 按出站请求体大小分桶（以 80KB 软告警阈值为界）给出次数与占比，并据「超阈值占比」
+// 给出 body 大小是否为主要诱因的判断。无匹配样本时返回空串（调用方据此不追加）。
+// 用途：在 403 告警里用真实数据回答「请求体大小与 403 是否相关」，避免仅凭单条日志臆测。
+func (s *Store) Cloudflare403BodySizeSummary(window time.Duration) (string, error) {
+	minutes := int(window.Minutes())
+	if minutes < 1 {
+		minutes = 1
+	}
+	var b0, b1, b2, b3, b4, total int
+	err := s.db.QueryRow(`SELECT
+		COALESCE(SUM(CASE WHEN request_bytes < 16384 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN request_bytes >= 16384 AND request_bytes < 32768 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN request_bytes >= 32768 AND request_bytes < 65536 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN request_bytes >= 65536 AND request_bytes < 81920 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN request_bytes >= 81920 THEN 1 ELSE 0 END),0),
+		COUNT(*)
+		FROM request_logs
+		WHERE status='error' AND error_message LIKE '%Cloudflare%'
+		  AND created_at >= datetime('now', ?)`,
+		fmt.Sprintf("-%d minutes", minutes)).Scan(&b0, &b1, &b2, &b3, &b4, &total)
+	if err != nil {
+		return "", err
+	}
+	if total == 0 {
+		return "", nil
+	}
+	pct := func(n int) float64 { return float64(n) * 100 / float64(total) }
+	out := fmt.Sprintf("近期 403 请求体大小分布（最近 %d 分钟，共 %d 次 Cloudflare 拒绝）:", minutes, total)
+	out += fmt.Sprintf("\n  <16KB: %d 次 (%.0f%%)", b0, pct(b0))
+	out += fmt.Sprintf("\n  16–32KB: %d 次 (%.0f%%)", b1, pct(b1))
+	out += fmt.Sprintf("\n  32–64KB: %d 次 (%.0f%%)", b2, pct(b2))
+	out += fmt.Sprintf("\n  64–80KB: %d 次 (%.0f%%)", b3, pct(b3))
+	out += fmt.Sprintf("\n  >80KB(超软阈值): %d 次 (%.0f%%)", b4, pct(b4))
+	hint := "多数 403 发生在正常体积请求，body 大小并非主要诱因（更可能是边缘风控评分/速率判定）"
+	if float64(b4)/float64(total) >= 0.5 {
+		hint = "多数 403 集中在超大请求体，body 大小可能是主要诱因，建议压缩出站 payload"
+	}
+	out += fmt.Sprintf("\n结论: 超软阈值(>80KB)的 403 占比 %.0f%%——%s", pct(b4), hint)
+	return out, nil
 }
 
 func (s *Store) RecentLogs(limit int) ([]*RequestLog, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.Query(`SELECT id,account_id,model,endpoint,prompt_tokens,completion_tokens,total_tokens,status,duration_ms,error_message,created_at FROM request_logs ORDER BY id DESC LIMIT ?`, limit)
+	rows, err := s.db.Query(`SELECT id,account_id,model,endpoint,prompt_tokens,completion_tokens,total_tokens,status,duration_ms,error_message,request_bytes,created_at FROM request_logs ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -421,7 +468,7 @@ func (s *Store) RecentLogs(limit int) ([]*RequestLog, error) {
 		l := &RequestLog{}
 		var accID sql.NullInt64
 		var model, endpoint, errmsg sql.NullString
-		if err := rows.Scan(&l.ID, &accID, &model, &endpoint, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.Status, &l.DurationMs, &errmsg, &l.CreatedAt); err != nil {
+		if err := rows.Scan(&l.ID, &accID, &model, &endpoint, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.Status, &l.DurationMs, &errmsg, &l.RequestBytes, &l.CreatedAt); err != nil {
 			return nil, err
 		}
 		if accID.Valid {

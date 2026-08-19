@@ -73,17 +73,23 @@ type ChatRequest struct {
 	// Endpoint 调用来源兼容端点：anthropic(/v1/messages) | openai(/v1/chat/completions)，
 	// 由 HTTP handler 注入，只进日志，不随请求体透传。
 	Endpoint string `json:"-"`
+	// EgressAttempt 是本次出站的出口重试序号（由 router 每次重试递增）。0 用账号粘性出口，
+	// 遇 Cloudflare 403 重试时 +1 切到下一个代理出口 IP；越过所有出口后回退本机直连。
+	EgressAttempt int `json:"-"`
 }
 
 type Provider struct {
 	Client     *http.Client
+	proxies    *proxyPool
 	convMap    sync.Map // accountID:fingerprint -> conversationID
 	convOwn    sync.Map // fingerprint -> accountID(int64) 会话归属账号（粘性路由用）
 	toolGroups sync.Map // accountID:toolCallID -> Postman toolCallGroupId
 }
 
 func New() *Provider {
-	return &Provider{Client: &http.Client{Timeout: 0}} // 用 ctx 控制超时，流式不能有总超时
+	// Client 为本机直连出口（用 ctx 控制超时，流式不能有总超时）；proxies 为可选出口代理池，
+	// 未配置时所有请求走 Client 直连。
+	return &Provider{Client: &http.Client{Timeout: 0}, proxies: newProxyPool()}
 }
 
 func (p *Provider) GetTokens(acc *store.Account) (*Tokens, error) {
@@ -919,10 +925,18 @@ type Result struct {
 	// RequestRejected 表示失败源于请求内容本身(坏请求、工具名冲突等),而非账号健康。
 	// 这种错误换账号重试无用、且会污染整个号池,router 应直接返回、不标记账号。
 	RequestRejected bool
+	// GatewayBlocked 表示请求被上游网关(Cloudflare)的安全/风控拦截(WAF、Bot 评分、
+	// 速率限制、Managed Challenge)。这类 403 是有状态、按评分/速率判定的瞬时拦截,而非
+	// 请求内容错误也非账号损坏——退避后重试常能成功。router 应退避重试(不标记账号、不换号),
+	// 而不是像 RequestRejected 那样直接返回。
+	GatewayBlocked bool
 	// RejectionDetail 是请求被网关拒绝时采集的排查上下文(如 Cloudflare Ray ID、
 	// 出站 body 大小、响应体片段)。非空时 router 会据此写入一条告警展示到仪表盘,
 	// 方便定位 403 的具体诱因。仅诊断用,不影响重试/路由决策。
 	RejectionDetail string
+	// RequestBytes 是本次出站请求体(JSON marshal 后)的字节数。写入 request_logs 后
+	// 用于按体积分桶统计 403 发生率,判断 body 大小与 Cloudflare 403 是否相关。
+	RequestBytes int
 }
 
 func parseRateLimit(headers http.Header, now time.Time) *RateLimit {
@@ -1226,6 +1240,7 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 		res.Error = err.Error()
 		return err
 	}
+	res.RequestBytes = len(bodyBytes) // 记录出站体积，供 403 与请求体大小相关性分析
 	// 出站 body 体检：超大 payload 是触发 Cloudflare WAF 403 的常见诱因，
 	// 提前告警以便定位（如历史工具原文、超大 schema 未压缩等）。仅告警不阻断。
 	if len(bodyBytes) > MaxRequestBodyWarnBytes {
@@ -1245,12 +1260,18 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 		return err
 	}
 	httpReq.Header = p.buildHeaders(tokens)
+	// 出口选择：默认按账号粘性走同一代理出口；遇 Cloudflare 403 重试（EgressAttempt 递增）
+	// 切下一个出口 IP；未配置代理或所有出口都试过后回退本机直连。
+	client, egress, viaProxy := p.proxies.selectFor(acc.ID, req.EgressAttempt)
+	if !viaProxy {
+		client, egress = p.Client, "direct"
+	}
 	Trace(ctx, "upstream.request", map[string]interface{}{
 		"method": httpReq.Method, "url": httpReq.URL.String(), "headers": httpReq.Header,
-		"body": json.RawMessage(bodyBytes), "account_id": acc.ID,
+		"body": json.RawMessage(bodyBytes), "account_id": acc.ID, "egress": egress,
 	})
 
-	resp, err := p.Client.Do(httpReq)
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			res.Error = "Upstream timeout"
@@ -1273,10 +1294,12 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 	}
 	if isCloudflareHTMLRejection(resp.StatusCode, resp.Header) {
 		res.Error = "Postman gateway rejected request (403, Cloudflare)"
-		res.RequestRejected = true
+		// 这是 Cloudflare 边缘的安全/风控拦截(瞬时、按评分/速率判定),不是请求内容错误也不是
+		// 账号损坏——标记 GatewayBlocked 让 router 退避重试,而非当作 RequestRejected 直接返回。
+		res.GatewayBlocked = true
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2000))
 		Trace(ctx, "upstream.response.body", map[string]interface{}{"body": string(body), "account_id": acc.ID})
-		res.RejectionDetail = cloudflareRejectionDetail(resp.StatusCode, resp.Header, string(body), len(bodyBytes))
+		res.RejectionDetail = cloudflareRejectionDetail(resp.StatusCode, resp.Header, string(body), len(bodyBytes)) + "\n出口: " + egress
 		return fmt.Errorf("%s", res.Error)
 	}
 
@@ -1317,7 +1340,7 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 			if looksLikeHTML(line) {
 				res.Error = "Postman gateway rejected request (Cloudflare HTML in stream)"
 				res.RequestRejected = true
-				res.RejectionDetail = cloudflareRejectionDetail(resp.StatusCode, resp.Header, line, len(bodyBytes))
+				res.RejectionDetail = cloudflareRejectionDetail(resp.StatusCode, resp.Header, line, len(bodyBytes)) + "\n出口: " + egress
 				return fmt.Errorf("%s", res.Error)
 			}
 		}
@@ -1377,7 +1400,7 @@ func cloudflareRejectionDetail(status int, headers http.Header, body string, req
 	lines = append(lines, fmt.Sprintf("HTTP 状态: %d", status))
 	lines = append(lines, fmt.Sprintf("出站请求体: %d 字节 (软告警阈值 %d 字节)", reqBodyBytes, MaxRequestBodyWarnBytes))
 	if reqBodyBytes > MaxRequestBodyWarnBytes {
-		lines = append(lines, "提示: 请求体超过软告警阈值，超大 payload 是触发 Cloudflare WAF 403 的常见诱因")
+		lines = append(lines, "提示: 请求体超过软告警阈值，超大 payload 可能是触发 Cloudflare WAF 403 的加重因素之一（并非唯一诱因，需结合下方体积分布判断相关性）")
 	}
 	if ray := strings.TrimSpace(headers.Get("Cf-Ray")); ray != "" {
 		lines = append(lines, "Cf-Ray: "+ray)
