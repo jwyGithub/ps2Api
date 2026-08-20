@@ -899,8 +899,15 @@ func (p *Provider) chatURL(tokens *Tokens) string {
 }
 
 func workspaceContext(tokens *Tokens) map[string]interface{} {
+	// 服务端把 mandatoryContext.workspaceId 视为必填字符串；缺失会返回
+	// INPUT_VALIDATION_ERROR（用户侧显示 "That was unexpected :(. Try closing active
+	// tabs..."）。优先使用抓包中的 workspace UUID；未采集到 UUID 时回退到 workspace_id
+	// （8 位短 id，重构前一直这样发送且服务端可正常解析）。只有两者都为空才发空对象。
 	if isUUID(tokens.WorkspaceUUID) {
 		return map[string]interface{}{"workspaceId": tokens.WorkspaceUUID}
+	}
+	if tokens.WorkspaceID != "" {
+		return map[string]interface{}{"workspaceId": tokens.WorkspaceID}
 	}
 	return map[string]interface{}{}
 }

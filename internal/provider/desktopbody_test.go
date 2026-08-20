@@ -54,8 +54,10 @@ func TestBuildBodyWebShape(t *testing.T) {
 	if _, ok := input["startedFrom"]; ok {
 		t.Fatal("startedFrom should not be sent by the current web client")
 	}
-	if got := body["mandatoryContext"].(map[string]interface{}); len(got) != 0 {
-		t.Fatalf("mandatoryContext = %#v, want empty object", got)
+	// 服务端要求 mandatoryContext.workspaceId 必填；未采集到 UUID 时回退到 workspace_id。
+	// 发空对象会触发 INPUT_VALIDATION_ERROR（"That was unexpected..."）。
+	if got := body["mandatoryContext"].(map[string]interface{}); got["workspaceId"] != "ws" {
+		t.Fatalf("mandatoryContext = %#v, want workspaceId=ws", got)
 	}
 	kb := body["clientKBTerms"].(map[string]interface{})
 	if got := kb["nativeTermsHash"]; got != WebKBTermsHash {
