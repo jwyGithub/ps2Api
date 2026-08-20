@@ -196,7 +196,7 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 			}
 			return nil, nil, err
 		}
-		provider.Trace(ctx, "router.attempt", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "model": req.Model})
+		provider.Trace(ctx, "router.attempt", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "email": acc.Email, "model": req.Model})
 		req.EgressAttempt = attempt // 遇 403 重试时递增，逐个切换代理出口 IP
 		started := time.Now()
 		res := r.Provider.Chat(ctx, acc, req)
@@ -206,14 +206,14 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 		r.persistQuota(acc, res)
 		r.logAttempt(acc, req.Model, res, started, req.Endpoint)
 		if res.Success {
-			provider.Trace(ctx, "router.success", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID})
+			provider.Trace(ctx, "router.success", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "email": acc.Email})
 			r.Pool.MarkUsed(acc.ID)
 			return res, acc, nil
 		}
 		last = res.Error
-		provider.Trace(ctx, "router.failure", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "error": res.Error})
+		provider.Trace(ctx, "router.failure", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "email": acc.Email, "error": res.Error})
 		if res.GatewayBlocked {
-			provider.Trace(ctx, "router.gateway_blocked", map[string]interface{}{"account_id": acc.ID, "error": res.Error})
+			provider.Trace(ctx, "router.gateway_blocked", map[string]interface{}{"account_id": acc.ID, "email": acc.Email, "error": res.Error})
 			r.alertRequestRejected(acc, res)
 			if provider.HasReusableHistory(req.Messages) {
 				// 续聊：Postman 服务端会话绑定在原账号，换号必然丢上下文（请求被降级为 USER_QUERY 且

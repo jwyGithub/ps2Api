@@ -9,6 +9,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,9 +32,8 @@ func TraceEnabled() bool {
 
 // endpoint 用作日志子目录（如 openai/anthropic），按调用方式分开存储。
 func NewTraceContext(ctx context.Context, endpoint string) (context.Context, string) {
-	if !TraceEnabled() {
-		return ctx, ""
-	}
+	// 始终生成 trace_id 作为整条请求链路的关联 id（控制台链路日志恒可用）；
+	// 是否额外落 jsonl 文件深追踪，仍由 GATEWAY_TRACE_LOG 控制（见 Trace）。
 	var raw [12]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return ctx, ""
@@ -48,11 +49,18 @@ func Trace(ctx context.Context, event string, data interface{}) {
 	if id == "" {
 		return
 	}
+	clean := sanitizeTrace(data)
+	// 控制台链路 sink：默认全量、单行、带 trace_id 前缀，便于实时溯源与 grep。
+	traceConsole(id, event, clean)
+	// 文件深追踪（完整请求/响应体）仍按需开启，避免默认每请求写盘。
+	if !TraceEnabled() {
+		return
+	}
 	record := map[string]interface{}{
 		"time":     time.Now().Format(time.RFC3339Nano),
 		"trace_id": id,
 		"event":    event,
-		"data":     sanitizeTrace(data),
+		"data":     clean,
 	}
 	line, err := json.Marshal(record)
 	if err != nil {
@@ -161,4 +169,149 @@ func sanitizeTraceString(value string) interface{} {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// ————————————————————————————————————————————————————————————————
+// 控制台链路 sink：把关键链路事件实时打到控制台（stderr，经 log），
+// 单行、带短 trace_id 前缀，可 grep 出完整请求链路。完整请求/响应体
+// 仍只进 jsonl 文件（GATEWAY_TRACE_LOG），控制台只打摘要。
+// 详细度由 GATEWAY_LOG_LEVEL 控制：debug|info|warn|error|off，默认 debug（全量）。
+
+const (
+	logDebug = iota
+	logInfo
+	logWarn
+	logError
+	logOff
+)
+
+const (
+	consoleValueMaxRunes = 200 // 单个字段值最长
+	consoleLineMaxRunes  = 500 // 整行最长
+)
+
+// consoleLevel 返回控制台最低输出级别，默认 debug（全量到控制台）。
+func consoleLevel() int {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GATEWAY_LOG_LEVEL"))) {
+	case "info":
+		return logInfo
+	case "warn", "warning":
+		return logWarn
+	case "error", "err":
+		return logError
+	case "off", "none", "silent":
+		return logOff
+	default: // debug 或未设置
+		return logDebug
+	}
+}
+
+// eventLevel 把链路事件映射到日志级别，方便按严重程度着色/过滤。
+func eventLevel(event string) int {
+	switch event {
+	case "router.error", "client.request.error":
+		return logError
+	case "router.failure", "router.gateway_blocked", "router.gateway_sticky_retry",
+		"router.request_rejected", "upstream.request.oversize":
+		return logWarn
+	default:
+		return logInfo
+	}
+}
+
+func levelName(l int) string {
+	switch l {
+	case logError:
+		return "ERROR"
+	case logWarn:
+		return "WARN"
+	case logDebug:
+		return "DEBUG"
+	default:
+		return "INFO"
+	}
+}
+
+func traceConsole(id, event string, clean interface{}) {
+	// 流式响应体按 write 逐块上报，进控制台会刷屏；只留文件里的完整体，
+	// 控制台靠 upstream.complete / provider.result / 访问日志行给出结论。
+	if event == "client.response.body" {
+		return
+	}
+	lvl := eventLevel(event)
+	if lvl < consoleLevel() {
+		return
+	}
+	short := id
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	log.Printf("[%s] %-5s %-26s %s", short, levelName(lvl), event, consoleKV(clean))
+}
+
+// consoleKV 把事件 data（已脱敏）压成单行 key=val；body/headers/content 这类
+// 大字段只显示字节数，避免刷屏。
+func consoleKV(clean interface{}) string {
+	m, ok := clean.(map[string]interface{})
+	if !ok {
+		raw, _ := json.Marshal(clean)
+		return truncateConsole(strings.ReplaceAll(string(raw), "\n", " "), consoleLineMaxRunes)
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		var vs string
+		switch strings.ToLower(k) {
+		case "body", "headers", "content", "messages":
+			vs = strconv.Itoa(consoleValueSize(m[k])) + "b"
+		default:
+			vs = consoleValue(m[k])
+		}
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(vs)
+	}
+	return truncateConsole(b.String(), consoleLineMaxRunes)
+}
+
+func consoleValue(v interface{}) string {
+	switch t := v.(type) {
+	case string:
+		return truncateConsole(strings.ReplaceAll(t, "\n", " "), consoleValueMaxRunes)
+	case bool:
+		return strconv.FormatBool(t)
+	case float64:
+		if t == float64(int64(t)) {
+			return strconv.FormatInt(int64(t), 10)
+		}
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case nil:
+		return "null"
+	default:
+		raw, _ := json.Marshal(t)
+		return truncateConsole(strings.ReplaceAll(string(raw), "\n", " "), consoleValueMaxRunes)
+	}
+}
+
+func consoleValueSize(v interface{}) int {
+	if s, ok := v.(string); ok {
+		return len(s)
+	}
+	raw, _ := json.Marshal(v)
+	return len(raw)
+}
+
+func truncateConsole(s string, maxRunes int) string {
+	r := []rune(s)
+	if len(r) <= maxRunes {
+		return s
+	}
+	return string(r[:maxRunes]) + "…"
 }

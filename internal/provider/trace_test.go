@@ -42,11 +42,23 @@ func TestTraceWritesJSONLAndRedactsSecrets(t *testing.T) {
 	}
 }
 
-func TestTraceDisabledDoesNotCreateID(t *testing.T) {
+// 关闭 GATEWAY_TRACE_LOG 时：仍生成 trace_id（供控制台链路日志关联），
+// 但不落 jsonl 文件深追踪。
+func TestTraceDisabledStillMintsIDButWritesNoFile(t *testing.T) {
+	dir := t.TempDir()
 	t.Setenv("GATEWAY_TRACE_LOG", "0")
-	_, id := NewTraceContext(context.Background(), "openai")
-	if id != "" {
-		t.Fatalf("disabled trace created id %q", id)
+	t.Setenv("GATEWAY_TRACE_DIR", dir)
+	ctx, id := NewTraceContext(context.Background(), "openai")
+	if id == "" {
+		t.Fatal("trace id should always be created for console correlation")
+	}
+	Trace(ctx, "test", map[string]interface{}{"body": "hello"})
+	files, err := filepath.Glob(filepath.Join(dir, "*", "*", "*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("file tracing disabled but jsonl written: %v", files)
 	}
 }
 

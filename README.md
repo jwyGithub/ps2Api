@@ -152,12 +152,31 @@ curl http://127.0.0.1:1930/v1/messages \
 | ----------------------- | -------------------------------- | ----------------------------------------------------------------- |
 | `GATEWAY_PORT`          | `1930`                           | 监听端口                                                          |
 | `DATABASE_PATH`         | `/data/gateway.db`（镜像内）     | SQLite 路径                                                       |
-| `GATEWAY_TRACE_LOG`     | `0`                              | 设为 `1` 记录客户端请求、路由、上游请求 / SSE 与响应，供故障排查  |
-| `GATEWAY_TRACE_DIR`     | `./data/traces`                  | 追踪日志根目录；按日期分目录，每个请求单独生成 `<trace_id>.jsonl` |
+| `GATEWAY_LOG_LEVEL`     | `debug`                          | 控制台链路日志级别：`debug`/`info`/`warn`/`error`/`off`。默认 `debug`（全量）；每条请求恒有 `trace_id`，关键事件按行输出，可 `grep <trace_id>` 捞出完整链路 |
+| `GATEWAY_TRACE_LOG`     | `0`                              | 设为 `1` 额外把完整请求 / 路由 / 上游 SSE 与响应体落盘为 jsonl 深追踪文件（与控制台链路日志相互独立） |
+| `GATEWAY_TRACE_DIR`     | `./data/traces`                  | 深追踪文件根目录；按日期分目录，每个请求单独生成 `<trace_id>.jsonl` |
 
 > **API Key** 不再通过环境变量配置：首次启动后在面板「系统设置 → 安全与认证」填入并保存，写入 SQLite 后立即生效，面板会自动缓存。留空则关闭鉴权。
 
-> 追踪日志默认关闭。开启后 `Authorization`、`Cookie`、密码、API Key、access token、会话 token 会自动脱敏，但日志仍含对话正文与工具结果，排查后应关闭并妥善处理。响应头 `X-Postman2API-Trace-ID` 对应该次请求的日志文件名。
+> 控制台链路日志默认开启（`GATEWAY_LOG_LEVEL=debug`）：每个请求都会生成贯穿全链路的 `trace_id`，入口访问日志行与各链路事件行都以 `[<短trace_id>]` 前缀对齐，`body`/`headers`/`content`/`messages` 只打字节数，其它值截断，不含对话正文。需要降噪时可调高级别（如 `warn`）或设 `off` 关闭。
+>
+> 深追踪文件（`GATEWAY_TRACE_LOG=1`）默认关闭，含完整请求 / 响应正文与工具结果；开启后 `Authorization`、`Cookie`、密码、API Key、access token、会话 token 会自动脱敏，排查后应关闭并妥善处理。响应头 `X-Postman2API-Trace-ID` 对应该次请求的深追踪文件名。
+
+### 链路排错
+
+一次「命中 Cloudflare 拦截、原号重试后成功」的请求，控制台会输出同一 `trace_id` 前缀的连续事件：
+
+```
+[a1b2c3d4] INFO  client.request              method=POST path=/v1/messages body=48213b
+[a1b2c3d4] INFO  router.attempt              account_id=17 attempt=1 email=foo@x.com model=claude-…
+[a1b2c3d4] WARN  router.gateway_blocked      account_id=17 email=foo@x.com error=…Cf-Ray: …网关拦截…
+[a1b2c3d4] WARN  router.gateway_sticky_retry account_id=17
+[a1b2c3d4] INFO  router.attempt              account_id=17 attempt=2 email=foo@x.com …
+[a1b2c3d4] INFO  router.success              account_id=17 attempt=2 email=foo@x.com
+[a1b2c3d4] POST /v1/messages -> 200 (1230ms)
+```
+
+`grep a1b2c3d4` 即可捞出这条请求从入口 → 路由 → 上游、每次 failover（哪个号被拦、切到哪个号）到最终结果的完整链路；需要请求 / 响应原文时再开 `GATEWAY_TRACE_LOG=1` 查对应 `data/traces/<日期>/a1b2c3d4.jsonl`。
 
 ## API 参考
 

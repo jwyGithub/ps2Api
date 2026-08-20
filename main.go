@@ -55,11 +55,19 @@ func logging(next http.Handler) http.Handler {
 		rec := &logRecorder{ResponseWriter: w, status: 200}
 		next.ServeHTTP(rec, r)
 		dur := time.Since(started).Milliseconds()
+		// 带上 trace_id 前缀，和链路日志（[<trace_id>] ...）对齐，一眼定位完整调用链。
+		prefix := ""
+		if tid := rec.Header().Get("X-Postman2API-Trace-ID"); tid != "" {
+			if len(tid) > 8 {
+				tid = tid[:8]
+			}
+			prefix = "[" + tid + "] "
+		}
 		if rec.status >= 400 {
 			// 失败时把响应体（JSON error 的 message）一并打出来，便于定位原因。
-			log.Printf("%s %s -> %d (%dms) %s", r.Method, r.URL.Path, rec.status, dur, strings.TrimSpace(rec.errBody.String()))
+			log.Printf("%s%s %s -> %d (%dms) %s", prefix, r.Method, r.URL.Path, rec.status, dur, strings.TrimSpace(rec.errBody.String()))
 		} else {
-			log.Printf("%s %s -> %d (%dms)", r.Method, r.URL.Path, rec.status, dur)
+			log.Printf("%s%s %s -> %d (%dms)", prefix, r.Method, r.URL.Path, rec.status, dur)
 		}
 	})
 }
