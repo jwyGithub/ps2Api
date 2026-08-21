@@ -177,6 +177,7 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 	var last string
 	excluded := map[int64]bool{}
 	gatewayBlocks := 0
+	gatewayRetryUsed := false
 	var pinnedAcc *store.Account // 续聊遇网关拦截时钉住原账号，绝不换号（换号会丢服务端会话上下文）
 	attempts := r.retryCount()
 	if !r.failoverEnabled() {
@@ -197,9 +198,16 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 			return nil, nil, err
 		}
 		provider.Trace(ctx, "router.attempt", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "email": acc.Email, "model": req.Model})
-		req.EgressAttempt = attempt // 遇 403 重试时递增，逐个切换代理出口 IP
+		if req.GatewayRetry {
+			// The degraded retry must keep the first egress so any newly issued
+			// Cloudflare cookies remain bound to the same client path.
+			req.EgressAttempt = attempt - 1
+		} else {
+			req.EgressAttempt = attempt
+		}
 		started := time.Now()
 		res := r.Provider.Chat(ctx, acc, req)
+		req.GatewayRetry = false
 		if poolUsed {
 			r.Pool.Done(acc.ID)
 		}
@@ -218,11 +226,13 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 			if provider.HasReusableHistory(req.Messages) {
 				// 续聊：Postman 服务端会话绑定在原账号，换号必然丢上下文（请求被降级为 USER_QUERY 且
 				// 历史被截断到 MaxQueryLen，模型「失忆」）。且历史里的旧 tool_result 对 TOOL_RESPONSE 续聊
-				// 根本不出站（只发最新一轮增量，历史在服务端），压缩它们既不缩小请求体、又会改写 req.Messages
-				// 破坏会话指纹 → 触发静默换号与降级。故：钉住原账号、退避后原样重试，绝不换号、不改 req.Messages
-				// （保住指纹 → 维持 TOOL_RESPONSE + conversationId）。原号试满仍被拦才返回明确错误，由客户端「继续」。
-				if attempt < attempts-1 {
+				// 根本不出站（只发最新一轮增量，历史在服务端），改写 req.Messages 会破坏会话指纹。
+				// 故只在出站边界净化摘要并压缩 third-party schema，保持 TOOL_RESPONSE、conversationId、
+				// 原账号与原出口不变；该降级重试仅允许一次。
+				if !gatewayRetryUsed && attempt < attempts-1 {
 					pinnedAcc = acc
+					gatewayRetryUsed = true
+					req.GatewayRetry = true
 					provider.Trace(ctx, "router.gateway_sticky_retry", map[string]interface{}{"account_id": acc.ID})
 					time.Sleep(gatewayBackoff(attempt))
 					continue
@@ -270,6 +280,7 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 	}
 	excluded := map[int64]bool{}
 	gatewayBlocks := 0
+	gatewayRetryUsed := false
 	var pinnedAcc *store.Account // 续聊遇网关拦截时钉住原账号，绝不换号（换号会丢服务端会话上下文）
 	attempts := r.retryCount()
 	if !r.failoverEnabled() {
@@ -287,9 +298,14 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 			return nil, nil, err
 		}
 		provider.Trace(ctx, "router.attempt", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "model": req.Model, "stream": true})
-		req.EgressAttempt = attempt // 遇 403 重试时递增，逐个切换代理出口 IP
+		if req.GatewayRetry {
+			req.EgressAttempt = attempt - 1
+		} else {
+			req.EgressAttempt = attempt
+		}
 		started := time.Now()
 		res := r.Provider.StreamChat(ctx, acc, req, trackedEmit)
+		req.GatewayRetry = false
 		if poolUsed {
 			r.Pool.Done(acc.ID)
 		}
@@ -312,10 +328,12 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 				return nil, nil, &RouteError{Message: "Stream failed after output started: " + last}
 			}
 			if provider.HasReusableHistory(req.Messages) {
-				// 续聊：钉住原账号退避重试，绝不换号、不改 req.Messages（换号/改写会丢服务端会话
-				// 上下文并降级为 USER_QUERY，见 Chat 内详注）。原号试满仍被拦才返回明确错误。
-				if attempt < attempts-1 {
+				// 续聊：固定原账号与原出口，只在出站边界净化摘要、压缩 third-party schema；
+				// 不改 req.Messages。单次降级重试仍被拦后立即返回明确错误。
+				if !gatewayRetryUsed && attempt < attempts-1 {
 					pinnedAcc = acc
+					gatewayRetryUsed = true
+					req.GatewayRetry = true
 					provider.Trace(ctx, "router.gateway_sticky_retry", map[string]interface{}{"account_id": acc.ID, "stream": true})
 					time.Sleep(gatewayBackoff(attempt))
 					continue

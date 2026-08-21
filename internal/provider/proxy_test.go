@@ -1,6 +1,10 @@
 package provider
 
-import "testing"
+import (
+	"net/http"
+	"net/url"
+	"testing"
+)
 
 func TestParseProxyURLs(t *testing.T) {
 	in := []string{"socks5://127.0.0.1:1080, http://u:p@host:3128\nhttps://a.example:8443 ; not-a-url\nsocks5://127.0.0.1:1080"}
@@ -70,5 +74,36 @@ func TestProxyPoolClientCachedAndReused(t *testing.T) {
 	}
 	if pp.clientFor("::::bad") != nil {
 		t.Fatal("invalid URL must yield nil client")
+	}
+}
+
+func TestAccountCookieJarsAreIsolated(t *testing.T) {
+	store := newAccountCookieJars()
+	u, _ := url.Parse("https://example.com/chat")
+	jar := store.jarFor(1, u.Host, "proxy-a")
+	jar.SetCookies(u, []*http.Cookie{{Name: "__cf_bm", Value: "account-1"}})
+	if got := store.cookies(1, u, "proxy-a"); len(got) != 1 || got[0].Value != "account-1" {
+		t.Fatalf("same account cookie missing: %#v", got)
+	}
+	if got := store.cookies(2, u, "proxy-a"); len(got) != 0 {
+		t.Fatalf("cookie leaked across accounts: %#v", got)
+	}
+	if got := store.cookies(1, u, "proxy-b"); len(got) != 0 {
+		t.Fatalf("cookie leaked across egresses: %#v", got)
+	}
+}
+
+func TestApplyCookiesMergesAndRefreshesSessionCookie(t *testing.T) {
+	p := New()
+	u, _ := url.Parse("https://example.com/chat")
+	p.cookies.remember(1, u, "direct", []*http.Cookie{
+		{Name: "postman.sid", Value: "new"},
+		{Name: "__cf_bm", Value: "cf"},
+	})
+	req, _ := http.NewRequest(http.MethodPost, u.String(), nil)
+	req.Header.Set("Cookie", "postman.sid=old; custom=value")
+	p.applyCookies(1, req, "direct")
+	if got := req.Header.Get("Cookie"); got != "custom=value; __cf_bm=cf; postman.sid=new" {
+		t.Fatalf("merged cookies = %q", got)
 	}
 }

@@ -520,11 +520,14 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, req *pr
 		}
 		return nil
 	})
-	// 尚未产生任何输出就失败：还没开流，回退为干净的 HTTP 503 JSON 错误，终端可明确停止任务。
+	// 尚未产生任何输出就失败：这是「流式」请求，必须以 SSE 协议干净收尾。
+	// 之前回退为 HTTP 503 JSON 的做法有缺陷——Anthropic 协议的 agent 终端已经开着
+	// 流式连接在等 SSE 生命周期事件，并不把 503 JSON body 当作流终止信号，于是
+	// 「一直在请求中」等不到 message_stop 而永久挂起（见 docs/403-gateway-block-failover.md §2.3 缺陷2）。
+	// 修复：即便产出任何增量前就失败，也照常开流(ensureStarted 发 message_start)，
+	// 随后统一走下方 error + message_delta + message_stop 的终止序列，保证终端必定收到 message_stop。
 	if err != nil && !started {
-		status := 503
-		jsonError(w, status, err.Error(), "api_error")
-		return
+		ensureStarted()
 	}
 	closeThinking()
 	closeText()

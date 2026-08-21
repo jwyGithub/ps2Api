@@ -86,11 +86,14 @@ type ChatRequest struct {
 	// EgressAttempt 是本次出站的出口重试序号（由 router 每次重试递增）。0 用账号粘性出口，
 	// 遇 Cloudflare 403 重试时 +1 切到下一个代理出口 IP；越过所有出口后回退本机直连。
 	EgressAttempt int `json:"-"`
+	// GatewayRetry enables the single degraded retry after a gateway block.
+	GatewayRetry bool `json:"-"`
 }
 
 type Provider struct {
 	Client     *http.Client
 	proxies    *proxyPool
+	cookies    *accountCookieJars
 	convMap    sync.Map // accountID:fingerprint -> conversationID
 	convOwn    sync.Map // fingerprint -> accountID(int64) 会话归属账号（粘性路由用）
 	toolGroups sync.Map // accountID:toolCallID -> Postman toolCallGroupId
@@ -99,7 +102,7 @@ type Provider struct {
 func New() *Provider {
 	// Client 为本机直连出口（用 ctx 控制超时，流式不能有总超时）；proxies 为可选出口代理池，
 	// 未配置时所有请求走 Client 直连。
-	return &Provider{Client: &http.Client{Timeout: 0}, proxies: newProxyPool()}
+	return &Provider{Client: &http.Client{Timeout: 0}, proxies: newProxyPool(), cookies: newAccountCookieJars()}
 }
 
 func (p *Provider) GetTokens(acc *store.Account) (*Tokens, error) {
@@ -423,6 +426,38 @@ func (p *Provider) buildThirdPartyTools(tools []interface{}) map[string]interfac
 	return map[string]interface{}{"proxy-tools": map[string]interface{}{"tools": mcpTools}}
 }
 
+// compactThirdPartyTools keeps the callable tool names while dropping the large
+// schema/docs envelope for a single gateway retry. The client still owns the
+// real schemas and executes the returned tool calls, so names remain necessary.
+func compactThirdPartyTools(value map[string]interface{}) map[string]interface{} {
+	proxy, ok := value["proxy-tools"].(map[string]interface{})
+	if !ok {
+		return map[string]interface{}{}
+	}
+	tools, ok := proxy["tools"].([]map[string]interface{})
+	if !ok {
+		return map[string]interface{}{}
+	}
+	compact := make([]map[string]interface{}, 0, len(tools))
+	for _, tool := range tools {
+		name, _ := tool["name"].(string)
+		if name == "" {
+			continue
+		}
+		compact = append(compact, map[string]interface{}{
+			"name": name,
+			"parameters": map[string]interface{}{
+				"type":                 "object",
+				"additionalProperties": true,
+			},
+		})
+	}
+	if len(compact) == 0 {
+		return map[string]interface{}{}
+	}
+	return map[string]interface{}{"proxy-tools": map[string]interface{}{"tools": compact}}
+}
+
 func compactToolSchema(value interface{}) interface{} {
 	switch v := value.(type) {
 	case map[string]interface{}:
@@ -690,14 +725,10 @@ func (p *Provider) nativeToolResponse(accountID int64, messages []ChatMessage) (
 				"\n...[tool result truncated]...\n" +
 				strings.ToValidUTF8(payload[len(payload)-tail:], "")
 		}
-		summary := content
-		if len(summary) > 512 {
-			summary = summary[:512] + "..."
-		}
 		entry := map[string]interface{}{
 			"toolCallId":          toolCallID,
 			"content":             payload,
-			"toolResponseSummary": summary,
+			"toolResponseSummary": safeToolResponseSummary(status, content),
 			"toolResponseStatus":  status,
 		}
 		if failed {
@@ -747,6 +778,12 @@ func (p *Provider) nativeToolResponse(accountID int64, messages []ChatMessage) (
 	return response, len(response.responses) > 0 && response.groupID != ""
 }
 
+// safeToolResponseSummary mirrors Postman's short native summaries without copying
+// source code, HTML, commands, or other tool output into a second request field.
+func safeToolResponseSummary(status, content string) string {
+	return fmt.Sprintf("Tool result: %s, %d bytes", status, len(content))
+}
+
 func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel string, accountID int64) map[string]interface{} {
 	nativeResponse, useNativeResponse := p.nativeToolResponse(accountID, req.Messages)
 	convID := p.LookupConversation(accountID, req.Messages)
@@ -766,6 +803,12 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 		}
 	}
 	thirdParty := p.buildThirdPartyTools(tools)
+	// Keep full third-party registration on normal Web requests. Only the bounded
+	// retry after a gateway block uses a name-only schema to preserve custom-tool
+	// dispatch without repeating the large docs envelope.
+	if req.GatewayRetry {
+		thirdParty = compactThirdPartyTools(thirdParty)
+	}
 
 	input := map[string]interface{}{
 		"chatType":     "USER_QUERY",
@@ -889,6 +932,46 @@ func (p *Provider) buildHeaders(tokens *Tokens) http.Header {
 		h.Set("priority", "u=1, i")
 	}
 	return h
+}
+
+func (p *Provider) applyCookies(accountID int64, req *http.Request, egress string) {
+	if p.cookies == nil || req == nil {
+		return
+	}
+	jarCookies := p.cookies.cookies(accountID, req.URL, egress)
+	if len(jarCookies) == 0 {
+		return
+	}
+	parts := []string{}
+	jarValues := map[string]string{}
+	for _, cookie := range jarCookies {
+		if cookie != nil && cookie.Name != "" {
+			jarValues[cookie.Name] = cookie.Value
+		}
+	}
+	if existing := req.Header.Get("Cookie"); existing != "" {
+		for _, part := range strings.Split(existing, ";") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			name := strings.TrimSpace(strings.SplitN(part, "=", 2)[0])
+			if _, replaced := jarValues[name]; !replaced {
+				parts = append(parts, part)
+			}
+		}
+	}
+	names := make([]string, 0, len(jarValues))
+	for name := range jarValues {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		parts = append(parts, name+"="+jarValues[name])
+	}
+	if len(parts) > 0 {
+		req.Header.Set("Cookie", strings.Join(parts, "; "))
+	}
 }
 
 func (p *Provider) chatURL(tokens *Tokens) string {
@@ -1313,6 +1396,7 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 	if !viaProxy {
 		client, egress = p.Client, "direct"
 	}
+	p.applyCookies(acc.ID, httpReq, egress)
 	Trace(ctx, "upstream.request", map[string]interface{}{
 		"method": httpReq.Method, "url": httpReq.URL.String(), "headers": httpReq.Header,
 		"body": json.RawMessage(bodyBytes), "account_id": acc.ID, "egress": egress,
@@ -1330,6 +1414,9 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 		return err
 	}
 	defer resp.Body.Close()
+	if p.cookies != nil {
+		p.cookies.remember(acc.ID, httpReq.URL, egress, resp.Cookies())
+	}
 	Trace(ctx, "upstream.response.headers", map[string]interface{}{
 		"status": resp.StatusCode, "headers": resp.Header, "account_id": acc.ID,
 	})

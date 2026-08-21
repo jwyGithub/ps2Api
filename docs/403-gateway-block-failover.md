@@ -51,16 +51,16 @@
 核心是用 `HasReusableHistory(messages)`（消息里是否含 assistant / tool / Anthropic tool_result）把请求分成两类，对 `GatewayBlocked` 采取**截然不同**的策略：
 
 - **续聊（有可复用历史）** —— 服务端已有会话、绑定在原账号：
-  - **钉住原账号**（`selectAccount` 的 pinned 参数），退避后**原样重试**；
+  - **钉住原账号**（`selectAccount` 的 pinned 参数），只允许一次退避重试；
   - **绝不换号**（换号必丢服务端会话 → 降级 USER_QUERY + 历史截断 → 失忆）；
   - **绝不改写 `req.Messages`**（改写会破坏会话指纹 → 触发静默换号与降级）；
-  - 原号在重试额度内试满仍被拦，才返回**明确的网关拦截错误**，由客户端侧发起「继续」恢复任务。
+  - 第一次 403 后，保留 `conversationId`、`toolCallGroupId` 和工具结果，只移除摘要源码并发送紧凑 third-party schema；第二次仍被拦则返回**明确的网关拦截错误**。
 - **新对话（无可复用历史）** —— 无服务端会话可丢，换号安全：
   1. **排除当前账号** + 给它打**冷却标记**；
   2. 退避（backoff）后 **failover 到下一个健康账号**；
   3. 账号**全部耗尽**时，返回**明确的网关拦截错误**（带 `GatewayBlocked` 标记），而不是笼统的 "no accounts"。
 
-> **为何不再压缩**：见 §2.2。续聊只出站最新增量，压缩历史无用；压缩又会改写请求体破坏指纹、引发降级。故彻底移除压缩路径，改为「续聊钉原号、新对话才换号」。
+> **压缩边界**：不改写历史消息，也不截断 `req.Messages`。仅在 native `TOOL_RESPONSE` 的降级重试中移除重复的摘要源码并压缩 third-party schema；首轮请求仍保留完整 Web 工具定义。
 
 ### 3.2 错误分类
 
@@ -81,7 +81,9 @@
 三个流式处理器（Anthropic / OpenAI Chat / Responses）统一改为：
 
 - **延迟开流（deferred start）**：等**首个真实增量**到达后，才提交 HTTP `200` 与首个流事件。
-- **产出前失败**：回退为**干净的 HTTP 503 JSON 错误**（此时还没发任何流事件，可以直接返回标准错误体）。
+- **产出前失败**：
+  - **Anthropic**：**修正**——不再回退为 HTTP 503 JSON。Anthropic 协议的 agent 终端已开着流式连接等 SSE 生命周期事件，并不把 503 JSON body 当作流终止信号，于是「一直在请求中」等不到 `message_stop` 而永久挂起。故对 Anthropic 流式请求，产出前失败也照常开流（补 `message_start`）再走下方「已开流后失败」的终止序列，**保证终端必定收到 `message_stop`**。
+  - **OpenAI Chat / Responses**：仍可回退为**干净的 HTTP 503 JSON 错误**（此时还没发任何流事件，OpenAI 客户端会把非 200 当作终止）。
 - **已开流后失败**：补发协议对应的终止事件干净收尾：
   - Anthropic：`message_stop`
   - OpenAI Responses：`response.failed`
@@ -91,7 +93,7 @@
 ### 3.5 可配置项
 
 - 配置：**网关拦截冷却(秒)**（`gateway_cooldown_seconds`），默认 `300`。仅作用于**新对话**换号 failover 后对被拦账号的冷却。
-- （已移除）~~网关压缩单块字节预算 `gateway_compact_bytes`~~：压缩路径连同该配置一并删除，理由见 §2.2。
+- 账号 Cookie 按 `account + upstream host + egress` 隔离，响应中的 `Set-Cookie` 仅回收到对应账号和出口。
 
 ---
 
@@ -99,22 +101,19 @@
 
 移植时请保留以下**行为契约**，而非具体 Go 实现：
 
-1. **错误分类可区分**：至少区分「网关拦截（先压缩、压不动再换号）」与「请求本身非法（不重试）」两类，避免对非法请求做无意义重试/换号。
-2. **压缩优先、换号兜底**：网关拦截的诱因是请求体里累积的 tool_result 标记文本，故应**先压缩 tool_result 正文并原号重试**（只截断正文、不破坏 `tool_use ↔ tool_result` 配对）；压缩到下限仍被拦，再跨账号 failover。压缩重试次数需设上限，给换号保留额度。
-3. **注意「原样回传完整 tool_result」的出站路径**：若上游有 native tool-response 通道会绕过常规历史截断而回传完整正文，压缩必须作用在该路径之前，否则无效。
-4. **账号级冷却，带 TTL 自动恢复**：被烧账号进冷却池，优先跳过；全冷却时兜底可用；到期自愈。冷却时长可配置（默认 300s）。
-5. **流式必须延迟开流**：在拿到首个真实增量前，不要提交 200 / 不要发首事件。这样失败可回退为标准 HTTP 错误。
-6. **流式失败必须干净收尾**：已开流后失败，务必补发协议规定的终止事件（`message_stop` / `response.failed` / `[DONE]`），否则客户端会挂起。
-7. **账号耗尽返回明确错误**：failover 用尽账号时，返回带明确语义的网关拦截错误，而非「无可用账号」。
+1. **错误分类可区分**：至少区分网关拦截、请求非法和认证失败，避免无意义换号。
+2. **续聊单次降级重试**：保持账号、会话 ID、工具调用配对和原始消息；只净化摘要、压缩 third-party schema，并固定首次出口。
+3. **新对话才允许 failover**：网关拦截后排除账号并冷却，账号耗尽返回明确错误。
+4. **Cookie 隔离**：Cookie 按账号、上游主机和出口隔离，禁止复用抓包中的旧 Cloudflare Cookie。
+5. **流式必须延迟开流并干净收尾**：失败后发送协议规定的终止事件。
 
 ---
 
 ## 5. 已知取舍与后续建议（Trade-offs）
 
-- **压缩会截断历史里的巨型 tool_result 正文**：被截断的是原始文件转储/网页抓取等冗长内容，保留头尾+省略标记；对绝大多数续聊无损，但极端依赖被截断中段原文的场景可能需要模型重新读取。这是「能继续」与「一字不差」之间的取舍，且仅在已被网关拦截后才触发。
-- **换号会丢失 Postman 服务端会话缓存**，但完整消息历史每次都会重放，正确性不受影响（仅损失缓存命中带来的性能收益）。换号仅作压缩兜底。
-- **Cloudflare 侧无权限调整**；出口 IP 轮换保留为**次要手段**，不是主因解法。
-- **主动防护（可选后续）**：可在出站前按「往返轮次 / 客户端 body 体积」阈值**提前压缩**，在触发 403 之前就规避，而不必等被拦后再压缩重试。
+- **降级重试会丢弃 third-party schema 的描述和参数细节**：保留工具名和宽松 object 参数，以维持模型继续发起调用；极端依赖参数 schema 的工具可能需要客户端自行修正参数。
+- **续聊不会换号**：原账号连续被拦时直接终止，由客户端稍后继续，避免服务端会话丢失。
+- **Cookie 只在进程内保存**：重启后需要重新从上游获取，不持久化敏感 Cloudflare Cookie。
 
 ---
 
@@ -122,8 +121,10 @@
 
 | 文件 | 改动 |
 |------|------|
-| `internal/router/router.go` | `Chat` / `Stream` 遇 `GatewayBlocked` 时：**续聊(有可复用历史)钉住原账号退避重试**，绝不换号(换号会丢 Postman 服务端会话上下文、把请求降级为 `USER_QUERY`)；无历史可复用时才排除当前账号 + 打冷却 + 退避后 failover；账号耗尽返回明确网关错误。**不就地改写 `req.Messages`** |
+| `internal/router/router.go` | `Chat` / `Stream` 遇 `GatewayBlocked` 时：续聊固定原账号，仅一次降级重试并固定首次出口；第二次失败明确终止；新对话才排除账号并 failover。**不就地改写 `req.Messages`** |
 | `internal/pool/pool.go` | 新增网关冷却表与 `MarkGatewayBlocked`；`Next` 冷却期内跳过被烧账号，全冷却兜底可用，到期自动恢复 |
+| `internal/provider/postman.go` | 工具结果摘要净化、降级重试时压缩 third-party schema、按账号/出口复用 Cookie |
+| `internal/provider/proxy.go` | 按账号、上游主机、出口隔离 Cookie Jar |
 | `internal/api/api.go` | Anthropic / OpenAI Chat 流式处理器改为延迟开流 + 干净收尾 |
 | `internal/api/responses.go` | OpenAI Responses 流式处理器改为延迟开流 + 干净收尾 |
 | `internal/api/metrics.go` | 新增可配置项「网关拦截冷却(秒)」（默认 300） |

@@ -4,11 +4,50 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+// accountCookieJars keeps Cloudflare/session cookies isolated by account, host,
+// and configured egress. Captured cookies are never shared across accounts.
+type accountCookieJars struct {
+	mu   sync.Mutex
+	jars map[string]*cookiejar.Jar
+}
+
+func newAccountCookieJars() *accountCookieJars {
+	return &accountCookieJars{jars: map[string]*cookiejar.Jar{}}
+}
+
+func (s *accountCookieJars) jarFor(accountID int64, host, egress string) *cookiejar.Jar {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := strconv.FormatInt(accountID, 10) + "|" + host + "|" + egress
+	if jar := s.jars[key]; jar != nil {
+		return jar
+	}
+	jar, _ := cookiejar.New(nil)
+	s.jars[key] = jar
+	return jar
+}
+
+func (s *accountCookieJars) cookies(accountID int64, u *url.URL, egress string) []*http.Cookie {
+	if s == nil || u == nil {
+		return nil
+	}
+	return s.jarFor(accountID, u.Host, egress).Cookies(u)
+}
+
+func (s *accountCookieJars) remember(accountID int64, u *url.URL, egress string, cookies []*http.Cookie) {
+	if s == nil || u == nil || len(cookies) == 0 {
+		return
+	}
+	s.jarFor(accountID, u.Host, egress).SetCookies(u, cookies)
+}
 
 // proxyPool 管理可配置的出口代理集合，为每个代理 URL 缓存一个复用连接池的 *http.Client。
 //

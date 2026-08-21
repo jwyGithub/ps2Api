@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UI 风格选型 · Postman2API</title>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+<style>
+  :root{--bg:#06080f;--fg:#eef2ff;--fg2:#9aa6d6;--muted:#5f6a97;--line:rgba(120,150,255,.14)}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Sora',system-ui,sans-serif;background:var(--bg);color:var(--fg);min-height:100vh;overflow-x:hidden}
+  .mono{font-family:'JetBrains Mono',monospace}
+  .bg-fx{position:fixed;inset:0;z-index:0;overflow:hidden}
+  .blob{position:absolute;border-radius:50%;filter:blur(100px);opacity:.4}
+  .b1{width:500px;height:500px;background:radial-gradient(circle,#2a5bff,transparent 70%);top:-140px;left:-100px}
+  .b2{width:460px;height:460px;background:radial-gradient(circle,#9b6bff,transparent 70%);bottom:-140px;right:-80px}
+  .b3{width:380px;height:380px;background:radial-gradient(circle,#2dd4bf,transparent 70%);top:35%;left:60%}
+  .grid-fx{position:absolute;inset:0;background-image:linear-gradient(rgba(120,150,255,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(120,150,255,.04) 1px,transparent 1px);background-size:46px 46px;mask-image:radial-gradient(ellipse at 50% 30%,#000 40%,transparent 85%)}
+  .wrap{position:relative;z-index:1;max-width:1180px;margin:0 auto;padding:64px 28px 80px}
+  .eyebrow{font-size:12px;letter-spacing:3px;color:var(--muted);text-transform:uppercase;margin-bottom:14px}
+  h1{font-size:44px;font-weight:700;letter-spacing:-1px;line-height:1.1}
+  h1 span{background:linear-gradient(90deg,#38e1ff,#9b6bff);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{color:var(--fg2);font-size:16px;margin-top:16px;max-width:640px;line-height:1.6}
+  .meta{display:flex;gap:10px;flex-wrap:wrap;margin-top:22px}
+  .chip{font-size:12px;padding:7px 14px;border:1px solid var(--line);border-radius:20px;color:var(--fg2);background:rgba(120,150,255,.05)}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;margin-top:52px}
+  .card{border:1px solid var(--line);border-radius:20px;overflow:hidden;background:rgba(18,24,48,.4);backdrop-filter:blur(16px);cursor:pointer;transition:.3s;text-decoration:none;color:inherit;display:flex;flex-direction:column}
+  .card:hover{transform:translateY(-6px);border-color:rgba(120,150,255,.4)}
+  .preview{height:180px;position:relative;overflow:hidden;border-bottom:1px solid var(--line)}
+  /* A preview */
+  .pA{background:radial-gradient(circle at 30% 20%,#2a5bff55,transparent 60%),radial-gradient(circle at 80% 90%,#9b6bff55,transparent 60%),#070a18}
+  .pA .g{position:absolute;inset:0;background-image:linear-gradient(rgba(120,150,255,.08) 1px,transparent 1px),linear-gradient(90deg,rgba(120,150,255,.08) 1px,transparent 1px);background-size:24px 24px}
+  /* B preview */
+  .pB{background:#0a0f14;position:relative}
+  .pB .aur{position:absolute;width:160%;height:120px;left:-30%;filter:blur(38px);opacity:.6}
+  .pB .aur1{top:-30px;background:linear-gradient(90deg,#2dd4bf,#38bdf8,#a78bfa)}
+  .pB .aur2{bottom:-20px;background:linear-gradient(90deg,#34d399,#2dd4bf);opacity:.35}
+  /* C preview */
+  .pC{background:radial-gradient(circle at 70% 120%,#062018,#05070a 60%);position:relative}
+  .pC .g{position:absolute;inset:0;background-image:linear-gradient(rgba(0,255,178,.08) 1px,transparent 1px),linear-gradient(90deg,rgba(0,255,178,.08) 1px,transparent 1px);background-size:22px 22px}
+  .pv-chip{position:absolute;bottom:14px;left:14px;display:flex;gap:6px}
+  .sw{width:26px;height:26px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.4)}
+  .body{padding:20px}
+  .body .n{font-size:12px;letter-spacing:2px;color:var(--muted);text-transform:uppercase}
+  .body h3{font-size:20px;font-weight:600;margin-top:6px}
+  .body p{font-size:13px;color:var(--fg2);margin-top:8px;line-height:1.55}
+  .tags{display:flex;gap:6px;flex-wrap:wrap;margin-top:14px}
+  .tags span{font-size:11px;padding:3px 9px;border-radius:6px;background:rgba(120,150,255,.08);color:var(--fg2)}
+  .open{margin-top:16px;font-size:13px;font-weight:500;color:#38e1ff;display:flex;align-items:center;gap:6px}
+  .foot{margin-top:48px;padding:22px;border:1px dashed var(--line);border-radius:16px;color:var(--fg2);font-size:13.5px;line-height:1.7}
+  .foot b{color:var(--fg)}
+  @media(max-width:900px){.grid{grid-template-columns:1fr}h1{font-size:32px}}
+</style>
+</head>
+<body>
+<div class="bg-fx"><div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div><div class="grid-fx"></div></div>
+<div class="wrap">
+  <div class="eyebrow" data-a>Postman2API · 前端选型</div>
+  <h1 data-a>管理面板 <span>UI 风格方案</span></h1>
+  <p class="sub" data-a>为 TanStack 新前端定义整体视觉语言。三套方案均采用<b style="color:#fff">毛玻璃 + 科技感 + GSAP 动画</b>，并已对齐<b style="color:#fff">最新功能清单</b>——覆盖概览 / 账号管理 / 统计分析 / API Key / 模型管理 / 代理管理 / 系统设置 共 7 个页面，侧栏可实时切换。点击卡片进入完整可交互原型，再决定采用哪套。</p>
+  <div class="meta" data-a>
+    <span class="chip">7 页侧栏切换</span><span class="chip">账号卡片/列表双视图</span>
+    <span class="chip">API Key 生成+复制</span><span class="chip">模型/代理测试</span>
+    <span class="chip">启停开关 · Toast</span><span class="chip">统计区间切换</span><span class="chip">登录态</span>
+  </div>
+
+  <div class="grid">
+    <a class="card" href="./style-a-nebula.html" data-card>
+      <div class="preview pA"><div class="g"></div>
+        <div class="pv-chip"><span class="sw" style="background:#38e1ff"></span><span class="sw" style="background:#9b6bff"></span><span class="sw" style="background:#ff5db1"></span></div>
+      </div>
+      <div class="body">
+        <div class="n">方案 A</div><h3>深空霓虹 Nebula</h3>
+        <p>深空蓝紫底 + 青紫霓虹辉光，卡片带渐变描边，网格星空背景。科技感最强、视觉冲击力大。</p>
+        <div class="tags"><span>青/紫/粉</span><span>辉光描边</span><span>Sora 字体</span></div>
+        <div class="open">查看原型 →</div>
+      </div>
+    </a>
+
+    <a class="card" href="./style-b-aurora.html" data-card>
+      <div class="preview pB"><div class="aur aur1"></div><div class="aur aur2"></div>
+        <div class="pv-chip"><span class="sw" style="background:#2dd4bf"></span><span class="sw" style="background:#38bdf8"></span><span class="sw" style="background:#a78bfa"></span></div>
+      </div>
+      <div class="body">
+        <div class="n">方案 B</div><h3>极光玻璃 Aurora</h3>
+        <p>极光渐变光带 + 悬浮玻璃卡，青绿薄荷主色，圆润柔和。优雅耐看、高级感强，适合长时间运维使用。</p>
+        <div class="tags"><span>薄荷/天蓝/紫</span><span>悬浮玻璃</span><span>Outfit 字体</span></div>
+        <div class="open" style="color:#2dd4bf">查看原型 →</div>
+      </div>
+    </a>
+
+    <a class="card" href="./style-c-hud.html" data-card>
+      <div class="preview pC"><div class="g"></div>
+        <div class="pv-chip"><span class="sw" style="background:#8fff00"></span><span class="sw" style="background:#00ffd5"></span><span class="sw" style="background:#ff9e2c"></span></div>
+      </div>
+      <div class="body">
+        <div class="n">方案 C</div><h3>赛博 HUD Cyber</h3>
+        <p>近黑底 + 荧光绿/青，切角面板、扫描线、等宽字体，浓厚 HUD 控制台气质。工程/监控感最强。</p>
+        <div class="tags"><span>荧光绿/青</span><span>切角+扫描线</span><span>Rajdhani 字体</span></div>
+        <div class="open" style="color:#8fff00">查看原型 →</div>
+      </div>
+    </a>
+  </div>
+
+  <div class="foot" data-a>
+    <b>如何使用：</b>用浏览器打开本页（<span class="mono">docs/ui-mockups/index.html</span>），点击任一卡片进入原型。三套方案的页面结构、内容、交互完全一致，只有<b>视觉风格</b>不同，方便你横向对比。<br>
+    <b>可以点的交互：</b>左侧 7 个导航实时切换页面；账号页卡片/列表视图切换、搜索/筛选、启停开关；API Key 页「新建 Key」弹窗生成密钥并一次性展示+复制、删除；模型页启停开关 + 单模型「测试」（异步延迟）；代理页测试连通/延迟、启停、删除；统计页今天/24h/7d/30d 区间切换重绘图表；系统设置开关与保存；右上头像可「退出登录」进入登录页。<br>
+    <b>选定后：</b>告诉我采用哪套（可混搭，例如「A 的配色 + B 的圆角卡片」），我会把它沉淀为 <span class="mono">page/</span> 的设计令牌（Tailwind v4 + shadcn 主题变量），并据此开始搭建正式页面。
+  </div>
+</div>
+<script>
+  gsap.to(".b1",{x:50,y:30,duration:13,repeat:-1,yoyo:true,ease:"sine.inOut"});
+  gsap.to(".b2",{x:-40,y:-30,duration:15,repeat:-1,yoyo:true,ease:"sine.inOut"});
+  gsap.to(".b3",{x:-30,y:40,duration:17,repeat:-1,yoyo:true,ease:"sine.inOut"});
+  gsap.from("[data-a]",{y:22,opacity:0,duration:.7,stagger:.09,ease:"power3.out"});
+  gsap.from("[data-card]",{y:34,opacity:0,duration:.8,stagger:.12,delay:.3,ease:"power3.out"});
+</script>
+</body>
+</html>
