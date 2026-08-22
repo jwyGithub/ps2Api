@@ -106,6 +106,19 @@ func (r *Router) retryCount() int {
 	return n
 }
 
+// stickyEgressBudget 是续聊(有可复用历史)遇网关 403 时，「钉住原账号、轮换出口 IP」这一级
+// 允许尝试的最大次数。预算内保住 Postman 服务端会话(零上下文损失)只换出口；预算耗尽仍被拦，
+// 才降级为跨账号 failover(接受会话降级)。默认 2。注意总重试次数仍受 retry_count 约束——
+// 若要让「多出口轮换 + 兜底 failover」都有空间，应把 retry_count 调到 ≥ 该预算 + 1。
+func (r *Router) stickyEgressBudget() int {
+	v, _ := r.Store.GetSetting("sticky_egress_retries")
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 2
+	}
+	return n
+}
+
 // gatewayBackoff 为网关(Cloudflare)风控拦截的重试提供退避,比普通失败重试更长,
 // 给速率/评分窗口降温时间:0.5s、1s、2s… 上限 5s。
 func gatewayBackoff(attempt int) time.Duration {
@@ -177,7 +190,8 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 	var last string
 	excluded := map[int64]bool{}
 	gatewayBlocks := 0
-	gatewayRetryUsed := false
+	stickyEgressTries := 0                 // 续聊 403 已用掉的「钉账号换出口」次数
+	stickyBudget := r.stickyEgressBudget() // 该级预算，耗尽后降级为跨账号 failover
 	var pinnedAcc *store.Account // 续聊遇网关拦截时钉住原账号，绝不换号（换号会丢服务端会话上下文）
 	attempts := r.retryCount()
 	if !r.failoverEnabled() {
@@ -198,16 +212,18 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 			return nil, nil, err
 		}
 		provider.Trace(ctx, "router.attempt", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "email": acc.Email, "model": req.Model})
-		if req.GatewayRetry {
-			// The degraded retry must keep the first egress so any newly issued
-			// Cloudflare cookies remain bound to the same client path.
+		if req.GatewayRetry && !req.GatewayRetryRotateEgress {
+			// 旧式降级重试：保持同一出口，让新签发的 Cloudflare cookie 绑定同一客户端路径。
 			req.EgressAttempt = attempt - 1
 		} else {
+			// 常规请求 / 续聊「钉账号换出口」重试：出口序号随 attempt 自然递增，
+			// 经 (stickyBase+EgressAttempt)%N 切到下一个出口 IP。
 			req.EgressAttempt = attempt
 		}
 		started := time.Now()
 		res := r.Provider.Chat(ctx, acc, req)
 		req.GatewayRetry = false
+		req.GatewayRetryRotateEgress = false
 		if poolUsed {
 			r.Pool.Done(acc.ID)
 		}
@@ -224,20 +240,30 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 			provider.Trace(ctx, "router.gateway_blocked", map[string]interface{}{"account_id": acc.ID, "email": acc.Email, "error": res.Error})
 			r.alertRequestRejected(acc, res)
 			if provider.HasReusableHistory(req.Messages) {
-				// 续聊：Postman 服务端会话绑定在原账号，换号必然丢上下文（请求被降级为 USER_QUERY 且
-				// 历史被截断到 MaxQueryLen，模型「失忆」）。且历史里的旧 tool_result 对 TOOL_RESPONSE 续聊
-				// 根本不出站（只发最新一轮增量，历史在服务端），改写 req.Messages 会破坏会话指纹。
-				// 故只在出站边界净化摘要并压缩 third-party schema，保持 TOOL_RESPONSE、conversationId、
-				// 原账号与原出口不变；该降级重试仅允许一次。
-				if !gatewayRetryUsed && attempt < attempts-1 {
+				// 续聊 403 两级升级处理：
+				// 【一级】钉住原账号（保住 Postman 服务端会话：conversationId/TOOL_RESPONSE 不降级），
+				//   但轮换出口 IP——403 是有状态的出口信誉风控，换 IP 大概率通过。此级零上下文损失：
+				//   不改写 req.Messages（保住会话指纹），只在出站边界净化摘要并压缩 third-party schema。
+				if stickyEgressTries < stickyBudget && attempt < attempts-1 {
 					pinnedAcc = acc
-					gatewayRetryUsed = true
+					stickyEgressTries++
 					req.GatewayRetry = true
-					provider.Trace(ctx, "router.gateway_sticky_retry", map[string]interface{}{"account_id": acc.ID})
+					req.GatewayRetryRotateEgress = true
+					provider.Trace(ctx, "router.gateway_sticky_retry", map[string]interface{}{"account_id": acc.ID, "egress_try": stickyEgressTries, "rotate_egress": true})
 					time.Sleep(gatewayBackoff(attempt))
 					continue
 				}
-				return nil, nil, &RouteError{Message: gatewayBlockedError(1), GatewayBlocked: true}
+				// 【二级】同账号轮换出口仍被拦 → 降级为跨账号 failover。会丢服务端会话上下文
+				//   （降级为 USER_QUERY + 历史截断「失忆」），但拿到降级答案好过硬失败 403。
+				gatewayBlocks++
+				excluded[acc.ID] = true
+				pinnedAcc = nil
+				r.Pool.MarkGatewayBlocked(acc.ID, r.gatewayCooldownDur())
+				if attempt < attempts-1 {
+					time.Sleep(gatewayBackoff(attempt))
+					continue
+				}
+				return nil, nil, &RouteError{Message: gatewayBlockedError(gatewayBlocks), GatewayBlocked: true}
 			}
 			// 新对话：无服务端会话可丢，换号 failover 安全——排除当前账号并打冷却标记，退避后换其他账号。
 			gatewayBlocks++
@@ -280,7 +306,8 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 	}
 	excluded := map[int64]bool{}
 	gatewayBlocks := 0
-	gatewayRetryUsed := false
+	stickyEgressTries := 0                 // 续聊 403 已用掉的「钉账号换出口」次数
+	stickyBudget := r.stickyEgressBudget() // 该级预算，耗尽后降级为跨账号 failover
 	var pinnedAcc *store.Account // 续聊遇网关拦截时钉住原账号，绝不换号（换号会丢服务端会话上下文）
 	attempts := r.retryCount()
 	if !r.failoverEnabled() {
@@ -298,14 +325,17 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 			return nil, nil, err
 		}
 		provider.Trace(ctx, "router.attempt", map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "model": req.Model, "stream": true})
-		if req.GatewayRetry {
+		if req.GatewayRetry && !req.GatewayRetryRotateEgress {
+			// 旧式降级重试：保持同一出口。
 			req.EgressAttempt = attempt - 1
 		} else {
+			// 常规请求 / 续聊「钉账号换出口」重试：出口随 attempt 轮换。
 			req.EgressAttempt = attempt
 		}
 		started := time.Now()
 		res := r.Provider.StreamChat(ctx, acc, req, trackedEmit)
 		req.GatewayRetry = false
+		req.GatewayRetryRotateEgress = false
 		if poolUsed {
 			r.Pool.Done(acc.ID)
 		}
@@ -328,17 +358,26 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 				return nil, nil, &RouteError{Message: "Stream failed after output started: " + last}
 			}
 			if provider.HasReusableHistory(req.Messages) {
-				// 续聊：固定原账号与原出口，只在出站边界净化摘要、压缩 third-party schema；
-				// 不改 req.Messages。单次降级重试仍被拦后立即返回明确错误。
-				if !gatewayRetryUsed && attempt < attempts-1 {
+				// 【一级】钉住原账号（保住服务端会话），轮换出口 IP 重试；不改 req.Messages。
+				if stickyEgressTries < stickyBudget && attempt < attempts-1 {
 					pinnedAcc = acc
-					gatewayRetryUsed = true
+					stickyEgressTries++
 					req.GatewayRetry = true
-					provider.Trace(ctx, "router.gateway_sticky_retry", map[string]interface{}{"account_id": acc.ID, "stream": true})
+					req.GatewayRetryRotateEgress = true
+					provider.Trace(ctx, "router.gateway_sticky_retry", map[string]interface{}{"account_id": acc.ID, "egress_try": stickyEgressTries, "rotate_egress": true, "stream": true})
 					time.Sleep(gatewayBackoff(attempt))
 					continue
 				}
-				return nil, nil, &RouteError{Message: gatewayBlockedError(1), GatewayBlocked: true}
+				// 【二级】同账号轮换出口仍被拦 → 降级跨账号 failover（接受服务端会话降级）。
+				gatewayBlocks++
+				excluded[acc.ID] = true
+				pinnedAcc = nil
+				r.Pool.MarkGatewayBlocked(acc.ID, r.gatewayCooldownDur())
+				if attempt < attempts-1 {
+					time.Sleep(gatewayBackoff(attempt))
+					continue
+				}
+				return nil, nil, &RouteError{Message: gatewayBlockedError(gatewayBlocks), GatewayBlocked: true}
 			}
 			// 新对话：无服务端会话可丢，换号 failover 安全。
 			gatewayBlocks++

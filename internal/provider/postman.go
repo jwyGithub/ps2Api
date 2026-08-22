@@ -86,8 +86,12 @@ type ChatRequest struct {
 	// EgressAttempt 是本次出站的出口重试序号（由 router 每次重试递增）。0 用账号粘性出口，
 	// 遇 Cloudflare 403 重试时 +1 切到下一个代理出口 IP；越过所有出口后回退本机直连。
 	EgressAttempt int `json:"-"`
-	// GatewayRetry enables the single degraded retry after a gateway block.
+	// GatewayRetry enables the degraded retry after a gateway block.
 	GatewayRetry bool `json:"-"`
+	// GatewayRetryRotateEgress 在续聊(有可复用历史)遇网关 403 的「钉账号重试」时置真：
+	// 钉住原账号(保住服务端会话)的同时让出口 IP 随 attempt 轮换——403 是有状态的出口信誉
+	// 风控，换 IP 大概率通过。为真时 EgressAttempt 随 attempt 递增(而非旧式钉成 attempt-1)。
+	GatewayRetryRotateEgress bool `json:"-"`
 }
 
 type Provider struct {
