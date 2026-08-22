@@ -43,6 +43,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/accounts/import", s.importAccounts)
 	mux.HandleFunc("DELETE /api/accounts/{id}", s.deleteAccount)
 	mux.HandleFunc("PATCH /api/accounts/{id}", s.toggleAccount)
+	mux.HandleFunc("POST /api/accounts/{id}/refresh-quota", s.refreshAccountQuota)
 	mux.HandleFunc("GET /api/stats", s.stats)
 	mux.HandleFunc("GET /api/logs", s.logs)
 	mux.HandleFunc("GET /api/analytics", s.analytics)
@@ -697,6 +698,26 @@ func (s *Server) refreshQuota(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	jsonWrite(w, 200, map[string]interface{}{"ok": ok, "failed": failed, "results": results})
+}
+// refreshAccountQuota 对号池页某一行账号发起单账号额度探测并写库，
+// 供每行「刷新额度」按钮调用；返回该账号最新的 limit/remaining。
+func (s *Server) refreshAccountQuota(w http.ResponseWriter, r *http.Request) {
+	if !s.auth(w, r) {
+		return
+	}
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	pr, err := s.Router.ProbeAccountQuota(r.Context(), id)
+	if err != nil {
+		jsonError(w, 404, err.Error(), "not_found")
+		return
+	}
+	ok, failed := 0, 0
+	if pr.OK {
+		ok = 1
+	} else {
+		failed = 1
+	}
+	jsonWrite(w, 200, map[string]interface{}{"ok": ok, "failed": failed, "result": pr})
 }
 func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
 	if !s.auth(w, r) {

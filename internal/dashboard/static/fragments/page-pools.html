@@ -3,8 +3,8 @@
       <div class="flex items-end justify-between mb-8 gap-6 flex-wrap">
         <div>
           <div class="text-[11px] font-semibold tracking-wider uppercase mb-2" style="color: var(--muted);">Pool Management</div>
-          <h1 class="hero-title">号池 <em>管理</em></h1>
-          <p class="mt-2 text-[14px]" style="color: var(--fg-2);">统一管理所有上游账号，监控健康度与配额。</p>
+          <h1 class="hero-title">号池 & <em>额度</em></h1>
+          <p class="mt-2 text-[14px]" style="color: var(--fg-2);">统一管理所有上游账号，监控健康度、配额与额度周期。</p>
         </div>
         <div class="flex items-center gap-2 flex-wrap justify-end">
           <input id="accountImportFile" type="file" accept="application/json,.json" multiple class="hidden" onchange="importAccountsFile(this)">
@@ -94,7 +94,7 @@
               <tr>
                 <th style="width: 40px;"><input type="checkbox"></th>
                 <th>账号</th><th>渠道</th><th>状态</th><th>套餐</th>
-                <th>余量 / 总量</th><th>今日调用</th><th>最后活跃</th><th>操作</th>
+                <th>余量 / 总量</th><th>今日调用</th><th>重置时间</th><th>操作</th>
               </tr>
             </thead>
             <tbody id="poolsBody"></tbody>
@@ -105,5 +105,6 @@
           <div class="flex items-center gap-1" id="poolPager"></div>
         </div>
       </div>
+
     </div>
   </section>

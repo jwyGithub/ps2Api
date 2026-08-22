@@ -192,7 +192,7 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 	gatewayBlocks := 0
 	stickyEgressTries := 0                 // 续聊 403 已用掉的「钉账号换出口」次数
 	stickyBudget := r.stickyEgressBudget() // 该级预算，耗尽后降级为跨账号 failover
-	var pinnedAcc *store.Account // 续聊遇网关拦截时钉住原账号，绝不换号（换号会丢服务端会话上下文）
+	var pinnedAcc *store.Account           // 续聊遇网关拦截时钉住原账号，绝不换号（换号会丢服务端会话上下文）
 	attempts := r.retryCount()
 	if !r.failoverEnabled() {
 		attempts = 1
@@ -308,7 +308,7 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 	gatewayBlocks := 0
 	stickyEgressTries := 0                 // 续聊 403 已用掉的「钉账号换出口」次数
 	stickyBudget := r.stickyEgressBudget() // 该级预算，耗尽后降级为跨账号 failover
-	var pinnedAcc *store.Account // 续聊遇网关拦截时钉住原账号，绝不换号（换号会丢服务端会话上下文）
+	var pinnedAcc *store.Account           // 续聊遇网关拦截时钉住原账号，绝不换号（换号会丢服务端会话上下文）
 	attempts := r.retryCount()
 	if !r.failoverEnabled() {
 		attempts = 1
@@ -529,25 +529,7 @@ func (r *Router) ProbeQuotas(ctx context.Context) []ProbeResult {
 		go func(acc *store.Account) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			pr := ProbeResult{AccountID: acc.ID, Email: acc.Email}
-			res := r.Provider.ProbeQuota(ctx, acc)
-			// 限流头可能在没有 usage 对象的响应中返回，也要先落库。
-			if res != nil {
-				r.persistQuota(acc, res)
-			}
-			if res != nil && res.Usage != nil && res.Usage.Limit > 0 {
-				remaining := res.Usage.Limit - res.Usage.Usage - res.Usage.Overage
-				if remaining < 0 || res.QuotaExhausted {
-					remaining = 0
-				}
-				pr.OK = true
-				pr.Limit = res.Usage.Limit
-				pr.Remaining = remaining
-			} else if res != nil && res.Error != "" {
-				pr.Error = res.Error
-			} else {
-				pr.Error = "no usage returned"
-			}
+			pr := r.probeAccountQuota(ctx, acc)
 			mu.Lock()
 			out = append(out, pr)
 			mu.Unlock()
@@ -555,4 +537,39 @@ func (r *Router) ProbeQuotas(ctx context.Context) []ProbeResult {
 	}
 	wg.Wait()
 	return out
+}
+
+// probeAccountQuota 对单个账号执行一次探测并写库，返回逐账号结果。
+// ProbeQuotas（批量）与 ProbeAccountQuota（单账号）共用此逻辑。
+func (r *Router) probeAccountQuota(ctx context.Context, acc *store.Account) ProbeResult {
+	pr := ProbeResult{AccountID: acc.ID, Email: acc.Email}
+	res := r.Provider.ProbeQuota(ctx, acc)
+	// 限流头可能在没有 usage 对象的响应中返回，也要先落库。
+	if res != nil {
+		r.persistQuota(acc, res)
+	}
+	if res != nil && res.Usage != nil && res.Usage.Limit > 0 {
+		remaining := res.Usage.Limit - res.Usage.Usage - res.Usage.Overage
+		if remaining < 0 || res.QuotaExhausted {
+			remaining = 0
+		}
+		pr.OK = true
+		pr.Limit = res.Usage.Limit
+		pr.Remaining = remaining
+	} else if res != nil && res.Error != "" {
+		pr.Error = res.Error
+	} else {
+		pr.Error = "no usage returned"
+	}
+	return pr
+}
+
+// ProbeAccountQuota 对指定 ID 的单个账号发起一次额度探测并写库，
+// 供号池页每行「刷新额度」按钮调用。账号不存在时返回错误。
+func (r *Router) ProbeAccountQuota(ctx context.Context, id int64) (ProbeResult, error) {
+	acc, err := r.Store.GetAccount(id)
+	if err != nil {
+		return ProbeResult{}, err
+	}
+	return r.probeAccountQuota(ctx, acc), nil
 }

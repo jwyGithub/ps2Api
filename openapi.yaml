@@ -1,0 +1,404 @@
+openapi: 3.0.3
+
+info:
+  title: Postman2API 账号管理 API
+  description: |
+    Postman2API 网关的账号管理接口，供其他服务以标准 REST/JSON 方式集成。
+
+    ## 鉴权
+    所有 `/api/accounts*` 端点在**已设置 API Key** 时需要鉴权，支持两种请求头（二选一）：
+      - `Authorization: Bearer <key>`（OpenAI 风格）
+      - `x-api-key: <key>`（Anthropic 风格）
+
+    注意：当服务端**未设置** API Key（首次进面板前的引导态）时，这些端点**不鉴权、直接放行**。
+    对外开放前务必先在面板中设置 API Key。
+
+    ## 核心端点
+    `POST /api/accounts/import` 是纯 HTTP + JSON 的批量导入接口，按 `email` UPSERT，
+    **重复调用幂等**（同一 email 会被覆盖更新）。请求体不允许未知字段、且只能包含一个 JSON 对象。
+  version: "1.0.0"
+
+servers:
+  - url: http://localhost:1930
+    description: 本地默认服务地址（端口由环境变量 GATEWAY_PORT 控制，默认 1930）
+
+tags:
+  - name: Accounts
+    description: 账号池的增删查、导入导出、启停与额度刷新
+
+security:
+  - BearerAuth: []
+  - ApiKeyAuth: []
+
+paths:
+  /api/accounts:
+    get:
+      tags: [Accounts]
+      summary: 列出所有账号
+      description: 返回账号列表；出于安全，`tokens` 与 `password` 字段会被清空。
+      security: []
+      responses:
+        "200":
+          description: 账号列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Account"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags: [Accounts]
+      summary: 新增/更新单个账号
+      description: 按 `email` UPSERT 单个账号，来源标记为 `manual`。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddAccountRequest"
+      responses:
+        "200":
+          description: 新增/更新成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  account:
+                    $ref: "#/components/schemas/Account"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/accounts/export:
+    get:
+      tags: [Accounts]
+      summary: 导出全部账号
+      description: |
+        导出所有账号为 `account.json`（含 `tokens`、`password` 等敏感明文），
+        响应带 `Content-Disposition: attachment; filename="account.json"`。
+        导出结果可直接用于 `POST /api/accounts/import`。
+      responses:
+        "200":
+          description: 账号导出文件
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountFile"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/accounts/import:
+    post:
+      tags: [Accounts]
+      summary: 批量导入账号（幂等）
+      description: |
+        批量导入账号。请求体最大 16MB，**只能包含一个 JSON 对象**，且**不允许未知字段**
+        （多传任何字段都会返回 400）。
+
+        **校验规则（外部方必须遵守）：**
+          - `version` 必须为 `1`，且 `accounts` 至少 1 个；
+          - 每个账号 `email`、`enabled` 必填，`email` 不可重复；
+          - `tokens` 中 `user_id`、`workspace_id` 必填，且 `access_token`、`postman_sid` 至少有一个；
+          - 若仅提供 `postman_sid`（web 模式），必须提供 `workspace_subdomain`。
+
+        **写库语义：** 按 `email` UPSERT（幂等），同一 email 会被覆盖更新。
+        **非原子性：** 校验全部通过后逐条写入，写第 K 条失败会返回 500，但前 K-1 条已写入且不回滚，
+        外部方应依赖幂等重试兜底。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountFile"
+      responses:
+        "200":
+          description: 导入成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  imported:
+                    type: integer
+                    description: 成功导入的账号数
+                    example: 3
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/accounts/{id}:
+    delete:
+      tags: [Accounts]
+      summary: 删除账号
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      responses:
+        "200":
+          description: 删除成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [Accounts]
+      summary: 启用/停用账号
+      description: 重新启用账号时，会自动解决其历史未处理告警（account_error / quota_exhausted / low_quota）。
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+              required: [enabled]
+      responses:
+        "200":
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/accounts/{id}/refresh-quota:
+    post:
+      tags: [Accounts]
+      summary: 刷新单个账号额度
+      description: 对指定账号发起单账号额度探测并写库，返回该账号最新的 limit/remaining。
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      responses:
+        "200":
+          description: 探测结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: integer
+                    example: 1
+                  failed:
+                    type: integer
+                    example: 0
+                  result:
+                    type: object
+                    description: 单账号探测结果（limit/remaining 等）
+                    additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: "Authorization: Bearer <key>"
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+      description: "x-api-key: <key>"
+
+  parameters:
+    AccountId:
+      name: id
+      in: path
+      required: true
+      description: 账号的数字 ID
+      schema:
+        type: integer
+        format: int64
+
+  schemas:
+    Tokens:
+      type: object
+      description: Postman 登录凭据。桌面模式用 access_token；web 模式用 postman_sid + workspace_subdomain。
+      properties:
+        access_token:
+          type: string
+          description: 桌面模式访问令牌（与 postman_sid 至少提供一个）
+        postman_sid:
+          type: string
+          description: web 模式会话 ID（与 access_token 至少提供一个）
+        user_id:
+          type: string
+          description: 必填
+        workspace_id:
+          type: string
+          description: 必填
+        workspace_uuid:
+          type: string
+          description: 可选
+        workspace_subdomain:
+          type: string
+          description: web 模式（仅 postman_sid）时必填
+        user_name:
+          type: string
+          description: 可选
+      required:
+        - user_id
+        - workspace_id
+
+    AddAccountRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        tokens:
+          $ref: "#/components/schemas/Tokens"
+      required:
+        - email
+        - tokens
+
+    AccountFileAccount:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          description: 可选
+        source:
+          type: string
+          description: 来源标记（manual / local / detect-web / browser）
+        enabled:
+          type: boolean
+          description: 必填（导入时不可省略）
+        tokens:
+          $ref: "#/components/schemas/Tokens"
+      required:
+        - email
+        - enabled
+        - tokens
+
+    AccountFile:
+      type: object
+      description: 账号导入/导出文件结构。导入时不允许未知字段。
+      properties:
+        version:
+          type: integer
+          description: 必须为 1
+          enum: [1]
+          example: 1
+        exported_at:
+          type: string
+          format: date-time
+          description: 导出时间（RFC3339），导入时可选
+        accounts:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/AccountFileAccount"
+      required:
+        - version
+        - accounts
+
+    Account:
+      type: object
+      description: 存储中的账号记录（列表接口会清空 tokens/password）。
+      properties:
+        id:
+          type: integer
+          format: int64
+        email:
+          type: string
+        status:
+          type: string
+          description: active | exhausted | error | pending
+        enabled:
+          type: boolean
+        source:
+          type: string
+        plan:
+          type: string
+        quotaLimit:
+          type: number
+        quotaUsed:
+          type: number
+        quotaRemaining:
+          type: number
+      additionalProperties: true
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            message:
+              type: string
+            type:
+              type: string
+              description: 错误分类，如 invalid_request / invalid_api_key / not_found / internal_error
+          required:
+            - message
+            - type
+      required:
+        - error
+
+  responses:
+    InvalidRequest:
+      description: 请求无效（校验失败）
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: API Key 无效
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalError:
+      description: 服务器内部错误
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"

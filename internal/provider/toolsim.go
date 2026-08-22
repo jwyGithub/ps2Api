@@ -374,6 +374,87 @@ func parseSimulatedToolCalls(text string, allowed map[string]bool) (string, []To
 	return out, calls
 }
 
+// simToolOpen is the raw opening marker a model emits to start a simulated
+// tool call. During streaming we must never forward a partial copy of it as
+// prose, otherwise the client sees a broken "<tool_ca" leak.
+const simToolOpen = "<tool_call>"
+
+// fenceLangs are the code-fence languages parseSimulatedToolCalls is willing to
+// unwrap around a <tool_call> block (see fenceWrapRe). The empty entry covers a
+// bare ``` fence with no language tag.
+var fenceLangs = []string{"", "xml", "tool_call", "json"}
+
+// isViablePrefix reports whether s could still be extended into (or already
+// begins) a tool-call marker — either the raw <tool_call> opener or a code
+// fence that may wrap one. When true the caller must hold s back rather than
+// flush it as streaming text. It is deliberately conservative: a false positive
+// only delays a few bytes, a false negative would leak a broken marker.
+func isViablePrefix(s string) bool {
+	if s == "" {
+		return false
+	}
+	ls := strings.ToLower(s)
+	// Raw form: s is a prefix of "<tool_call>", or already starts with it
+	// (a complete/opened marker that must stay buffered for final parsing).
+	if strings.HasPrefix(simToolOpen, ls) || strings.HasPrefix(ls, simToolOpen) {
+		return true
+	}
+	// Still typing the fence delimiter itself: "`", "``", "```".
+	if strings.HasPrefix("```", s) {
+		return true
+	}
+	if strings.HasPrefix(s, "```") {
+		rest := s[3:]
+		lrest := strings.ToLower(rest)
+		for _, lang := range fenceLangs {
+			// The language tag is still being typed, e.g. "```xm".
+			if lang != "" && strings.HasPrefix(lang, lrest) {
+				return true
+			}
+			var after string
+			switch {
+			case lang == "":
+				after = rest
+			case strings.HasPrefix(lrest, lang):
+				after = rest[len(lang):]
+			default:
+				continue
+			}
+			// After the (optional) language tag we allow whitespace, then the
+			// start of the raw <tool_call> opener.
+			trimmed := strings.TrimLeft(after, " \t\r\n")
+			lt := strings.ToLower(trimmed)
+			if trimmed == "" || strings.HasPrefix(simToolOpen, lt) || strings.HasPrefix(lt, simToolOpen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// holdBackLen returns how many trailing bytes of buf must be retained because
+// they might be building toward a tool-call marker. Everything before that is
+// guaranteed free of any marker prefix and safe to stream immediately.
+func holdBackLen(buf string) int {
+	for k := 0; k < len(buf); k++ {
+		if buf[k] != '<' && buf[k] != '`' {
+			continue
+		}
+		if isViablePrefix(buf[k:]) {
+			return len(buf) - k
+		}
+	}
+	return 0
+}
+
+// splitStreamSafe splits buf into a prefix that is safe to emit as streaming
+// prose right now and a pending remainder that must stay buffered until more
+// text arrives (or the stream ends).
+func splitStreamSafe(buf string) (safe, pending string) {
+	h := holdBackLen(buf)
+	return buf[:len(buf)-h], buf[len(buf)-h:]
+}
+
 func applySimulatedTools(res *Result, content string, tools []interface{}) string {
 	if res == nil || len(res.ToolCalls) > 0 {
 		return content

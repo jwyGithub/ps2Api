@@ -103,7 +103,7 @@ func (p *Provider) Chat(ctx context.Context, acc *store.Account, req *ChatReques
 	p.rememberToolGroups(acc.ID, res.ToolCalls)
 	res.Content = applySimulatedTools(res, res.Content, tools)
 	res.PromptTokens = EstimateMessagesTokens(req.Messages)
-	res.CompletionTokens = EstimateTokens(res.Content + res.ReasoningContent)
+	res.CompletionTokens = EstimateCompletionTokens(res)
 	p.RememberConversation(acc.ID, req.Messages, res)
 	return res
 }
@@ -112,6 +112,13 @@ func (p *Provider) Chat(ctx context.Context, acc *store.Account, req *ChatReques
 func (p *Provider) StreamChat(ctx context.Context, acc *store.Account, req *ChatRequest, emit EmitFunc) *Result {
 	res := &Result{}
 	defer func() { Trace(ctx, "provider.result", res) }()
+	// 后注册 → LIFO 先于上面的 Trace 执行，确保写 trace 前补齐 completion 估算。
+	// 流式各 return 分支只设置了 PromptTokens，此处统一兜底 CompletionTokens。
+	defer func() {
+		if res.CompletionTokens == 0 {
+			res.CompletionTokens = EstimateCompletionTokens(res)
+		}
+	}()
 	postmanModel, ok := ResolvePostmanModel(req.Model)
 	if !ok {
 		res.Error = "Invalid model: " + req.Model
@@ -136,6 +143,9 @@ func (p *Provider) StreamChat(ctx context.Context, acc *store.Account, req *Chat
 		return res
 	}
 	var content strings.Builder
+	// emittedText accumulates every plain-text byte already streamed to the
+	// client via flushSafe, so we can reconstruct the full res.Content later.
+	var emittedText strings.Builder
 	sawNativeTools := false
 	toolAcc := map[int]*ToolCall{}
 	flushText := func() error {
@@ -145,6 +155,20 @@ func (p *Provider) StreamChat(ctx context.Context, acc *store.Account, req *Chat
 		err := emit(Delta{Content: content.String()})
 		content.Reset()
 		return err
+	}
+	// flushSafe streams the portion of the buffer that cannot be part of a
+	// simulated tool-call marker, holding back only a possibly-partial marker
+	// tail. This restores incremental streaming for plain-text replies while
+	// still preventing a broken "<tool_call" fragment from leaking.
+	flushSafe := func() error {
+		safe, pending := splitStreamSafe(content.String())
+		if safe == "" {
+			return nil
+		}
+		content.Reset()
+		content.WriteString(pending)
+		emittedText.WriteString(safe)
+		return emit(Delta{Content: safe})
 	}
 	wrapped := func(d Delta) error {
 		if d.HasFinish {
@@ -183,6 +207,7 @@ func (p *Provider) StreamChat(ctx context.Context, acc *store.Account, req *Chat
 				return emit(d)
 			}
 			content.WriteString(d.Content)
+			return flushSafe()
 		}
 		return nil
 	}
@@ -213,12 +238,15 @@ func (p *Provider) StreamChat(ctx context.Context, acc *store.Account, req *Chat
 		p.RememberConversation(acc.ID, req.Messages, res)
 		return res
 	}
+	// content now holds only the unflushed tail (a held marker region and/or a
+	// trailing partial marker). Everything safe was already streamed via
+	// flushSafe and recorded in emittedText.
 	cleaned, sim := simulatedDeltas(content.String(), tools)
 	content.Reset()
 	if cleaned != "" {
 		_ = emit(Delta{Content: cleaned})
 	}
-	res.Content = cleaned
+	res.Content = emittedText.String() + cleaned
 	if len(sim) == 0 {
 		_ = emit(Delta{FinishReason: "stop", HasFinish: true})
 		res.PromptTokens = EstimateMessagesTokens(req.Messages)

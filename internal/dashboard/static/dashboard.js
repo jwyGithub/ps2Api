@@ -143,10 +143,9 @@
     state.page = page;
     document.querySelectorAll('.page').forEach(function (el) { el.classList.toggle('active', el.id === 'page-' + page); });
     document.querySelectorAll('.sidebar-item[data-page]').forEach(function (el) { el.classList.toggle('active', el.dataset.page === page); });
-    var names = { overview:'概览', stats:'统计分析', pools:'号池管理', quota:'额度管理', routing:'路由策略', alerts:'告警中心', settings:'系统设置' };
+    var names = { overview:'概览', stats:'统计分析', pools:'号池 & 额度', routing:'路由策略', alerts:'告警中心', settings:'系统设置' };
     setText('#crumb', names[page] || page);
-    if (page === 'pools') renderPoolsReal();
-    if (page === 'quota') renderQuotaReal();
+    if (page === 'pools') { renderPoolsReal(); renderQuotaReal(); }
     if (page === 'alerts') renderAlertsReal();
     if (page === 'routing') renderRoutingReal();
     if (page === 'settings') renderSettingsReal();
@@ -252,7 +251,7 @@
       var s = statusInfo(a.status), total = Number(a.quotaLimit || 0), remain = Number(a.quotaRemaining || 0);
       var pct = total > 0 ? Math.max(0, Math.min(100, (remain / total) * 100)) : 0;
       var color = pct < 20 ? 'var(--danger)' : pct < 50 ? 'var(--warning)' : 'var(--accent)';
-      return '<tr><td><input type="checkbox"></td><td><div class="flex items-center gap-3"><span class="dot '+s.dot+'"></span><div><div class="font-mono font-semibold">'+esc(a.email)+'</div><div class="text-[11px]" style="color:var(--muted)">ID '+a.id+'</div></div></div></td><td><span class="tag tag-gray">'+esc(sourceName(a.source))+'</span></td><td><span class="tag '+s.tag+'">'+s.label+'</span></td><td>'+esc(a.plan || 'FREE_USER')+'</td><td><div class="w-32"><div class="flex items-center justify-between text-[11px] mb-1"><span class="font-mono">'+fmt(remain)+' / '+fmt(total)+'</span><span class="font-mono" style="color:'+color+'">'+(total ? pct.toFixed(1)+'%' : '-')+'</span></div><div class="progress" style="height:4px"><div class="progress-fill" style="width:'+pct+'%;background:'+color+'"></div></div></div></td><td class="font-mono">'+fmt(todayCalls(a.id))+'</td><td class="text-[12px]" style="color:var(--fg-2)">'+ago(a.lastUsedAt)+'</td><td><div class="flex items-center gap-1"><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px" onclick="toggleAccount('+a.id+','+(!a.enabled)+')">'+(a.enabled?'停用':'启用')+'</button><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px;color:var(--danger)" onclick="deleteAccount('+a.id+')">删除</button></div></td></tr>';
+      return '<tr><td><input type="checkbox"></td><td><div class="flex items-center gap-3"><span class="dot '+s.dot+'"></span><div><div class="font-mono font-semibold">'+esc(a.email)+'</div><div class="text-[11px]" style="color:var(--muted)">ID '+a.id+'</div></div></div></td><td><span class="tag tag-gray">'+esc(sourceName(a.source))+'</span></td><td><span class="tag '+s.tag+'">'+s.label+'</span></td><td>'+esc(a.plan || 'FREE_USER')+'</td><td><div class="w-32"><div class="flex items-center justify-between text-[11px] mb-1"><span class="font-mono">'+fmt(remain)+' / '+fmt(total)+'</span><span class="font-mono" style="color:'+color+'">'+(total ? pct.toFixed(1)+'%' : '-')+'</span></div><div class="progress" style="height:4px"><div class="progress-fill" style="width:'+pct+'%;background:'+color+'"></div></div></div></td><td class="font-mono">'+fmt(todayCalls(a.id))+'</td><td class="text-[12px]" style="color:var(--fg-2)">'+fmtDate(a.quotaCycleEnd)+'</td><td><div class="flex items-center gap-1"><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px" onclick="refreshAccountQuota('+a.id+')">刷新额度</button><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px" onclick="toggleAccount('+a.id+','+(!a.enabled)+')">'+(a.enabled?'停用':'启用')+'</button><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px;color:var(--danger)" onclick="deleteAccount('+a.id+')">删除</button></div></td></tr>';
     }).join('') : '<tr><td colspan="9" style="text-align:center;padding:40px;color:var(--muted)">'+(state.accounts.length ? '没有匹配的账号' : '暂无账号，请点击"添加账号"或通过"导入"上传 account.json')+'</td></tr>';
     var counts = { active:0, exhausted:0, error:0, disabled:0 };
     state.accounts.forEach(function (a) { if (!a.enabled) counts.disabled++; else if (counts[a.status] !== undefined) counts[a.status]++; });
@@ -264,7 +263,6 @@
     if (pager) pager.innerHTML = pagerHTML(pg, 'poolGoto');
   }
   window.poolGoto = function (n) { state.poolPage = n; renderPoolsReal(); };
-  window.quotaGoto = function (n) { state.quotaPage = n; renderQuotaReal(); };
 
   // ─── 额度管理（真实账号额度 + 配置规则读写）─────────────────
   function quotaObserved(account) {
@@ -294,22 +292,6 @@
     var rated = tracked.filter(function(a){return Number(a.rateLimit || 0) > 0;});
     setText('#quotaRateSummary', rated.length ? '最低 ' + Math.min.apply(null, rated.map(function(a){return Number(a.rateRemaining || 0);})) + ' / ' + rated[0].rateLimit + ' · ' + (rated[0].rateWindowSeconds || 60) + '秒' : '-');
     var latest = tracked.map(function(a){return a.updatedAt;}).filter(Boolean).sort().pop(); setText('#quotaSnapshotAt', latest ? '最近更新 ' + fmtDate(latest) : '-');
-    var accountBody = document.getElementById('quotaAccountsBody');
-    var qpg = paginate(state.accounts, state.quotaPage); state.quotaPage = qpg.page;
-    if (accountBody) accountBody.innerHTML = state.accounts.length ? qpg.items.map(function(a) {
-      if (!quotaObserved(a)) return '<tr><td><div class="font-mono font-semibold">'+esc(a.email)+'</div><div class="text-[11px]" style="color:var(--muted)">'+esc(a.plan || '-')+'</div></td><td><span class="tag tag-gray">未采集</span></td><td colspan="6" style="color:var(--muted)">尚未收到官方额度快照，请点击右上角“刷新额度”</td></tr>';
-      var ql = Number(a.quotaLimit || 0), qr = Number(a.quotaRemaining || 0), qu = Number(a.quotaUsed || 0);
-      if (!qu && ql) qu = Math.max(0, ql - qr);
-      var ap = ql ? Math.min(100, qu / ql * 100) : 0, color = ap >= 90 ? 'var(--danger)' : ap >= 70 ? 'var(--warning)' : 'var(--accent)';
-      var quotaState = a.quotaState || (ql ? 'AVAILABLE' : '未采集'), quotaTag = quotaState === 'AVAILABLE' ? 'tag-green' : quotaState === '未采集' ? 'tag-gray' : 'tag-amber';
-      var policy = '<span class="tag '+(a.quotaAllowOverage?'tag-amber':'tag-gray')+'">'+(a.quotaAllowOverage?'可超额':'禁止超额')+'</span> <span class="tag '+(a.quotaTeamPooled?'tag-blue':'tag-gray')+'">'+(a.quotaTeamPooled?'团队共享':'账号独立')+'</span>';
-      var rate = a.rateLimit ? '<div class="font-mono">'+fmt(a.rateRemaining)+' / '+fmt(a.rateLimit)+'</div><div class="text-[11px]" style="color:var(--muted)">'+(a.rateWindowSeconds || 60)+'秒窗口 · '+countdown(a.rateResetAt)+'</div>' : '-';
-      return '<tr><td><div class="font-mono font-semibold">'+esc(a.email)+'</div><div class="text-[11px]" style="color:var(--muted)">'+esc(a.plan || '-')+'</div></td><td><span class="tag '+quotaTag+'">'+esc(quotaState)+'</span></td><td><div class="flex justify-between text-[11px] mb-1"><span>'+fmt(qu)+'</span><span>'+ap.toFixed(1)+'%</span></div><div class="progress" style="width:150px;height:5px"><div class="progress-fill" style="width:'+ap+'%;background:'+color+'"></div></div><div class="text-[11px] mt-1" style="color:var(--muted)">总量 '+fmt(ql)+'</div></td><td class="font-mono font-semibold" style="color:'+color+'">'+fmt(qr)+'</td><td><div class="font-mono text-[12px]">'+fmtDate(a.quotaCycleStart)+'</div><div class="text-[11px]" style="color:var(--muted)">至 '+fmtDate(a.quotaCycleEnd)+'</div></td><td><div class="font-semibold">'+countdown(a.quotaCycleEnd)+'</div><div class="text-[11px]" style="color:var(--muted)">'+fmtDate(a.quotaCycleEnd)+'</div></td><td><div class="flex gap-1 flex-wrap">'+policy+'</div></td><td>'+rate+'</td></tr>';
-    }).join('') : '<tr><td colspan="8" style="text-align:center;padding:40px;color:var(--muted)">暂无账号，请先导入账号并刷新额度</td></tr>';
-    var qcnt = document.getElementById('quotaCount');
-    if (qcnt) qcnt.textContent = '共 ' + qpg.total + ' 条' + (qpg.pages > 1 ? ' · 第 ' + qpg.page + '/' + qpg.pages + ' 页' : '');
-    var qpager = document.getElementById('quotaPager');
-    if (qpager) qpager.innerHTML = pagerHTML(qpg, 'quotaGoto');
     var rules = document.getElementById('quotaRules');
     if (rules) {
       var th = state.settings['alert_quota'] || '0.2';
@@ -695,6 +677,16 @@
       var msg = '探测完成：' + (d.ok || 0) + ' 个账号额度已刷新' + ((d.failed || 0) > 0 ? '，' + d.failed + ' 个失败' : '');
       loadAll().then(function () { toast(msg); });
     }).catch(function (e) { toast('探测失败：' + e.message); });
+  };
+  window.refreshAccountQuota = function (id) {
+    var acc = state.accounts.filter(function (a) { return a.id === id; })[0];
+    var who = acc ? acc.email : ('#' + id);
+    toast('正在刷新 ' + who + ' 的额度…');
+    api('/api/accounts/' + id + '/refresh-quota', { method: 'POST', body: '{}' }).then(function (d) {
+      var r = d.result || {};
+      var msg = (d.ok ? who + ' 额度已刷新：剩余 ' + fmt(r.remaining) + ' / ' + fmt(r.limit) : who + ' 刷新失败：' + (r.error || '未获取到额度'));
+      loadAll().then(function () { toast(msg); });
+    }).catch(function (e) { toast('刷新失败：' + e.message); });
   };
   window.exportQuota = function () {
     download('postman2api-quota-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify({ exportedAt: new Date().toISOString(), accounts: state.accounts }, null, 2));
