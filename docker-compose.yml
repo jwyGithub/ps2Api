@@ -13,29 +13,24 @@ services:
       # - GATEWAY_PORT=1930
       - GATEWAY_TRACE_LOG=1
       - GATEWAY_TRACE_DIR=/data/traces
-      # 会话存储走 Redis（多实例共享 + TTL 回收）；不配置则回退进程内内存。
-      - REDIS_URL=redis://redis:6379/0
+      # 复用服务器上已有的 redis:8-alpine（容器名 sub2api-redis，在 sub2api_sub2api-network 网络内）。
+      # 用独立 DB 索引 /1 + 键前缀 ps2api，与 sub2api 隔离，避免键冲突。
+      - REDIS_URL=redis://sub2api-redis:6379/1
+      - REDIS_KEY_PREFIX=ps2api
       # - REDIS_CONV_TTL=72h      # 会话映射存活时长，0/off/none/never 表示永不过期
-      # - REDIS_KEY_PREFIX=ps2api # 键前缀，多实例/多环境共用同一 Redis 时可区分
-    depends_on:
-      redis:
-        condition: service_healthy
+    networks:
+      - default
+      - sub2api-net
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:1930/health"]
       interval: 30s
       timeout: 3s
       retries: 3
 
-  redis:
-    image: redis:7-alpine
-    container_name: ps2api-redis
-    restart: unless-stopped
-    # 开启 AOF 持久化，重启不丢会话映射；数据落盘到独立卷。
-    command: ["redis-server", "--appendonly", "yes"]
-    volumes:
-      - ./data/redis:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
+networks:
+  # 项目自身的默认网络（保持 ps2api 原有的对外/对内连通性）
+  default:
+  # 复用已存在的外部网络，用于连到 sub2api-redis
+  sub2api-net:
+    external: true
+    name: sub2api_sub2api-network
