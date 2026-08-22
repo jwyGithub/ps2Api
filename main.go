@@ -31,6 +31,7 @@ func main() {
 
 	addr := ":" + port
 	log.Printf("ps2api listening on http://localhost:%s", port)
+	log.Printf("会话存储: %s", server.Router.Provider.ConversationStorageMode())
 	log.Printf("OpenAI: http://localhost:%s/v1/chat/completions", port)
 	log.Printf("Anthropic: http://localhost:%s/v1/messages", port)
 	if err := http.ListenAndServe(addr, logging(mux)); err != nil {

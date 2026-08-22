@@ -255,7 +255,7 @@ func consoleKV(clean interface{}) string {
 	m, ok := clean.(map[string]interface{})
 	if !ok {
 		raw, _ := json.Marshal(clean)
-		return truncateConsole(strings.ReplaceAll(string(raw), "\n", " "), consoleLineMaxRunes)
+		return truncateRunes(strings.ReplaceAll(string(raw), "\n", " "), consoleLineMaxRunes)
 	}
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -278,13 +278,13 @@ func consoleKV(clean interface{}) string {
 		b.WriteByte('=')
 		b.WriteString(vs)
 	}
-	return truncateConsole(b.String(), consoleLineMaxRunes)
+	return truncateRunes(b.String(), consoleLineMaxRunes)
 }
 
 func consoleValue(v interface{}) string {
 	switch t := v.(type) {
 	case string:
-		return truncateConsole(strings.ReplaceAll(t, "\n", " "), consoleValueMaxRunes)
+		return truncateRunes(strings.ReplaceAll(t, "\n", " "), consoleValueMaxRunes)
 	case bool:
 		return strconv.FormatBool(t)
 	case float64:
@@ -296,7 +296,7 @@ func consoleValue(v interface{}) string {
 		return "null"
 	default:
 		raw, _ := json.Marshal(t)
-		return truncateConsole(strings.ReplaceAll(string(raw), "\n", " "), consoleValueMaxRunes)
+		return truncateRunes(strings.ReplaceAll(string(raw), "\n", " "), consoleValueMaxRunes)
 	}
 }
 
@@ -306,12 +306,4 @@ func consoleValueSize(v interface{}) int {
 	}
 	raw, _ := json.Marshal(v)
 	return len(raw)
-}
-
-func truncateConsole(s string, maxRunes int) string {
-	r := []rune(s)
-	if len(r) <= maxRunes {
-		return s
-	}
-	return string(r[:maxRunes]) + "…"
 }

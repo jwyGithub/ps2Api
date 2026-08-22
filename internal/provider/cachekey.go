@@ -1,9 +1,8 @@
 package provider
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
+	"io"
 )
 
 // CacheKey 为一次请求算出稳定指纹，用于「影子缓存探针」度量重复率。
@@ -15,12 +14,12 @@ func CacheKey(req *ChatRequest) string {
 	for len(msgs) > 0 && isTrailingTokenMetadata(msgs[len(msgs)-1]) {
 		msgs = msgs[:len(msgs)-1]
 	}
-	h := sha256.New()
 	// json.Encoder 对 map 键有序输出，指纹稳定；只编码影响上游响应的字段。
-	_ = json.NewEncoder(h).Encode([]interface{}{
-		req.Endpoint, req.Model, msgs, req.Tools, req.ToolChoice, req.ParallelToolCalls,
+	return hashHex(func(w io.Writer) {
+		_ = json.NewEncoder(w).Encode([]interface{}{
+			req.Endpoint, req.Model, msgs, req.Tools, req.ToolChoice, req.ParallelToolCalls,
+		})
 	})
-	return hex.EncodeToString(h.Sum(nil))
 }
 
 // IsCacheable 只认「单发、无状态」请求：带工具结果回传（tool-tail）的轮次是有状态、
