@@ -507,10 +507,11 @@ type ProbeResult struct {
 // probeConcurrency 额度探测的并发数。
 const probeConcurrency = 3
 
-// ProbeQuotas 对所有启用的账号（含已采集过额度的存量账号）发起一次轻量探测调用，
-// 拿到真实额度写库并返回逐账号结果。单次探测仅消耗几 token，可用于核实
-// limit/remaining 是否有变化；额度管理页「刷新额度」按钮调用的就是这个。
-// 跳过已耗尽（exhausted）账号——上游直接拒绝，探测拿不到有效数据。
+// ProbeQuotas 增量刷新：仅对「从未成功采集过额度」的启用账号发起一次轻量探测调用，
+// 拿到真实额度写库并返回逐账号结果。单次探测仅消耗几 token；额度管理页「刷新额度」
+// 按钮调用的就是这个。判定「未采集过」的依据是 QuotaLimit <= 0——新导入或此前探测
+// 失败(没拿到 usage)的账号 QuotaLimit 仍为 0，会被补齐；已有额度快照(QuotaLimit>0)
+// 的账号直接跳过，避免重复消耗。同时跳过禁用 / 已耗尽（exhausted）账号——探测拿不到有效数据。
 func (r *Router) ProbeQuotas(ctx context.Context) []ProbeResult {
 	accounts, err := r.Store.ListAccounts()
 	if err != nil {
@@ -522,6 +523,10 @@ func (r *Router) ProbeQuotas(ctx context.Context) []ProbeResult {
 	var wg sync.WaitGroup
 	for _, acc := range accounts {
 		if !acc.Enabled || acc.Status == "exhausted" {
+			continue
+		}
+		// 增量：已采集过额度（QuotaLimit>0）的账号跳过，只补从未成功采集的。
+		if acc.QuotaLimit > 0 {
 			continue
 		}
 		wg.Add(1)
