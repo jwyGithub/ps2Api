@@ -8,6 +8,7 @@
         </div>
         <div class="flex items-center gap-2">
           <select class="input select w-44" id="statsRange">
+            <option value="1">当日</option>
             <option value="7">最近 7 天</option>
             <option value="14" selected>最近 14 天</option>
             <option value="30">最近 30 天</option>
@@ -25,7 +26,7 @@
         </div>
       </div>
 
-      <div class="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
+      <div class="grid grid-cols-2 lg:grid-cols-6 gap-4 mb-6">
         <div class="card p-5">
           <div class="text-[11px] uppercase tracking-wider" style="color: var(--muted);">总调用</div>
           <div class="font-display text-[28px] font-medium mt-2">1.83M</div>
@@ -50,6 +51,11 @@
           <div class="text-[11px] uppercase tracking-wider" style="color: var(--muted);">错误率</div>
           <div class="font-display text-[28px] font-medium mt-2">0.00%</div>
           <div class="text-[11px] mt-1" style="color: var(--muted);" id="statErrNote">实时</div>
+        </div>
+        <div class="card p-5">
+          <div class="text-[11px] uppercase tracking-wider" style="color: var(--muted);">当日使用额度</div>
+          <div class="font-display text-[28px] font-medium mt-2" id="statTodayQuota">0</div>
+          <div class="text-[11px] mt-1" style="color: var(--muted);" id="statTodayQuotaNote">今日累计消耗</div>
         </div>
       </div>
 

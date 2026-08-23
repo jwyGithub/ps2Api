@@ -341,6 +341,7 @@
     setText('#statCostNote', '按模型单价估算');
     setText('#statP95Note', '来自真实请求日志');
     setText('#statErrNote', (s.totalRequests ? (s.successRequests / s.totalRequests * 100).toFixed(2) : '0') + '% 成功');
+    setText('#statTodayQuota', fmt(s.todayRequests));
     renderQuotaForecast();
   }
 
