@@ -335,7 +335,9 @@ func (s *Store) UpsertAccount(email, password, tokens, source string) (*Account,
 	return s.GetAccount(id)
 }
 
-func (s *Store) ImportAccount(email, password, tokens, source string, enabled bool) error {
+// ImportAccount upserts an account by email and returns its row id. The id lets
+// callers（例如导入后自动刷新额度）精确定位到本次导入的账号，无需整池扫描。
+func (s *Store) ImportAccount(email, password, tokens, source string, enabled bool) (int64, error) {
 	v := 0
 	if enabled {
 		v = 1
@@ -345,7 +347,15 @@ func (s *Store) ImportAccount(email, password, tokens, source string, enabled bo
 		VALUES (?,?,?,?,'active',?,?,?,?)
 		ON CONFLICT(email) DO UPDATE SET password=excluded.password,tokens=excluded.tokens,source=excluded.source,status='active',enabled=excluded.enabled,last_login_at=excluded.last_login_at,error_message=NULL,updated_at=excluded.updated_at`,
 		email, password, tokens, source, v, now, now, now)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	// upsert 命中冲突分支时 LastInsertId 不可靠，按 email 回查（与 UpsertAccount 一致）。
+	var id int64
+	if err := s.db.QueryRow(`SELECT id FROM accounts WHERE email=?`, email).Scan(&id); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 func (s *Store) DeleteAccount(id int64) error {

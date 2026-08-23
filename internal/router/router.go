@@ -539,6 +539,34 @@ func (r *Router) ProbeQuotas(ctx context.Context) []ProbeResult {
 	return out
 }
 
+// ProbeAccountsByIDs 对给定 ID 集合的账号并发探测额度并写库，返回逐账号结果。
+// 供导入后自动刷新额度使用：仅覆盖本次导入的账号子集，比整池 ProbeQuotas 更轻。
+// 与 ProbeQuotas 一致，跳过禁用 / 已耗尽（exhausted）账号——探测拿不到有效数据。
+func (r *Router) ProbeAccountsByIDs(ctx context.Context, ids []int64) []ProbeResult {
+	var out []ProbeResult
+	sem := make(chan struct{}, probeConcurrency)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		acc, err := r.Store.GetAccount(id)
+		if err != nil || acc == nil || !acc.Enabled || acc.Status == "exhausted" {
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(acc *store.Account) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			pr := r.probeAccountQuota(ctx, acc)
+			mu.Lock()
+			out = append(out, pr)
+			mu.Unlock()
+		}(acc)
+	}
+	wg.Wait()
+	return out
+}
+
 // probeAccountQuota 对单个账号执行一次探测并写库，返回逐账号结果。
 // ProbeQuotas（批量）与 ProbeAccountQuota（单账号）共用此逻辑。
 func (r *Router) probeAccountQuota(ctx context.Context, acc *store.Account) ProbeResult {

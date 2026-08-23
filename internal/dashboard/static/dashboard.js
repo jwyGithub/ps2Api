@@ -579,21 +579,31 @@
   window.importAccountsFile = function (input) {
     var files = input.files ? Array.prototype.slice.call(input.files) : [];
     if (!files.length) return;
-    var imported = 0, failed = [];
+    var imported = 0, refreshing = 0, failed = [];
     // ponytail: 逐个文件顺序导入，每个文件都是一份 account.json；单个失败不影响其余文件。
     var chain = files.reduce(function (p, file) {
       return p.then(function () {
         return file.text().then(function (content) {
           return api('/api/accounts/import', { method: 'POST', body: content });
-        }).then(function (d) { imported += d.imported; }).catch(function (e) {
+        }).then(function (d) { imported += d.imported; refreshing += (d.refreshing || 0); }).catch(function (e) {
           failed.push(file.name + ': ' + e.message);
         });
       });
     }, Promise.resolve());
     chain.then(function () {
-      if (imported) toast('已导入 ' + imported + ' 个账号，请点击“刷新额度”获取官方快照');
+      if (imported) toast('已导入 ' + imported + ' 个账号' + (refreshing ? '，正在后台刷新额度…' : ''));
       if (failed.length) toast('部分文件导入失败：' + failed.join('；'));
       return loadAll();
+    }).then(function () {
+      // 后端导入后异步探测额度并写库；此处有限次轮询列表，让表格额度随探测陆续到位而更新。
+      // 上限约 5 次 / 每 2s，避免无限刷新；无启用账号需刷新时直接跳过。
+      if (!refreshing) return;
+      var tries = 0, max = 5;
+      var timer = setInterval(function () {
+        tries++;
+        loadAll();
+        if (tries >= max) { clearInterval(timer); toast('额度刷新完成'); }
+      }, 2000);
     }).finally(function () { input.value = ''; });
   };
   window.submitAccount = function () {

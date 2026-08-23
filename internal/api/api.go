@@ -672,14 +672,32 @@ func (s *Server) importAccounts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	importedIDs := make([]int64, 0, len(input.Accounts))
 	for _, account := range input.Accounts {
 		tokens, _ := json.Marshal(account.Tokens)
-		if err := s.Store.ImportAccount(account.Email, account.Password, string(tokens), account.Source, *account.Enabled); err != nil {
+		id, err := s.Store.ImportAccount(account.Email, account.Password, string(tokens), account.Source, *account.Enabled)
+		if err != nil {
 			jsonError(w, 500, err.Error(), "internal_error")
 			return
 		}
+		// 仅启用账号需要刷新额度；禁用 / exhausted 账号会被探测逻辑跳过。
+		if *account.Enabled {
+			importedIDs = append(importedIDs, id)
+		}
 	}
-	jsonWrite(w, 200, map[string]interface{}{"success": true, "imported": len(input.Accounts)})
+	// 导入后自动刷新额度：改为后台异步探测本次导入的启用账号，导入请求立即返回不被探测阻塞。
+	// 探测结果经 persistQuota 写库，账号列表接口（/api/accounts）已带 quotaLimit/quotaRemaining，
+	// 前端导入后轮询列表即可看到额度陆续到位，无需等待或新增任务状态接口。
+	// 关键：必须用 context.Background()——不能用 r.Context()，后者在本响应写完即被取消，
+	// 会导致后台探测中途夭折。
+	if len(importedIDs) > 0 {
+		go s.Router.ProbeAccountsByIDs(context.Background(), importedIDs)
+	}
+	jsonWrite(w, 200, map[string]interface{}{
+		"success":    true,
+		"imported":   len(input.Accounts),
+		"refreshing": len(importedIDs),
+	})
 }
 
 // refreshQuota 对所有启用账号发起轻量探测调用并写库，
