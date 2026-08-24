@@ -15,11 +15,12 @@ import (
 // ─── 系统设置（真实持久化到 SQLite settings 表）──────────────────
 
 type settingDef struct {
-	Key         string `json:"key"`
-	Label       string `json:"label"`
-	Type        string `json:"type"` // number | bool | text
-	Default     string `json:"default"`
-	Description string `json:"description"`
+	Key         string   `json:"key"`
+	Label       string   `json:"label"`
+	Type        string   `json:"type"` // number | bool | text | select
+	Default     string   `json:"default"`
+	Description string   `json:"description"`
+	Options     []string `json:"options,omitempty"` // select 类型的可选值
 }
 
 // settingDefs 是面板可配置项的白名单。前端按此渲染表单，PUT 只接受这些键。
@@ -28,6 +29,7 @@ var settingDefs = []settingDef{
 	{Key: "failover_enabled", Label: "失败自动切换账号", Type: "bool", Default: "true", Description: "关闭后单次请求失败不再换号重试"},
 	{Key: "gateway_failover_budget", Label: "网关拦截换号预算", Type: "number", Default: "5", Description: "遇上游 Cloudflare 风控(403)时，最多尝试多少个不同账号做兜底 failover。独立于「请求重试次数」，换号不占用普通重试预算，故大号池可被真正利用；耗尽仍被拦才返回 403"},
 	{Key: "gateway_cooldown_seconds", Label: "网关拦截冷却(秒)", Type: "number", Default: "300", Description: "账号被上游 Cloudflare 风控拦截(403)后进入冷却，此时长内号池优先跳过该账号、改用健康账号；到期自动恢复"},
+	{Key: "prefer_quota_on_403", Label: "403 换号选号策略", Type: "select", Default: "ratio", Options: []string{"ratio", "absolute", "off"}, Description: "遇网关(403)换号时如何挑下一个账号：ratio=剩余额度比例(RateRemaining/RateLimit)最高优先，各账号额度上限不一致时更公平(默认)；absolute=剩余额度绝对值最高优先；off=关闭额度优先，换号也走普通负载轮询"},
 	{Key: "alert_error_rate", Label: "错误率告警阈值", Type: "number", Default: "0.5", Description: "最近 10 分钟错误率超过该比例（0~1）时触发告警"},
 	{Key: "alert_quota", Label: "额度告警阈值", Type: "number", Default: "0.2", Description: "账号剩余额度低于总配额该比例（0~1）时触发告警"},
 	{Key: "log_retention", Label: "日志页展示条数", Type: "number", Default: "100", Description: "实时日志与部分聚合最多展示的最近日志条数"},

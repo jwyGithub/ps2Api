@@ -1,0 +1,108 @@
+package router
+
+import (
+	"strconv"
+	"time"
+
+	"ps2api/internal/pool"
+)
+
+// cacheProbeEnabled 读持久化设置（默认关）。探针是「度量窗口」工具而非常开设施：
+// 每个可缓存请求写一行 cache_probe，长期常开会让表无界增长，故 opt-in。
+func (r *Router) cacheProbeEnabled() bool {
+	v, _ := r.Store.GetSetting("cache_probe_enabled")
+	on, _ := strconv.ParseBool(v)
+	return on
+}
+
+// retryCount 从持久化设置读取请求重试次数（默认 3）。
+func (r *Router) retryCount() int {
+	v, _ := r.Store.GetSetting("retry_count")
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 3
+	}
+	return n
+}
+
+// stickyEgressBudget 是续聊(有可复用历史)遇网关 403 时，「钉住原账号、轮换出口 IP」这一级
+// 允许尝试的最大次数。预算内保住 Postman 服务端会话(零上下文损失)只换出口；预算耗尽仍被拦，
+// 才降级为跨账号 failover(接受会话降级)。默认 2。此级消耗普通重试预算(retry_count)。
+func (r *Router) stickyEgressBudget() int {
+	v, _ := r.Store.GetSetting("sticky_egress_retries")
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 2
+	}
+	return n
+}
+
+// gatewayFailoverBudget 是遇上游网关(Cloudflare)风控 403 时，「跨账号 failover」允许尝试的
+// 不同账号数上限，与普通重试预算(retry_count)相互独立：网关换号不占用普通重试计数，反之亦然。
+// 这样即便 retry_count 很小，被网关拦截时仍能遍历大号池逐个兜底，直到本预算耗尽才返回 403。
+// 默认 5。
+func (r *Router) gatewayFailoverBudget() int {
+	v, _ := r.Store.GetSetting("gateway_failover_budget")
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 5
+	}
+	return n
+}
+
+// gatewayBackoff 为网关(Cloudflare)风控拦截的重试提供退避,比普通失败重试更长,
+// 给速率/评分窗口降温时间:0.5s、1s、2s… 上限 5s。
+func gatewayBackoff(attempt int) time.Duration {
+	d := time.Duration(1<<attempt) * 500 * time.Millisecond
+	if d > 5*time.Second {
+		d = 5 * time.Second
+	}
+	return d
+}
+
+// gatewayCooldownDur 读取被网关拦截账号的冷却时长（默认 5 分钟）。冷却期内号池优先跳过该账号。
+func (r *Router) gatewayCooldownDur() time.Duration {
+	v, _ := r.Store.GetSetting("gateway_cooldown_seconds")
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 5 * time.Minute
+	}
+	return time.Duration(n) * time.Second
+}
+
+// gatewayBlockedError 生成面向调用方(agent 终端/模型)的明确错误：说明这是上游网关(Cloudflare)
+// 风控拦截、已尝试多少个账号、且本次「未产生任何输出」，便于终端干净停止任务、模型安全重做。
+func gatewayBlockedError(triedAccounts int) string {
+	return "上游网关(Cloudflare)持续拦截：已尝试 " + strconv.Itoa(triedAccounts) +
+		" 个账号仍返回 403(风控/Bot 校验)。本次请求已中断，未产生任何输出。可稍后重试，或发送\"继续\"以恢复此前任务。"
+}
+
+// preferQuotaMode 读取「403 换号选号策略」设置 prefer_quota_on_403，映射为 pool.QuotaMode：
+//   - "off"      → RoundRobin：关闭额度优先，403 换号也走普通轮询；
+//   - "absolute" → Absolute：按剩余额度绝对值最高优先；
+//   - 其他/""/"ratio"（默认）→ Ratio：按剩余额度比例最高优先。
+// 仅影响 403 网关 failover 换号那一步；普通轮询选号与会话粘性不受此开关影响。
+func (r *Router) preferQuotaMode() pool.QuotaMode {
+	v, _ := r.Store.GetSetting("prefer_quota_on_403")
+	switch v {
+	case "off":
+		return pool.QuotaModeRoundRobin
+	case "absolute":
+		return pool.QuotaModeAbsolute
+	default:
+		return pool.QuotaModeRatio
+	}
+}
+
+// failoverEnabled 从持久化设置读取「失败自动切换账号」开关（默认开启）。
+func (r *Router) failoverEnabled() bool {
+	v, _ := r.Store.GetSetting("failover_enabled")
+	if v == "" {
+		return true
+	}
+	on, err := strconv.ParseBool(v)
+	if err != nil {
+		return true
+	}
+	return on
+}

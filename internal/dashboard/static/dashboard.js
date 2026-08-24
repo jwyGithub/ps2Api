@@ -458,9 +458,16 @@
     if (form) {
       form.innerHTML = state.settingsDefs.map(function (d) {
         var val = state.settings[d.key] != null ? state.settings[d.key] : d.default;
-        var input = d.type === 'bool'
-          ? '<label class="switch"><input type="checkbox" data-key="'+d.key+'" '+(val === 'true' ? 'checked' : '')+'><div class="slider"></div></label>'
-          : '<input class="input font-mono" data-key="'+d.key+'" value="'+esc(val)+'" style="max-width:220px">';
+        var input;
+        if (d.type === 'bool') {
+          input = '<label class="switch"><input type="checkbox" data-key="'+d.key+'" '+(val === 'true' ? 'checked' : '')+'><div class="slider"></div></label>';
+        } else if (d.type === 'select') {
+          input = '<select class="input font-mono" data-key="'+d.key+'" style="max-width:220px">' + (d.options || []).map(function (o) {
+            return '<option value="'+esc(o)+'"'+(String(val) === String(o) ? ' selected' : '')+'>'+esc(o)+'</option>';
+          }).join('') + '</select>';
+        } else {
+          input = '<input class="input font-mono" data-key="'+d.key+'" value="'+esc(val)+'" style="max-width:220px">';
+        }
         return '<div class="flex items-center justify-between p-3 rounded-lg" style="background:var(--bg)"><div><div class="text-[13px] font-semibold">'+esc(d.label)+'</div><div class="text-[12px] mt-0.5" style="color:var(--fg-2)">'+esc(d.description)+'</div></div>'+input+'</div>';
       }).join('') + '<div class="pt-2 flex items-center gap-2"><button class="btn btn-primary" onclick="saveSettings()">保存配置</button><button class="btn" onclick="checkProxy()">检测代理</button></div><div id="proxyCheckResult" class="text-[12px] mt-2" style="color:var(--fg-2)"></div>';
     }

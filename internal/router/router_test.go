@@ -56,7 +56,7 @@ func TestStickyContinuationStaysOnOriginalAccount(t *testing.T) {
 	r := newTestRouter(t)
 
 	msgsFirst := []provider.ChatMessage{mustMsg(t, "user", "agent A hello")}
-	acc1, poolUsed, err := r.pickAccount(nil, msgsFirst)
+	acc1, poolUsed, err := r.pickAccount(nil, msgsFirst, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestStickyContinuationStaysOnOriginalAccount(t *testing.T) {
 
 	// 模拟池子此时会轮到账号2：先让 pickAccount 无粘性走一次（吃掉账号2）。
 	other := []provider.ChatMessage{mustMsg(t, "user", "some other agent new chat")}
-	if acc, used, err := r.pickAccount(nil, other); err != nil || !used {
+	if acc, used, err := r.pickAccount(nil, other, false); err != nil || !used {
 		t.Fatalf("other new chat should rotate: acc=%v used=%v err=%v", acc, used, err)
 	}
 
@@ -78,7 +78,7 @@ func TestStickyContinuationStaysOnOriginalAccount(t *testing.T) {
 		{Role: "assistant", Content: mustRaw(t, `"hi"`)},
 		mustMsg(t, "user", "continue please"),
 	}
-	stuck, used, err := r.pickAccount(nil, cont)
+	stuck, used, err := r.pickAccount(nil, cont, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestStickyContinuationStaysOnOriginalAccount(t *testing.T) {
 func TestStickyFallsBackToPoolWhenExcluded(t *testing.T) {
 	r := newTestRouter(t)
 	msgsFirst := []provider.ChatMessage{mustMsg(t, "user", "agent B hello")}
-	acc1, _, err := r.pickAccount(nil, msgsFirst)
+	acc1, _, err := r.pickAccount(nil, msgsFirst, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestStickyFallsBackToPoolWhenExcluded(t *testing.T) {
 	}
 
 	// 账号1被排除时，应回退轮询到账号2
-	stuck, used, err := r.pickAccount(map[int64]bool{acc1.ID: true}, cont)
+	stuck, used, err := r.pickAccount(map[int64]bool{acc1.ID: true}, cont, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestStickyFallsBackToPoolWhenExcluded(t *testing.T) {
 func TestStickyFallsBackWhenAccountDisabled(t *testing.T) {
 	r := newTestRouter(t)
 	msgsFirst := []provider.ChatMessage{mustMsg(t, "user", "agent C hello")}
-	acc1, _, err := r.pickAccount(nil, msgsFirst)
+	acc1, _, err := r.pickAccount(nil, msgsFirst, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestStickyFallsBackWhenAccountDisabled(t *testing.T) {
 		{Role: "assistant", Content: mustRaw(t, `"hi"`)},
 		mustMsg(t, "user", "more"),
 	}
-	if _, used, err := r.pickAccount(nil, cont); err != nil || !used {
+	if _, used, err := r.pickAccount(nil, cont, false); err != nil || !used {
 		t.Fatalf("disabled sticky account must fall back to pool: used=%v err=%v", used, err)
 	}
 }
@@ -535,4 +535,29 @@ func jsonStringT(t *testing.T, s string) string {
 	t.Helper()
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// 出口序号必须与全局 attempt 解耦：同账号重试递增以轮换代理出口 IP，
+// 而一旦跨账号 failover 换号就归零——保证换号后新账号仍从自身粘性出口走代理池，
+// 绝不因全局重试数堆高使 seq>=N 而在 selectFor 里回退本机直连（换号多因 403，直连必再被拦）。
+func TestNextEgressSeqResetsOnAccountSwitch(t *testing.T) {
+	// 首次尝试：始终从 0（账号粘性出口）开始。
+	if got := nextEgressSeq(0, 0, 1, true); got != 0 {
+		t.Fatalf("first attempt must start at egress seq 0, got %d", got)
+	}
+	// 同账号连续重试：递增，轮换到下一个出口 IP。
+	if got := nextEgressSeq(0, 1, 1, false); got != 1 {
+		t.Fatalf("same-account retry must rotate egress (0->1), got %d", got)
+	}
+	if got := nextEgressSeq(4, 1, 1, false); got != 5 {
+		t.Fatalf("same-account retry must keep incrementing (4->5), got %d", got)
+	}
+	// 换号：无论上一账号的出口序号堆到多高，新账号都必须归零，
+	// 这样 selectFor 会走 (stickyBase(newAcc)+0)%N 命中代理池，而非直连。
+	if got := nextEgressSeq(9, 1, 2, false); got != 0 {
+		t.Fatalf("account switch must reset egress seq to 0 so the new account still uses the proxy pool, got %d", got)
+	}
+	if got := nextEgressSeq(100, 7, 3, false); got != 0 {
+		t.Fatalf("account switch must reset egress seq regardless of how high the previous seq was, got %d", got)
+	}
 }
