@@ -61,12 +61,18 @@ func (p *Pool) next(excluded map[int64]bool, mode QuotaMode) (*store.Account, er
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
-	// 第一轮：跳过 excluded 且跳过仍在网关冷却窗口内的账号，挑选最优健康账号。
-	// 第二轮兜底（skipCooldown=false）：所有健康账号都在冷却时，宁可再试冷却中的账号，
-	// 也不直接失败——冷却是「降级」而非「禁用」。
-	best := p.pickIndex(accounts, excluded, now, true, mode)
+	// 三轮降级选号，排除项由硬到软：用量额度耗尽 > 网关冷却。
+	//   轮1：跳过 excluded、网关冷却中、用量额度已耗尽的账号——挑最优健康账号。
+	//   轮2：允许冷却中账号，但仍跳过额度耗尽——额度见底的号发出去必然拿不到结果，
+	//        比「出口不够新鲜」更该排除，故额度优先级高于冷却。
+	//   轮3：全放开（额度也不跳）——额度快照可能陈旧（如从未刷新/上周期归零），
+	//        宁可一试也不直接硬失败。冷却/耗尽都是「降级」而非「禁用」。
+	best := p.pickIndex(accounts, excluded, now, true, true, mode)
 	if best < 0 {
-		best = p.pickIndex(accounts, excluded, now, false, mode)
+		best = p.pickIndex(accounts, excluded, now, false, true, mode)
+	}
+	if best < 0 {
+		best = p.pickIndex(accounts, excluded, now, false, false, mode)
 	}
 	if best < 0 {
 		return nil, errNoAccounts(nil)
@@ -76,14 +82,24 @@ func (p *Pool) next(excluded map[int64]bool, mode QuotaMode) (*store.Account, er
 	return accounts[best], nil
 }
 
+// quotaExhausted 判断账号的 AI 用量额度是否已耗尽：仅当额度上限已知（QuotaLimit>0）
+// 且剩余 <=0 才判为耗尽。上限未知（QuotaLimit==0，如尚未刷新过额度）不误判为耗尽，
+// 避免把额度信息缺失的号错误地排除出选号池。
+func quotaExhausted(acc *store.Account) bool {
+	return acc.QuotaLimit > 0 && acc.QuotaRemaining <= 0
+}
+
 // pickIndex 在 accounts 中挑一个候选下标，返回 -1 表示无可用账号。跳过 excluded；
-// skipCooldown 为真时额外跳过仍在网关冷却窗口内的账号。
+// skipCooldown 为真时额外跳过仍在网关冷却窗口内的账号；
+// skipExhausted 为真时额外跳过 AI 用量额度已耗尽（quotaExhausted）的账号——这类号即便
+// 速率窗口新鲜（RateRemaining 高）也发不出有效结果，若不跳会在 403 换号「选额度最满」策略里
+// 反被优先选中，白白浪费重试预算。
 //   - mode=RoundRobin（默认/普通选号）：从轮询起点 (last+1) 出发挑 inFlight 负载最低的账号，
 //     命中 0 负载即提前返回，保持原有的 round-robin 负载均衡语义。
 //   - mode=Ratio/Absolute（403 换号）：以剩余额度（比例或绝对值）降序为主键、
 //     inFlight 负载升序为次键，必须遍历全部账号以找出额度最高者（不能提前 break）。
 //     额度同、负载同时由轮询起点决定先后。
-func (p *Pool) pickIndex(accounts []*store.Account, excluded map[int64]bool, now time.Time, skipCooldown bool, mode QuotaMode) int {
+func (p *Pool) pickIndex(accounts []*store.Account, excluded map[int64]bool, now time.Time, skipCooldown, skipExhausted bool, mode QuotaMode) int {
 	start := (p.last + 1) % len(accounts)
 	best := -1
 	bestLoad := int(^uint(0) >> 1)
@@ -98,6 +114,9 @@ func (p *Pool) pickIndex(accounts []*store.Account, excluded map[int64]bool, now
 			if until, ok := p.gatewayCooldown[acc.ID]; ok && now.Before(until) {
 				continue
 			}
+		}
+		if skipExhausted && quotaExhausted(acc) {
+			continue
 		}
 		load := p.inFlight[acc.ID]
 		if mode != QuotaModeRoundRobin {

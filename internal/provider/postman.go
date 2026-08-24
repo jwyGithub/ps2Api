@@ -21,7 +21,7 @@ func New() *Provider {
 	// Client 为本机直连出口（用 ctx 控制超时，流式不能有总超时）；proxies 为可选出口代理池，
 	// 未配置时所有请求走 Client 直连。
 	return &Provider{
-		Client:    &http.Client{Timeout: 0},
+		Client:    &http.Client{Timeout: 0, Transport: newFingerprintTransport()},
 		proxies:   newProxyPool(),
 		cookies:   newAccountCookieJars(),
 		convStore: newConversationStore(),

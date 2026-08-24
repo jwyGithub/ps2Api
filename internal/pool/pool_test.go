@@ -121,3 +121,70 @@ func TestNextByQuotaAbsoluteVsRatio(t *testing.T) {
 		t.Fatalf("ratio mode: expected highest-ratio account a2(%d), got %d", ids["a2@test.com"], acc2.ID)
 	}
 }
+
+// 用量额度已耗尽（QuotaLimit>0 且 QuotaRemaining<=0）的账号，即便速率窗口最新鲜，
+// 也不该在 403 换号里被选中——除非池内已无任何有额度账号可用（最后兜底轮才放行）。
+func TestNextSkipsQuotaExhausted(t *testing.T) {
+	s, ids := newTestStore(t)
+	// 三个号速率都满 30/30；a1 用量额度耗尽（50000/0），a2、a3 仍有额度。
+	for _, e := range []string{"a1@test.com", "a2@test.com", "a3@test.com"} {
+		if err := s.SetRateLimit(ids[e], 30, 30, 60, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.SetQuotaSnapshot(ids["a1@test.com"], store.QuotaSnapshot{State: "AVAILABLE", Limit: 50000, Remaining: 0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetQuotaSnapshot(ids["a2@test.com"], store.QuotaSnapshot{State: "AVAILABLE", Limit: 50000, Remaining: 40000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetQuotaSnapshot(ids["a3@test.com"], store.QuotaSnapshot{State: "AVAILABLE", Limit: 50000, Remaining: 40000}); err != nil {
+		t.Fatal(err)
+	}
+	p := New(s)
+
+	// 403 换号：a1 速率虽满但额度见底，应被跳过，只会选到 a2 或 a3。
+	for i := 0; i < 5; i++ {
+		acc, err := p.NextByRateRemaining(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if acc.ID == ids["a1@test.com"] {
+			t.Fatalf("iteration %d: quota-exhausted account a1(%d) should be skipped", i, ids["a1@test.com"])
+		}
+		p.Done(acc.ID)
+	}
+
+	// 普通轮询选号同样应跳过额度耗尽的 a1。
+	for i := 0; i < 5; i++ {
+		acc, err := p.Next(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if acc.ID == ids["a1@test.com"] {
+			t.Fatalf("round-robin iteration %d: quota-exhausted account a1(%d) should be skipped", i, ids["a1@test.com"])
+		}
+		p.Done(acc.ID)
+	}
+}
+
+// 当池内所有账号额度都耗尽时，最后兜底轮应放行（宁可一试也不硬失败，额度快照可能陈旧）。
+func TestNextFallsBackWhenAllQuotaExhausted(t *testing.T) {
+	s, ids := newTestStore(t)
+	for _, e := range []string{"a1@test.com", "a2@test.com", "a3@test.com"} {
+		if err := s.SetRateLimit(ids[e], 30, 30, 60, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetQuotaSnapshot(ids[e], store.QuotaSnapshot{State: "AVAILABLE", Limit: 50000, Remaining: 0}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := New(s)
+	acc, err := p.NextByRateRemaining(nil)
+	if err != nil {
+		t.Fatalf("expected fallback to return an account when all exhausted, got err: %v", err)
+	}
+	if acc == nil {
+		t.Fatal("expected a non-nil account from last-resort fallback")
+	}
+}

@@ -116,15 +116,10 @@ func (pp *proxyPool) clientFor(raw string) *http.Client {
 	}
 	c := &http.Client{
 		Timeout: 0, // 与直连一致：用 ctx 控制超时，流式不能有总超时
-		Transport: &http.Transport{
-			Proxy:                 http.ProxyURL(u), // 标准库原生支持 http/https/socks5 代理
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          100,
-			MaxIdleConnsPerHost:   10,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-		},
+		// 经代理出站也携带同一套 uTLS 伪装指纹：CONNECT/SOCKS5 隧道 + HelloCustom 握手，
+		// 由 newFingerprintProxyTransport 内的 DialTLSContext 接管（不再用标准库 Proxy 字段，
+		// 否则目标握手会退回 Go 默认指纹，与直连不一致，风控绕过失效）。
+		Transport: newFingerprintProxyTransport(u),
 	}
 	pp.clients[raw] = c
 	return c
