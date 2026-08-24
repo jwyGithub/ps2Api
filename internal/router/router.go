@@ -108,13 +108,25 @@ func (r *Router) retryCount() int {
 
 // stickyEgressBudget 是续聊(有可复用历史)遇网关 403 时，「钉住原账号、轮换出口 IP」这一级
 // 允许尝试的最大次数。预算内保住 Postman 服务端会话(零上下文损失)只换出口；预算耗尽仍被拦，
-// 才降级为跨账号 failover(接受会话降级)。默认 2。注意总重试次数仍受 retry_count 约束——
-// 若要让「多出口轮换 + 兜底 failover」都有空间，应把 retry_count 调到 ≥ 该预算 + 1。
+// 才降级为跨账号 failover(接受会话降级)。默认 2。此级消耗普通重试预算(retry_count)。
 func (r *Router) stickyEgressBudget() int {
 	v, _ := r.Store.GetSetting("sticky_egress_retries")
 	n, err := strconv.Atoi(v)
 	if err != nil || n < 1 {
 		return 2
+	}
+	return n
+}
+
+// gatewayFailoverBudget 是遇上游网关(Cloudflare)风控 403 时，「跨账号 failover」允许尝试的
+// 不同账号数上限，与普通重试预算(retry_count)相互独立：网关换号不占用普通重试计数，反之亦然。
+// 这样即便 retry_count 很小，被网关拦截时仍能遍历大号池逐个兜底，直到本预算耗尽才返回 403。
+// 默认 5。
+func (r *Router) gatewayFailoverBudget() int {
+	v, _ := r.Store.GetSetting("gateway_failover_budget")
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 5
 	}
 	return n
 }
@@ -194,10 +206,16 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 	stickyBudget := r.stickyEgressBudget() // 该级预算，耗尽后降级为跨账号 failover
 	var pinnedAcc *store.Account           // 续聊遇网关拦截时钉住原账号，绝不换号（换号会丢服务端会话上下文）
 	attempts := r.retryCount()
+	gwBudget := r.gatewayFailoverBudget()
 	if !r.failoverEnabled() {
 		attempts = 1
+		gwBudget = 1
 	}
-	for attempt := 0; attempt < attempts; attempt++ {
+	// maxAttempts 是循环硬上限：普通失败重试(超时/5xx/限流/额度/钉账号换出口)占用 attempts 额度；
+	// 每次「网关拦截跨账号 failover」会把上限 +1 作为补偿，使网关换号不吞掉普通重试预算——
+	// 两类预算解耦后，即便 retry_count 很小，被网关拦时仍能遍历大号池逐个兜底(见 gatewayFailoverBudget)。
+	maxAttempts := attempts
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
 			time.Sleep(time.Duration(100*(1<<attempt)) * time.Millisecond)
 		}
@@ -244,7 +262,7 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 				// 【一级】钉住原账号（保住 Postman 服务端会话：conversationId/TOOL_RESPONSE 不降级），
 				//   但轮换出口 IP——403 是有状态的出口信誉风控，换 IP 大概率通过。此级零上下文损失：
 				//   不改写 req.Messages（保住会话指纹），只在出站边界净化摘要并压缩 third-party schema。
-				if stickyEgressTries < stickyBudget && attempt < attempts-1 {
+				if stickyEgressTries < stickyBudget && attempt < maxAttempts-1 {
 					pinnedAcc = acc
 					stickyEgressTries++
 					req.GatewayRetry = true
@@ -259,7 +277,8 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 				excluded[acc.ID] = true
 				pinnedAcc = nil
 				r.Pool.MarkGatewayBlocked(acc.ID, r.gatewayCooldownDur())
-				if attempt < attempts-1 {
+				if gatewayBlocks < gwBudget {
+					maxAttempts++
 					time.Sleep(gatewayBackoff(attempt))
 					continue
 				}
@@ -270,7 +289,8 @@ func (r *Router) Chat(ctx context.Context, req *provider.ChatRequest) (*provider
 			excluded[acc.ID] = true
 			pinnedAcc = nil
 			r.Pool.MarkGatewayBlocked(acc.ID, r.gatewayCooldownDur())
-			if attempt < attempts-1 {
+			if gatewayBlocks < gwBudget {
+				maxAttempts++
 				time.Sleep(gatewayBackoff(attempt))
 				continue
 			}
@@ -310,10 +330,14 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 	stickyBudget := r.stickyEgressBudget() // 该级预算，耗尽后降级为跨账号 failover
 	var pinnedAcc *store.Account           // 续聊遇网关拦截时钉住原账号，绝不换号（换号会丢服务端会话上下文）
 	attempts := r.retryCount()
+	gwBudget := r.gatewayFailoverBudget()
 	if !r.failoverEnabled() {
 		attempts = 1
+		gwBudget = 1
 	}
-	for attempt := 0; attempt < attempts; attempt++ {
+	// maxAttempts 见 Chat：普通重试占用 attempts 额度，网关拦截跨账号 failover 单独用 gwBudget 且对上限 +1 补偿，两类预算解耦。
+	maxAttempts := attempts
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		acc, poolUsed, err := r.selectAccount(pinnedAcc, excluded, req.Messages)
 		if err != nil {
 			provider.Trace(ctx, "router.error", map[string]interface{}{"attempt": attempt + 1, "error": err.Error()})
@@ -359,7 +383,7 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 			}
 			if provider.HasReusableHistory(req.Messages) {
 				// 【一级】钉住原账号（保住服务端会话），轮换出口 IP 重试；不改 req.Messages。
-				if stickyEgressTries < stickyBudget && attempt < attempts-1 {
+				if stickyEgressTries < stickyBudget && attempt < maxAttempts-1 {
 					pinnedAcc = acc
 					stickyEgressTries++
 					req.GatewayRetry = true
@@ -373,7 +397,8 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 				excluded[acc.ID] = true
 				pinnedAcc = nil
 				r.Pool.MarkGatewayBlocked(acc.ID, r.gatewayCooldownDur())
-				if attempt < attempts-1 {
+				if gatewayBlocks < gwBudget {
+					maxAttempts++
 					time.Sleep(gatewayBackoff(attempt))
 					continue
 				}
@@ -384,7 +409,8 @@ func (r *Router) Stream(ctx context.Context, req *provider.ChatRequest, emit pro
 			excluded[acc.ID] = true
 			pinnedAcc = nil
 			r.Pool.MarkGatewayBlocked(acc.ID, r.gatewayCooldownDur())
-			if attempt < attempts-1 {
+			if gatewayBlocks < gwBudget {
+				maxAttempts++
 				time.Sleep(gatewayBackoff(attempt))
 				continue
 			}

@@ -474,6 +474,63 @@ func TestStreamGatewayBlockedContinuationStaysOnOriginalAccountNoDowngrade(t *te
 	}
 }
 
+// 双预算解耦回归：网关(Cloudflare 403)跨账号 failover 由 gateway_failover_budget 独立控制，
+// 不占用普通重试预算(retry_count)。故即便把 retry_count 压到 1，遇网关拦截时仍能遍历多个账号
+// 逐个兜底，直到 gateway_failover_budget 耗尽才返回 403——这正是「大号池能被真正利用」的保证。
+// 本例断言尝试的账号数由 gateway_failover_budget(3) 决定，而非 retry_count(1)。
+func TestStreamGatewayFailoverBudgetDecoupledFromRetryCount(t *testing.T) {
+	r := newTestRouter(t)
+	// 扩充到 5 个账号（> 网关换号预算 3），确保停止原因是预算耗尽而非账号用尽。
+	tok, _ := json.Marshal(provider.Tokens{AccessToken: "tok", UserID: "u", WorkspaceID: "w"})
+	for _, email := range []string{"a3@test.com", "a4@test.com", "a5@test.com"} {
+		if _, err := r.Store.UpsertAccount(email, "", string(tok), "manual"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 普通重试预算压到 1：若两类预算未解耦，遇 403 最多只会碰 1 个账号。
+	if err := r.Store.SetSetting("retry_count", "1"); err != nil {
+		t.Fatal(err)
+	}
+	// 网关换号预算 3：期望恰好尝试 3 个不同账号后返回 403。
+	if err := r.Store.SetSetting("gateway_failover_budget", "3"); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls int32
+	r.Provider.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		h := make(http.Header)
+		h.Set("Server", "cloudflare")
+		h.Set("Content-Type", "text/html; charset=UTF-8")
+		h.Set("Cf-Ray", "a2d562e1bc2349d4-LAX")
+		body := "<!doctype html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>"
+		return &http.Response{StatusCode: 403, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	})}
+
+	var output strings.Builder
+	res, account, err := r.Stream(context.Background(), &provider.ChatRequest{
+		Model: "claude-opus-4-8", Messages: []provider.ChatMessage{mustMsg(t, "user", "hello")},
+	}, func(delta provider.Delta) error {
+		output.WriteString(delta.Content)
+		return nil
+	})
+	if err == nil || res != nil || account != nil {
+		t.Fatalf("all-blocked should return an error with no result: res=%+v account=%+v err=%v", res, account, err)
+	}
+	re, ok := err.(*RouteError)
+	if !ok || !re.GatewayBlocked {
+		t.Fatalf("error should be *RouteError with GatewayBlocked=true, got %T %v", err, err)
+	}
+	// 关键断言：换号次数受 gateway_failover_budget(3) 控制，而非 retry_count(1)。
+	// ==3 同时证明：(a) 换号数 > retry_count → 两类预算已解耦；(b) 恰在网关预算耗尽处停止。
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Fatalf("gateway failover should try gateway_failover_budget(3) accounts regardless of retry_count(1), got %d upstream calls", got)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("no output should be emitted to client on total gateway block, got %q", output.String())
+	}
+}
+
 func jsonStringT(t *testing.T, s string) string {
 	t.Helper()
 	b, _ := json.Marshal(s)
