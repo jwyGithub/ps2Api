@@ -2,6 +2,7 @@ package tlsfp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
@@ -16,6 +17,15 @@ import (
 
 	utls "github.com/refraction-networking/utls"
 )
+
+// prefixedConn 在真实连接前面接上一段已被 bufio 读入内存的字节。仅 Read 改道，
+// 其余（Write/Close/Deadline 等）透传底层连接，供 CONNECT 隧道保留粘包字节使用。
+type prefixedConn struct {
+	net.Conn
+	r io.Reader
+}
+
+func (c *prefixedConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 
 // NewProxyDialTLS 基于给定 Profile 与出口代理 URL，生成「经代理出站」场景的
 // DialTLSContext。它先按代理协议（http/https/socks5）与代理建立到目标主机的隧道，
@@ -145,20 +155,26 @@ func dialHTTPConnect(ctx context.Context, d *net.Dialer, proxyURL *url.URL, targ
 		conn.Close()
 		return nil, err
 	}
-	// 只需状态行；丢弃可能的响应体。
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<12))
+	// CONNECT 隧道：读到状态行/头即可，绝不能读取 resp.Body——CONNECT 的 200 响应无
+	// body 分帧，Go 会把 body 视作「读到 EOF」，此时 resp.Body.Read 会去读隧道本身：
+	// 代理已进入透传模式等待我们发出 ClientHello，而我们却阻塞在读 body 上，双方互等，
+	// 直到对端空闲超时断开（EOF）或 ctx 截止——这正是「握手前挂起数秒后 EOF」的根因。
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		conn.Close()
 		return nil, fmt.Errorf("tlsfp: 代理 CONNECT 失败: %s", resp.Status)
 	}
-	if br.Buffered() > 0 {
-		// CONNECT 正常时代理不应在 200 后抢跑数据；若有则说明代理行为异常。
-		conn.Close()
-		return nil, errors.New("tlsfp: 代理在 CONNECT 响应后发送了多余数据")
-	}
 	// 清除临时 deadline，后续 TLS/读写由上层 ctx 控制。
 	_ = conn.SetDeadline(time.Time{})
+	// 正常 CONNECT 时代理在 200 后不会抢跑数据，br 无缓冲。若个别代理把隧道首批字节
+	// 与 CONNECT 响应粘在同一次读里，这些字节属于隧道数据流、绝不能丢弃：用 prefixedConn
+	// 把它们接回连接读取前端，保证后续 uTLS 握手能读到完整字节流。
+	if n := br.Buffered(); n > 0 {
+		peek, _ := br.Peek(n)
+		buf := make([]byte, n)
+		copy(buf, peek)
+		return &prefixedConn{Conn: conn, r: io.MultiReader(bytes.NewReader(buf), conn)}, nil
+	}
 	return conn, nil
 }
 
