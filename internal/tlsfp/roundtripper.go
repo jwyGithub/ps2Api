@@ -10,12 +10,17 @@ package tlsfp
 
 import (
 	"bufio"
+	"compress/flate"
+	"compress/gzip"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 
+	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
 	utls "github.com/refraction-networking/utls"
 )
 
@@ -48,8 +53,18 @@ func NewFingerprintProxyRoundTripper(p Profile, proxyURL *url.URL) *FingerprintR
 	}
 }
 
-// RoundTrip 实现 http.RoundTripper。
+// RoundTrip 实现 http.RoundTripper。因为我方主动声明了 accept-encoding（见
+// provider.buildHeaders），响应可能带 Content-Encoding；标准库 Transport 会在自己补
+// accept-encoding 时自动解压，而这里是自写传输层，需在出口统一按 Content-Encoding 解压。
 func (rt *FingerprintRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := rt.roundTripInner(req)
+	if err != nil {
+		return nil, err
+	}
+	return decompressResponse(resp), nil
+}
+
+func (rt *FingerprintRoundTripper) roundTripInner(req *http.Request) (*http.Response, error) {
 	authority := authorityAddr(req.URL)
 
 	// 1) 尝试复用池中的 h2 连接；若发现连接不可用则重拨一次。
@@ -63,6 +78,63 @@ func (rt *FingerprintRoundTripper) RoundTrip(req *http.Request) (*http.Response,
 
 	// 2) 新拨一条连接，按 ALPN 分流。
 	return rt.dialAndRoundTrip(req, authority)
+}
+
+// decompressResponse 按 Content-Encoding 把响应体换成流式解压 reader（gzip/deflate/br/zstd）。
+// 解码器全部流式，SSE（text/event-stream，服务端不压）会因无 Content-Encoding 而原样透传，
+// 不影响流式；仅错误页/非流响应被压缩时才解码。解码失败或未知编码则原样返回，避免误伤。
+func decompressResponse(resp *http.Response) *http.Response {
+	if resp == nil || resp.Body == nil {
+		return resp
+	}
+	enc := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
+	if enc == "" || enc == "identity" {
+		return resp
+	}
+	var dec io.ReadCloser
+	switch enc {
+	case "gzip":
+		zr, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return resp
+		}
+		dec = zr
+	case "deflate":
+		dec = flate.NewReader(resp.Body)
+	case "br":
+		dec = io.NopCloser(brotli.NewReader(resp.Body))
+	case "zstd":
+		zr, err := zstd.NewReader(resp.Body)
+		if err != nil {
+			return resp
+		}
+		dec = zr.IOReadCloser()
+	default:
+		return resp
+	}
+	resp.Body = &decompressBody{dec: dec, orig: resp.Body}
+	resp.Header.Del("Content-Encoding")
+	resp.Header.Del("Content-Length")
+	resp.ContentLength = -1
+	resp.Uncompressed = true
+	return resp
+}
+
+// decompressBody 把解压 reader 与原始 body 绑定：Read 走解压流，Close 同时关闭两者。
+type decompressBody struct {
+	dec  io.ReadCloser
+	orig io.ReadCloser
+}
+
+func (b *decompressBody) Read(p []byte) (int, error) { return b.dec.Read(p) }
+
+func (b *decompressBody) Close() error {
+	decErr := b.dec.Close()
+	origErr := b.orig.Close()
+	if decErr != nil {
+		return decErr
+	}
+	return origErr
 }
 
 func (rt *FingerprintRoundTripper) dialAndRoundTrip(req *http.Request, authority string) (*http.Response, error) {

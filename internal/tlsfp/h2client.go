@@ -22,6 +22,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -257,10 +258,18 @@ func (c *h2Conn) writeHeaders(st *h2Stream, req *http.Request, endStream bool) e
 		}
 		c.henc.WriteField(hpack.HeaderField{Name: name, Value: val})
 	}
-	// 普通头：h2 头名一律小写；跳过 h1 专用/连接级头。
-	for _, name := range sortedHeaderNames(req.Header) {
+	// content-length：浏览器对带 body 的请求会显式发送，且位于普通头首位。Go 只把长度
+	// 记在 req.ContentLength、并不写进 req.Header（本应由标准库 Transport 补齐），这里按需
+	// 补上，与真实 Chrome fetch 一致（缺失是"非浏览器"信号）。
+	if !endStream && req.ContentLength > 0 {
+		c.henc.WriteField(hpack.HeaderField{Name: "content-length", Value: strconv.FormatInt(req.ContentLength, 10)})
+	}
+	// 普通头：按 Chromium fetch 的线上顺序输出（h2 头名一律小写；跳过 h1 专用/连接级头
+	// 与已单独处理的 content-length）。绝不能按字母序——字母序是任何真实浏览器都不会有的
+	// 头顺序，会在 Cloudflare 的 JA4H 头顺序指纹上直接露馅。
+	for _, name := range orderedHeaderNames(req.Header) {
 		lower := strings.ToLower(name)
-		if isConnLevelHeader(lower) {
+		if isConnLevelHeader(lower) || lower == "content-length" {
 			continue
 		}
 		for _, v := range req.Header[name] {
@@ -630,19 +639,65 @@ func (st *h2Stream) Close() error {
 // 确保 h2Stream 满足 io.ReadCloser。
 var _ io.ReadCloser = (*h2Stream)(nil)
 
-// sortedHeaderNames 返回 header 的键名（稳定顺序，便于确定性编码）。
-func sortedHeaderNames(h http.Header) []string {
-	names := make([]string, 0, len(h))
+// chromeHeaderOrder 是 Chromium 系（Chrome / Edge / Electron）fetch/XHR 请求在
+// HTTP/2 线上的普通头顺序（全小写）。
+//
+// 重要：Chrome DevTools 的「Headers」面板与「Copy as cURL」都把请求头按【字母序】
+// 展示，并非真实线序，因此不能照抄它们的排列。此表依据 Chromium 网络栈实际发包顺序
+// 整理：content-length 打头，随后是 UA-CH（sec-ch-ua*）、应用自定义头、user-agent、
+// accept、origin、sec-fetch-*、referer、accept-encoding/language、priority，cookie 收尾。
+// Cloudflare 的 JA4H 对头名顺序做指纹（且忽略 cookie/referer），故顺序必须贴合浏览器。
+//
+// 表中未出现的头会按稳定顺序追加到末尾（见 orderedHeaderNames），保证不丢头。
+var chromeHeaderOrder = []string{
+	"content-length",
+	"sec-ch-ua",
+	"sec-ch-ua-mobile",
+	"sec-ch-ua-platform",
+	"newrelic",
+	"traceparent",
+	"tracestate",
+	"content-type",
+	"x-access-token",
+	"x-app-version",
+	"x-pstmn-req-service",
+	"user-agent",
+	"accept",
+	"origin",
+	"sec-fetch-site",
+	"sec-fetch-mode",
+	"sec-fetch-dest",
+	"referer",
+	"accept-encoding",
+	"accept-language",
+	"priority",
+	"cookie",
+}
+
+// orderedHeaderNames 返回 req.Header 的键名，按 chromeHeaderOrder 给定的 Chromium
+// 线序排列；表中未登记的头按字母序稳定追加到末尾（既贴合浏览器指纹又不丢头）。
+func orderedHeaderNames(h http.Header) []string {
+	// lower(头名) -> 实际 canonical key（http.Header 的键经 CanonicalMIMEHeaderKey 规范化）。
+	byLower := make(map[string]string, len(h))
 	for name := range h {
-		names = append(names, name)
+		byLower[strings.ToLower(name)] = name
 	}
-	// 简单插入排序即可（头数量很小），避免额外引入 sort 依赖歧义。
-	for i := 1; i < len(names); i++ {
-		for j := i; j > 0 && names[j-1] > names[j]; j-- {
-			names[j-1], names[j] = names[j], names[j-1]
+	out := make([]string, 0, len(h))
+	seen := make(map[string]bool, len(h))
+	for _, lower := range chromeHeaderOrder {
+		if key, ok := byLower[lower]; ok {
+			out = append(out, key)
+			seen[key] = true
 		}
 	}
-	return names
+	rest := make([]string, 0)
+	for name := range h {
+		if !seen[name] {
+			rest = append(rest, name)
+		}
+	}
+	sort.Strings(rest)
+	return append(out, rest...)
 }
 
 // isConnLevelHeader 判断是否为 HTTP/1.1 连接级/逐跳头——这些在 h2 中被禁止携带。

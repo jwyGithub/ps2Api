@@ -125,6 +125,10 @@ func (p *Provider) buildHeaders(tokens *Tokens) http.Header {
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
 	h.Set("Accept", "text/event-stream")
+	// 真实 Chrome/Edge/Electron 每个请求都带 accept-encoding；自写的 FingerprintRoundTripper
+	// 不像标准库 Transport 那样自动补，缺失即"非浏览器"信号，与自称 Edge 的 UA 矛盾。
+	// 声明后由 RoundTripper 按 Content-Encoding 解压响应（gzip/deflate/br/zstd）。
+	h.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	h.Set("x-pstmn-req-service", "agent-mode-service")
 	h.Set("accept-language", "en-US,en;q=0.9")
 	if tokens.IsDesktop() {
