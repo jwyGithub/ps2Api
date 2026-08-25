@@ -160,7 +160,17 @@
     if (status === 'active') return { dot: 'dot-online', tag: 'tag-green', label: '在线' };
     if (status === 'exhausted') return { dot: 'dot-idle', tag: 'tag-amber', label: '额度耗尽' };
     if (status === 'error') return { dot: 'dot-error', tag: 'tag-red', label: '异常' };
+    if (status === 'disabled') return { dot: 'dot-offline', tag: 'tag-gray', label: '已停用' };
     return { dot: 'dot-offline', tag: 'tag-gray', label: status || '停用' };
+  }
+
+  // 账号有效状态：异常 → 停用 → 额度耗尽 → 在线。
+  // 过滤、汇总卡计数、表格行标签统一走这里，保证三处口径一致。
+  function effectiveStatus(a) {
+    if (a.status === 'error') return 'error';
+    if (!a.enabled) return 'disabled';
+    if (a.status === 'exhausted') return 'exhausted';
+    return 'active';
   }
 
   var resourceLoaders = {
@@ -246,22 +256,27 @@
   function renderPoolsReal() {
     var body = document.getElementById('poolsBody'); if (!body) return;
     var list = state.accounts.filter(function (a) {
-      var st = !a.enabled ? 'disabled' : (a.status === 'active' ? 'active' : a.status === 'exhausted' ? 'exhausted' : 'error');
+      var st = effectiveStatus(a);
       if (state.poolStatus !== 'ALL' && st !== state.poolStatus) return false;
       if (state.poolQuery && (a.email + ' ' + (a.source || '')).toLowerCase().indexOf(state.poolQuery.toLowerCase()) < 0) return false;
       return true;
     });
     var pg = paginate(list, state.poolPage); state.poolPage = pg.page;
     body.innerHTML = list.length ? pg.items.map(function (a) {
-      var s = statusInfo(a.status), total = Number(a.quotaLimit || 0), remain = Number(a.quotaRemaining || 0);
+      var s = statusInfo(effectiveStatus(a)), total = Number(a.quotaLimit || 0), remain = Number(a.quotaRemaining || 0);
       var pct = total > 0 ? Math.max(0, Math.min(100, (remain / total) * 100)) : 0;
       var color = pct < 20 ? 'var(--danger)' : pct < 50 ? 'var(--warning)' : 'var(--accent)';
       return '<tr><td><input type="checkbox"></td><td><div class="flex items-center gap-3"><span class="dot '+s.dot+'"></span><div><div class="font-mono font-semibold">'+esc(a.email)+'</div><div class="text-[11px]" style="color:var(--muted)">ID '+a.id+'</div></div></div></td><td><span class="tag tag-gray">'+esc(sourceName(a.source))+'</span></td><td><span class="tag '+s.tag+'">'+s.label+'</span></td><td>'+esc(a.plan || 'FREE_USER')+'</td><td><div class="w-32"><div class="flex items-center justify-between text-[11px] mb-1"><span class="font-mono">'+fmt(remain)+' / '+fmt(total)+'</span><span class="font-mono" style="color:'+color+'">'+(total ? pct.toFixed(1)+'%' : '-')+'</span></div><div class="progress" style="height:4px"><div class="progress-fill" style="width:'+pct+'%;background:'+color+'"></div></div></div></td><td class="font-mono">'+fmt(todayCalls(a.id))+'</td><td class="text-[12px]" style="color:var(--fg-2)">'+fmtDate(a.quotaCycleEnd)+'</td><td><div class="flex items-center gap-1"><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px" onclick="testAccount('+a.id+')">测试</button><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px" onclick="refreshAccountQuota('+a.id+')">刷新额度</button><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px" onclick="toggleAccount('+a.id+','+(!a.enabled)+')">'+(a.enabled?'停用':'启用')+'</button><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px;color:var(--danger)" onclick="deleteAccount('+a.id+')">删除</button></div></td></tr>';
     }).join('') : '<tr><td colspan="9" style="text-align:center;padding:40px;color:var(--muted)">'+(state.accounts.length ? '没有匹配的账号' : '暂无账号，请点击"添加账号"或通过"导入"上传 account.json')+'</td></tr>';
     var counts = { active:0, exhausted:0, error:0, disabled:0 };
-    state.accounts.forEach(function (a) { if (!a.enabled) counts.disabled++; else if (counts[a.status] !== undefined) counts[a.status]++; });
+    state.accounts.forEach(function (a) { var st = effectiveStatus(a); if (counts[st] !== undefined) counts[st]++; });
     var rings = document.querySelectorAll('#page-pools .ring-stat .value');
     if (rings[0]) rings[0].textContent = counts.active; if (rings[1]) rings[1].textContent = counts.exhausted; if (rings[2]) rings[2].textContent = counts.error; if (rings[3]) rings[3].textContent = counts.disabled;
+    var poolTotal = state.accounts.length;
+    ['active', 'exhausted', 'error', 'disabled'].forEach(function (k) {
+      var el = document.querySelector('#page-pools [data-pool-big="' + k + '"]');
+      if (el) el.textContent = poolTotal ? Math.round(counts[k] / poolTotal * 100) + '%' : '0%';
+    });
     var cnt = document.getElementById('poolCount');
     if (cnt) cnt.textContent = '共 ' + pg.total + ' 条' + (pg.pages > 1 ? ' · 第 ' + pg.page + '/' + pg.pages + ' 页' : '');
     var pager = document.getElementById('poolPager');
