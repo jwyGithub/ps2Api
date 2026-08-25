@@ -115,6 +115,9 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 			r.Pool.Done(acc.ID)
 		}
 		r.persistQuota(acc, res)
+		// 依据上游 usageState 同步账号健康：BLOCKED 视为账号异常(error)并停用，AVAILABLE 恢复正常(active)并启用。
+		// 与「刷新额度」路径一致。额度是否耗尽是另一回事，只看余量(remaining==0)，见下方 QuotaExhausted 分支。
+		r.applyUsageState(acc, res)
 		r.logAttempt(acc, req.Model, res, started, req.Endpoint)
 		if res.Success {
 			provider.Trace(ctx, "router.success", plan.trace(map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID}, acc, true))
@@ -184,8 +187,21 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 			r.alertRequestRejected(acc, res)
 			return nil, nil, &RouteError{Message: res.Error}
 		}
+		if res.Usage != nil && res.Usage.UsageState == "BLOCKED" {
+			// 实时聊天收到 BLOCKED：账号被网关封锁，属账号异常而非额度用尽。上面的 applyUsageState
+			// 已把账号标记为 error 并停用（从选号池摘除）；这里排除该账号并立即切到下一个账号 failover。
+			// 该分支必须先于下面的 QuotaExhausted，避免余量恰好算到 0 时被覆盖成 exhausted。
+			excluded[acc.ID] = true
+			provider.Trace(ctx, "router.account_blocked", plan.trace(map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "error": res.Error}, acc, false))
+			if e, done := abort(); done {
+				return nil, nil, e
+			}
+			continue
+		}
 		if res.QuotaExhausted {
 			excluded[acc.ID] = true
+			// 额度耗尽（余量算到 0）标记为 exhausted 并落额度告警：额度问题而非账号故障，不停用，
+			// 等额度周期重置后经探测自然恢复。（BLOCKED 的停用由上面的 applyUsageState 另行处理。）
 			r.Pool.MarkExhausted(acc.ID)
 			if e, done := abort(); done {
 				return nil, nil, e

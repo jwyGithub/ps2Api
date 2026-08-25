@@ -21,6 +21,9 @@ type settingDef struct {
 	Default     string   `json:"default"`
 	Description string   `json:"description"`
 	Options     []string `json:"options,omitempty"` // select 类型的可选值
+	// Group 标记该项所属的独立页面分组。为空时在「系统设置-网关配置」表单里渲染；
+	// 值为 "proxy" 的项由独立的「代理出口」菜单页管理，不在通用设置表单中出现。
+	Group string `json:"group,omitempty"`
 }
 
 // settingDefs 是面板可配置项的白名单。前端按此渲染表单，PUT 只接受这些键。
@@ -34,8 +37,9 @@ var settingDefs = []settingDef{
 	{Key: "alert_quota", Label: "额度告警阈值", Type: "number", Default: "0.2", Description: "账号剩余额度低于总配额该比例（0~1）时触发告警"},
 	{Key: "log_retention", Label: "日志页展示条数", Type: "number", Default: "100", Description: "实时日志与部分聚合最多展示的最近日志条数"},
 	{Key: "cache_probe_enabled", Label: "缓存探针（影子度量）", Type: "bool", Default: "false", Description: "只度量不改返回：记录可缓存请求指纹，用真实流量测潜在命中率。长期开启会让探针表增长，测完可关"},
-	{Key: "proxy_enabled", Label: "启用出口代理", Type: "bool", Default: "false", Description: "开启后上游请求经代理池出站，遇 Cloudflare 403 重试时自动轮换出口 IP；仅对纯源 IP 限速有效"},
-	{Key: "proxy_urls", Label: "代理出口列表", Type: "text", Default: "", Description: "换行或逗号分隔的代理 URL，支持 http/https/socks5，如 socks5://127.0.0.1:1080、http://user:pass@host:port。同一账号默认粘同一出口，403 才换下一个，全部试完回退直连"},
+	{Key: "proxy_enabled", Label: "启用出口代理", Type: "bool", Default: "false", Group: "proxy", Description: "开启后所有发往上游的请求都经代理池出站（不再直连），遇 Cloudflare 403 重试时自动轮换出口 IP；仅对纯源 IP 限速有效"},
+	{Key: "proxy_urls", Label: "代理出口列表", Type: "text", Default: "", Group: "proxy", Description: "换行或逗号分隔的代理 URL，支持 http/https/socks5，如 socks5://127.0.0.1:1080、http://user:pass@host:port。同一账号默认粘同一出口，403 才换下一个出口 IP 轮换"},
+	{Key: "proxy_fallback_direct", Label: "代理全挂兜底直连", Type: "bool", Default: "false", Group: "proxy", Description: "开启后，当出口代理不可达（拨号/CONNECT 失败）时改用本机直连重试一次而非直接失败；关闭则严格只走代理（代理全挂即请求失败）。默认关闭"},
 }
 
 func defaultSettings() map[string]string {
@@ -102,7 +106,9 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, 400, "unknown setting key: "+k, "invalid_request")
 			return
 		}
-		if v == "" {
+		// 代理出口列表允许被清空（用户删除所有出口后应真正落库为空、回退直连）；
+		// 其它设置项保留「空值跳过」语义，避免误把未随表单提交的项清掉。
+		if v == "" && k != "proxy_urls" {
 			continue
 		}
 		if err := s.Store.SetSetting(k, v); err != nil {
@@ -138,6 +144,28 @@ func (s *Server) proxyCheck(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	results := s.Router.Provider.CheckProxies(ctx, []string{raw})
 	jsonWrite(w, 200, map[string]interface{}{"results": results})
+}
+
+// proxyTest 对单个代理做详细测试：连通上游 + 耗时，并额外经该代理查询出口公网 IP
+// 与归属地（地区码/省/市/运营商）。请求体 {"url":"socks5://..."}。供代理页单条「测试」按钮调用。
+func (s *Server) proxyTest(w http.ResponseWriter, r *http.Request) {
+	if !s.auth(w, r) {
+		return
+	}
+	var q struct {
+		URL string `json:"url"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&q)
+	raw := strings.TrimSpace(q.URL)
+	if raw == "" {
+		jsonError(w, 400, "缺少代理 URL", "invalid_request")
+		return
+	}
+	// 连通性 + 出口地理各 10s，留足余量。
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	result := s.Router.Provider.CheckProxyDetail(ctx, raw)
+	jsonWrite(w, 200, map[string]interface{}{"result": result})
 }
 
 // ─── 统计分析聚合 ───────────────────────────────────────────────

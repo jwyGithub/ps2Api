@@ -81,14 +81,22 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 	ctx, cancel := context.WithTimeout(ctx, RequestTimeout)
 	defer cancel()
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.chatURL(tokens), strings.NewReader(string(bodyBytes)))
+	// newReq 每次构造一个全新的出站请求（body reader 一经 Do 即被消费，兜底重试需重建）。
+	newReq := func() (*http.Request, error) {
+		r, e := http.NewRequestWithContext(ctx, "POST", p.chatURL(tokens), strings.NewReader(string(bodyBytes)))
+		if e != nil {
+			return nil, e
+		}
+		r.Header = p.buildHeaders(tokens)
+		return r, nil
+	}
+	httpReq, err := newReq()
 	if err != nil {
 		res.Error = err.Error()
 		return err
 	}
-	httpReq.Header = p.buildHeaders(tokens)
 	// 出口选择：默认按账号粘性走同一代理出口；遇 Cloudflare 403 重试（EgressAttempt 递增）
-	// 切下一个出口 IP；未配置代理或所有出口都试过后回退本机直连。
+	// 切下一个出口 IP；仅当未配置任何代理时才回退本机直连（启用即全量走代理）。
 	client, egress, viaProxy := p.proxies.selectFor(acc.ID, req.EgressAttempt)
 	if !viaProxy {
 		client, egress = p.Client, "direct"
@@ -100,6 +108,20 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 	})
 
 	resp, err := client.Do(httpReq)
+	// 代理全挂兜底直连：仅当经代理出站、传输层失败（ctx.Err()==nil，即拨号/CONNECT 失败而非
+	// 上游超时或客户端断开）且开关开启时，改用本机直连重试一次。此处失败发生在流式响应开始前，
+	// 尚未 emit 任何数据，故重试安全。开关关闭则维持严格代理（代理全挂即失败）。
+	if err != nil && viaProxy && ctx.Err() == nil && p.proxies.fallbackDirectEnabled() {
+		Trace(ctx, "upstream.proxy.fallback_direct", map[string]interface{}{
+			"account_id": acc.ID, "egress": egress, "error": err.Error(),
+		})
+		if r, e := newReq(); e == nil {
+			httpReq = r
+			client, egress, viaProxy = p.Client, "direct", false
+			p.applyCookies(acc.ID, httpReq, egress)
+			resp, err = client.Do(httpReq)
+		}
+	}
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			res.Error = "Upstream timeout"

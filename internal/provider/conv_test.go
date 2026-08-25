@@ -255,26 +255,56 @@ func TestToolResultReplaysCompleteHistoryWithoutPendingConversation(t *testing.T
 	if input["conversationId"] != nil {
 		t.Fatalf("tool result must not reuse pending conversation: %#v", input["conversationId"])
 	}
-	seed := input["seedingMessages"].([]map[string]string)[0]["content"]
-	if !strings.Contains(seed, "[Assistant Tool Call id=call_1 name=shell]") || !strings.Contains(input["query"].(string), "file contents") {
-		t.Fatalf("incomplete replay: seed=%q query=%q", seed, input["query"])
+	// 冷启动/未命中会话：历史折叠进单条 query（不再走 seedingMessages）。
+	query := input["query"].(string)
+	if _, hasSeed := input["seedingMessages"]; hasSeed {
+		t.Fatalf("seedingMessages must not be used anymore: %#v", input["seedingMessages"])
+	}
+	if !strings.Contains(query, "[Assistant Tool Call id=call_1 name=shell]") || !strings.Contains(query, "file contents") {
+		t.Fatalf("incomplete replay in folded query: %q", query)
 	}
 }
 
-func TestBuildBodyTruncatesOversizedSeedContext(t *testing.T) {
+func TestBuildBodyCapsOversizedQueryToUpstreamLimit(t *testing.T) {
 	p := New()
 	body := p.buildBody(&ChatRequest{Messages: []ChatMessage{
-		mustMsg(t, "system", "HEAD"+strings.Repeat("x", MaxQueryLen*5)+"TAIL"),
+		mustMsg(t, "system", "HEAD"+strings.Repeat("x", 50000)+"TAIL"),
 		mustMsg(t, "user", "hello"),
 	}}, &Tokens{PostmanSID: "sid", UserID: "u", WorkspaceID: "w", WorkspaceSubdomain: "sub"}, "test", 1)
 	input := body["input"].(map[string]interface{})
-	seed := input["seedingMessages"].([]map[string]string)[0]["content"]
-	if len(seed) > MaxQueryLen || !strings.Contains(seed, "HEAD") || !strings.Contains(seed, "TAIL") || !strings.Contains(seed, "context truncated") {
-		t.Fatalf("oversized seed was not safely bounded: len=%d", len(seed))
+	if _, hasSeed := input["seedingMessages"]; hasSeed {
+		t.Fatalf("seedingMessages must not be used anymore")
+	}
+	// 上游对 input.query 有 10000 字符硬校验（实测），超限请求会被
+	// INPUT_VALIDATION_ERROR 拒收。封顶必须保头（系统提示）保尾（最新一轮）。
+	query := input["query"].(string)
+	if n := len([]rune(query)); n > MaxUpstreamQueryRunes {
+		t.Fatalf("query exceeds upstream limit: %d > %d", n, MaxUpstreamQueryRunes)
+	}
+	if !strings.Contains(query, "HEAD") || !strings.Contains(query, "hello") {
+		t.Fatalf("capped query lost head or latest turn: %q...", query[:80])
+	}
+	if !strings.Contains(query, "middle context omitted") {
+		t.Fatalf("capped query missing omission marker")
 	}
 }
 
-func TestBuildBodyOmitsHistoricalToolPayloadsFromSeed(t *testing.T) {
+func TestCapUpstreamQueryKeepsShortQueriesIntact(t *testing.T) {
+	q := strings.Repeat("字", 9000)
+	if got := capUpstreamQuery(q); got != q {
+		t.Fatalf("short query must pass through unchanged")
+	}
+	long := "HEAD" + strings.Repeat("中", 20000) + "TAIL"
+	got := capUpstreamQuery(long)
+	if n := len([]rune(got)); n > MaxUpstreamQueryRunes {
+		t.Fatalf("capped query still oversized: %d runes", n)
+	}
+	if !strings.HasPrefix(got, "HEAD") || !strings.HasSuffix(got, "TAIL") {
+		t.Fatalf("cap must keep head and tail")
+	}
+}
+
+func TestBuildBodyOmitsHistoricalToolPayloadsFromFoldedQuery(t *testing.T) {
 	p := New()
 	body := p.buildBody(&ChatRequest{Messages: []ChatMessage{
 		mustMsg(t, "user", "start"),
@@ -282,9 +312,9 @@ func TestBuildBodyOmitsHistoricalToolPayloadsFromSeed(t *testing.T) {
 		{Role: "tool", ToolCallID: "call_1", Content: rawText(t, "sensitive command output")},
 		mustMsg(t, "user", "continue"),
 	}}, &Tokens{PostmanSID: "sid", UserID: "u", WorkspaceID: "w", WorkspaceSubdomain: "sub"}, "test", 1)
-	seed := body["input"].(map[string]interface{})["seedingMessages"].([]map[string]string)[0]["content"]
-	if strings.Contains(seed, "sensitive command output") || strings.Contains(seed, "cat secrets") || !strings.Contains(seed, "Previous tool result omitted") {
-		t.Fatalf("historical tool payload leaked into seed: %q", seed)
+	query := body["input"].(map[string]interface{})["query"].(string)
+	if strings.Contains(query, "sensitive command output") || strings.Contains(query, "cat secrets") || !strings.Contains(query, "Previous tool result omitted") {
+		t.Fatalf("historical tool payload leaked into folded query: %q", query)
 	}
 }
 

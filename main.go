@@ -58,7 +58,7 @@ func logging(next http.Handler) http.Handler {
 		dur := time.Since(started).Milliseconds()
 		// 带上 trace_id 前缀，和链路日志（[<trace_id>] ...）对齐，一眼定位完整调用链。
 		prefix := ""
-		if tid := rec.Header().Get("X-Postman2API-Trace-ID"); tid != "" {
+		if tid := rec.Header().Get("X-PS2API-Trace-ID"); tid != "" {
 			if len(tid) > 8 {
 				tid = tid[:8]
 			}

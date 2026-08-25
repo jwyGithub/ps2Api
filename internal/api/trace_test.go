@@ -19,7 +19,7 @@ func TestTraceChatConnectsRequestAndResponse(t *testing.T) {
 	request := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"test"}`))
 	response := httptest.NewRecorder()
 	handler(response, request)
-	traceID := response.Header().Get("X-Postman2API-Trace-ID")
+	traceID := response.Header().Get("X-PS2API-Trace-ID")
 	if response.Code != 200 || traceID == "" {
 		t.Fatalf("response status=%d trace_id=%q", response.Code, traceID)
 	}

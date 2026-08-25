@@ -253,23 +253,8 @@ func injectToolProtocol(query string, tools []interface{}) string {
 		return query
 	}
 	const separator = "\n\nUser request:\n"
-	combined := proto + separator + query
-	if len(combined) <= MaxQueryLen {
-		return combined
-	}
-	queryBudget := MaxQueryLen / 2
-	if len(query) < queryBudget {
-		queryBudget = len(query)
-	}
-	q := strings.ToValidUTF8(query[len(query)-queryBudget:], "")
-	protoBudget := MaxQueryLen - len(separator) - len(q)
-	if len(proto) > protoBudget {
-		proto = proto[:protoBudget]
-		if end := strings.LastIndexByte(proto, '\n'); end > 0 {
-			proto = proto[:end]
-		}
-	}
-	return proto + separator + q
+	// 不做长度截断：上游接受很大的单轮 query，截断协议或用户请求都会造成信息丢失。
+	return proto + separator + query
 }
 
 func normalizeToolJSON(raw string) (string, bool) {

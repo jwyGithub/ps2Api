@@ -34,7 +34,7 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 
 	input := map[string]interface{}{
 		"chatType":     "USER_QUERY",
-		"query":        split.Query,
+		"query":        capUpstreamQuery(split.Query),
 		"toolResponse": "",
 		"useCase":      nil,
 		"agent":        nil,
@@ -43,9 +43,6 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 		input["conversationId"] = convID
 	} else {
 		input["conversationId"] = nil
-	}
-	if convID == "" && split.SeedingMessages != nil {
-		input["seedingMessages"] = split.SeedingMessages
 	}
 
 	var body map[string]interface{}
@@ -115,7 +112,6 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 		input["toolResponses"] = nativeResponse.responses
 		delete(input, "toolResponse")
 		delete(input, "agent")
-		delete(input, "seedingMessages")
 	}
 
 	return body

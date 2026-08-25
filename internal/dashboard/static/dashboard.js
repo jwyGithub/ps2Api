@@ -52,11 +52,14 @@
   }
 
   function bootstrapDashboard() {
-    var names = ['fragments/topnav.html', 'fragments/sidebar.html', 'fragments/page-overview.html', 'fragments/page-stats.html', 'fragments/page-pools.html', 'fragments/page-quota.html', 'fragments/page-routing.html', 'fragments/page-alerts.html', 'fragments/page-settings.html', 'fragments/drawer.html'];
+    var names = ['fragments/topnav.html', 'fragments/sidebar.html', 'fragments/page-overview.html', 'fragments/page-stats.html', 'fragments/page-pools.html', 'fragments/page-quota.html', 'fragments/page-routing.html', 'fragments/page-alerts.html', 'fragments/page-settings.html', 'fragments/page-proxies.html', 'fragments/drawer.html'];
     return Promise.all(names.map(loadFragment)).then(function (parts) {
       var app = document.getElementById('dashboard-app');
       if (!app) return;
-      app.innerHTML = parts[0] + '<div class="pt-16 flex">' + parts[1] + '<main class="ml-60 flex-1 min-h-[calc(100vh-4rem)]">' + parts.slice(2, 10).join('\n') + '</main></div>' + parts[10];
+      // parts[0]=topnav, [1]=sidebar, [2..N-2]=页面片段, 末位=drawer（放在 main 外）。
+      var drawer = parts[parts.length - 1];
+      var pages = parts.slice(2, parts.length - 1).join('\n');
+      app.innerHTML = parts[0] + '<div class="pt-16 flex">' + parts[1] + '<main class="ml-60 flex-1 min-h-[calc(100vh-4rem)]">' + pages + '</main></div>' + drawer;
     });
   }
 
@@ -143,11 +146,12 @@
     state.page = page;
     document.querySelectorAll('.page').forEach(function (el) { el.classList.toggle('active', el.id === 'page-' + page); });
     document.querySelectorAll('.sidebar-item[data-page]').forEach(function (el) { el.classList.toggle('active', el.dataset.page === page); });
-    var names = { overview:'概览', stats:'统计分析', pools:'号池 & 额度', routing:'路由策略', alerts:'告警中心', settings:'系统设置' };
+    var names = { overview:'概览', stats:'统计分析', pools:'号池 & 额度', routing:'路由策略', proxies:'代理出口', alerts:'告警中心', settings:'系统设置' };
     setText('#crumb', names[page] || page);
     if (page === 'pools') { renderPoolsReal(); renderQuotaReal(); }
     if (page === 'alerts') renderAlertsReal();
     if (page === 'routing') renderRoutingReal();
+    if (page === 'proxies') renderProxiesReal();
     if (page === 'settings') renderSettingsReal();
     refreshCurrentPage();
   };
@@ -195,6 +199,7 @@
       pools: ['accounts', 'analytics'],
       quota: ['accounts', 'analytics', 'settings', 'alerts'],
       routing: ['settings'],
+      proxies: ['settings'],
       alerts: ['alerts'],
       settings: ['settings']
     };
@@ -205,7 +210,7 @@
   function renderAll() {
     renderRealData(); renderStatsReal(); renderChartsReal(); renderTopAccounts();
     renderPoolsReal(); renderQuotaReal(); renderAlertsReal();
-    renderRoutingReal(); renderSettingsReal(); renderOverviewActivity(); renderSidebarBadges();
+    renderRoutingReal(); renderSettingsReal(); renderProxiesReal(); renderOverviewActivity(); renderSidebarBadges();
     renderCacheProbeReal();
   }
 
@@ -251,7 +256,7 @@
       var s = statusInfo(a.status), total = Number(a.quotaLimit || 0), remain = Number(a.quotaRemaining || 0);
       var pct = total > 0 ? Math.max(0, Math.min(100, (remain / total) * 100)) : 0;
       var color = pct < 20 ? 'var(--danger)' : pct < 50 ? 'var(--warning)' : 'var(--accent)';
-      return '<tr><td><input type="checkbox"></td><td><div class="flex items-center gap-3"><span class="dot '+s.dot+'"></span><div><div class="font-mono font-semibold">'+esc(a.email)+'</div><div class="text-[11px]" style="color:var(--muted)">ID '+a.id+'</div></div></div></td><td><span class="tag tag-gray">'+esc(sourceName(a.source))+'</span></td><td><span class="tag '+s.tag+'">'+s.label+'</span></td><td>'+esc(a.plan || 'FREE_USER')+'</td><td><div class="w-32"><div class="flex items-center justify-between text-[11px] mb-1"><span class="font-mono">'+fmt(remain)+' / '+fmt(total)+'</span><span class="font-mono" style="color:'+color+'">'+(total ? pct.toFixed(1)+'%' : '-')+'</span></div><div class="progress" style="height:4px"><div class="progress-fill" style="width:'+pct+'%;background:'+color+'"></div></div></div></td><td class="font-mono">'+fmt(todayCalls(a.id))+'</td><td class="text-[12px]" style="color:var(--fg-2)">'+fmtDate(a.quotaCycleEnd)+'</td><td><div class="flex items-center gap-1"><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px" onclick="refreshAccountQuota('+a.id+')">刷新额度</button><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px" onclick="toggleAccount('+a.id+','+(!a.enabled)+')">'+(a.enabled?'停用':'启用')+'</button><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px;color:var(--danger)" onclick="deleteAccount('+a.id+')">删除</button></div></td></tr>';
+      return '<tr><td><input type="checkbox"></td><td><div class="flex items-center gap-3"><span class="dot '+s.dot+'"></span><div><div class="font-mono font-semibold">'+esc(a.email)+'</div><div class="text-[11px]" style="color:var(--muted)">ID '+a.id+'</div></div></div></td><td><span class="tag tag-gray">'+esc(sourceName(a.source))+'</span></td><td><span class="tag '+s.tag+'">'+s.label+'</span></td><td>'+esc(a.plan || 'FREE_USER')+'</td><td><div class="w-32"><div class="flex items-center justify-between text-[11px] mb-1"><span class="font-mono">'+fmt(remain)+' / '+fmt(total)+'</span><span class="font-mono" style="color:'+color+'">'+(total ? pct.toFixed(1)+'%' : '-')+'</span></div><div class="progress" style="height:4px"><div class="progress-fill" style="width:'+pct+'%;background:'+color+'"></div></div></div></td><td class="font-mono">'+fmt(todayCalls(a.id))+'</td><td class="text-[12px]" style="color:var(--fg-2)">'+fmtDate(a.quotaCycleEnd)+'</td><td><div class="flex items-center gap-1"><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px" onclick="testAccount('+a.id+')">测试</button><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px" onclick="refreshAccountQuota('+a.id+')">刷新额度</button><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px" onclick="toggleAccount('+a.id+','+(!a.enabled)+')">'+(a.enabled?'停用':'启用')+'</button><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px;color:var(--danger)" onclick="deleteAccount('+a.id+')">删除</button></div></td></tr>';
     }).join('') : '<tr><td colspan="9" style="text-align:center;padding:40px;color:var(--muted)">'+(state.accounts.length ? '没有匹配的账号' : '暂无账号，请点击"添加账号"或通过"导入"上传 account.json')+'</td></tr>';
     var counts = { active:0, exhausted:0, error:0, disabled:0 };
     state.accounts.forEach(function (a) { if (!a.enabled) counts.disabled++; else if (counts[a.status] !== undefined) counts[a.status]++; });
@@ -456,7 +461,8 @@
     if (auth && document.activeElement !== auth) auth.value = state.apiKey || '';
     var form = document.getElementById('settingsForm');
     if (form) {
-      form.innerHTML = state.settingsDefs.map(function (d) {
+      // 代理相关项（group=proxy）已迁移到独立的「代理出口」菜单，通用设置表单不再渲染。
+      form.innerHTML = state.settingsDefs.filter(function (d) { return d.group !== 'proxy'; }).map(function (d) {
         var val = state.settings[d.key] != null ? state.settings[d.key] : d.default;
         var input;
         if (d.type === 'bool') {
@@ -469,7 +475,7 @@
           input = '<input class="input font-mono" data-key="'+d.key+'" value="'+esc(val)+'" style="max-width:220px">';
         }
         return '<div class="flex items-center justify-between p-3 rounded-lg" style="background:var(--bg)"><div><div class="text-[13px] font-semibold">'+esc(d.label)+'</div><div class="text-[12px] mt-0.5" style="color:var(--fg-2)">'+esc(d.description)+'</div></div>'+input+'</div>';
-      }).join('') + '<div class="pt-2 flex items-center gap-2"><button class="btn btn-primary" onclick="saveSettings()">保存配置</button><button class="btn" onclick="checkProxy()">检测代理</button></div><div id="proxyCheckResult" class="text-[12px] mt-2" style="color:var(--fg-2)"></div>';
+      }).join('') + '<div class="pt-2 flex items-center gap-2"><button class="btn btn-primary" onclick="saveSettings()">保存配置</button></div>';
     }
   }
 
@@ -648,21 +654,187 @@
     });
     api('/api/settings', {method:'PUT', body:JSON.stringify({settings:payload})}).then(function(){toast('配置已保存并生效');return loadAll();}).catch(function(e){toast(e.message);});
   };
-  // checkProxy 检测代理出口连通性：读取当前输入框里的代理列表（可含未保存改动），
-  // 逐个探测能否连上上游网关并测耗时，结果直接展示在设置页。
-  window.checkProxy = function () {
-    var box = document.getElementById('proxyCheckResult');
-    var input = document.querySelector('#settingsForm [data-key="proxy_urls"]');
-    var urls = input ? input.value : '';
-    if (box) box.innerHTML = '检测中…';
-    api('/api/proxy-check', {method:'POST', body:JSON.stringify({urls:urls})}).then(function(data){
-      var rows = (data.results || []).map(function(r){
-        var color = r.ok ? 'var(--ok, #16a34a)' : 'var(--err, #dc2626)';
-        var status = r.ok ? ('连通 · ' + r.latencyMs + 'ms') : ('失败 · ' + (r.error || '未知错误'));
-        return '<div style="color:'+color+'">'+esc(r.url)+' — '+esc(status)+'</div>';
-      }).join('');
-      if (box) box.innerHTML = rows || '无检测结果';
-    }).catch(function(e){ if (box) box.innerHTML = '<span style="color:var(--err,#dc2626)">'+esc(e.message)+'</span>'; });
+  // ─── 代理出口（独立页面）──────────────────────────────────────
+  // parseProxyList 把配置串按换行/逗号/分号/空白拆成去重列表（与后端 parseProxyURLs 对齐）。
+  function parseProxyList(raw) {
+    var out = [], seen = {};
+    String(raw || '').split(/[\s,;]+/).forEach(function (s) {
+      s = s.trim();
+      if (s && !seen[s]) { seen[s] = true; out.push(s); }
+    });
+    return out;
+  }
+  // proxyResultCells 渲染一行的「状态/延迟/出口IP/地区/运营商」5 个单元格。
+  function proxyResultCells(t) {
+    var muted = 'style="color:var(--muted)"';
+    if (!t) {
+      return '<td class="py-2 pr-3" ' + muted + '>未测试</td><td class="py-2 pr-3" ' + muted + '>-</td><td class="py-2 pr-3" ' + muted + '>-</td><td class="py-2 pr-3" ' + muted + '>-</td><td class="py-2 pr-3" ' + muted + '>-</td>';
+    }
+    if (t.loading) {
+      return '<td class="py-2 pr-3" style="color:var(--fg-2)">测试中…</td><td class="py-2 pr-3">-</td><td class="py-2 pr-3">-</td><td class="py-2 pr-3">-</td><td class="py-2 pr-3">-</td>';
+    }
+    var r = t.result || {};
+    var statusHtml = r.ok ? '<span class="tag tag-green">连通' + (r.status ? ' · ' + r.status : '') + '</span>' : '<span class="tag tag-red">失败</span>';
+    var errNote = (!r.ok && r.error) ? '<div class="text-[11px] mt-0.5" style="color:var(--err,#dc2626)">' + esc(r.error) + '</div>' : '';
+    var geoNote = (r.ok && !r.egressIp && r.geoError) ? '<div class="text-[11px] mt-0.5" ' + muted + '>出口信息不可用</div>' : '';
+    var region = [r.countryCode, r.region, r.city].filter(Boolean).join(' · ') || '-';
+    return '<td class="py-2 pr-3">' + statusHtml + errNote + '</td>' +
+           '<td class="py-2 pr-3 font-mono">' + esc(r.ok ? fmtMs(r.latencyMs) : '-') + '</td>' +
+           '<td class="py-2 pr-3 font-mono">' + esc(r.egressIp || '-') + geoNote + '</td>' +
+           '<td class="py-2 pr-3">' + esc(region) + '</td>' +
+           '<td class="py-2 pr-3" style="max-width:180px;word-break:break-all">' + esc(r.org || '-') + '</td>';
+  }
+  function renderProxiesReal() {
+    var settings = state.settings || {};
+    var toggle = document.getElementById('proxyEnabledToggle');
+    if (toggle) toggle.checked = settings['proxy_enabled'] === 'true';
+    var fallbackToggle = document.getElementById('proxyFallbackToggle');
+    if (fallbackToggle) fallbackToggle.checked = settings['proxy_fallback_direct'] === 'true';
+    var body = document.getElementById('proxyListRows');
+    if (!body) return;
+    var list = parseProxyList(settings['proxy_urls']);
+    var empty = document.getElementById('proxyListEmpty');
+    var cnt = document.getElementById('proxyRowsCount');
+    if (cnt) cnt.textContent = list.length ? ('共 ' + list.length + ' 个出口') : '';
+    if (empty) empty.style.display = list.length ? 'none' : 'block';
+    state.proxyTests = state.proxyTests || {};
+    body.innerHTML = list.map(function (url, i) {
+      return '<tr style="border-bottom:1px solid var(--border)">' +
+        '<td class="py-2 pr-3 font-mono text-[12px]" style="max-width:260px;word-break:break-all">' + esc(url) + '</td>' +
+        proxyResultCells(state.proxyTests[url]) +
+        '<td class="py-2 pr-3 text-right" style="white-space:nowrap">' +
+          '<button class="btn" style="padding:4px 12px;font-size:12px" onclick="testProxy(' + i + ')">测试</button> ' +
+          '<button class="btn btn-ghost" style="padding:4px 12px;font-size:12px" onclick="removeProxy(' + i + ')">删除</button>' +
+        '</td>' +
+      '</tr>';
+    }).join('');
+  }
+  // ─── 添加出口抽屉 ─────────────────────────────────────────────
+  function proxyDrawerValues() {
+    var type = (document.getElementById('proxyType') || {}).value || 'socks5';
+    var host = ((document.getElementById('proxyHost') || {}).value || '').trim();
+    var port = ((document.getElementById('proxyPort') || {}).value || '').trim();
+    var user = ((document.getElementById('proxyUser') || {}).value || '').trim();
+    var pass = ((document.getElementById('proxyPass') || {}).value || '').trim();
+    return { type: type, host: host, port: port, user: user, pass: pass };
+  }
+  // buildProxyURL 由表单字段拼出标准代理串，如 socks5://user:pass@host:port。
+  function buildProxyURL(v) {
+    var auth = v.user ? (encodeURIComponent(v.user) + (v.pass ? ':' + encodeURIComponent(v.pass) : '') + '@') : '';
+    return v.type + '://' + auth + v.host + (v.port ? ':' + v.port : '');
+  }
+  function updateProxyPreview() {
+    var el = document.getElementById('proxyPreview');
+    if (el) {
+      var v = proxyDrawerValues();
+      el.textContent = buildProxyURL({ type: v.type, host: v.host || 'host', port: v.port || 'port', user: v.user, pass: v.pass ? '***' : '' });
+    }
+    // 表单一改动，之前的测试结果就作废
+    var res = document.getElementById('proxyDraftResult');
+    if (res) { res.style.display = 'none'; res.innerHTML = ''; }
+  }
+  // validatedProxyURL 校验抽屉表单并返回代理串；不合法时 toast 并返回 ''。
+  function validatedProxyURL() {
+    var v = proxyDrawerValues();
+    if (!v.host) { toast('请填写主机'); return ''; }
+    if (!v.port || !/^\d+$/.test(v.port) || +v.port < 1 || +v.port > 65535) { toast('端口需为 1-65535 的数字'); return ''; }
+    if (v.pass && !v.user) { toast('填了密码就需要填用户名'); return ''; }
+    return buildProxyURL(v);
+  }
+  // renderDraftResult 把一次测试结果渲染到抽屉内的结果区。
+  function renderDraftResult(state2) {
+    var box = document.getElementById('proxyDraftResult');
+    if (!box) return;
+    box.style.display = 'block';
+    if (state2.loading) { box.innerHTML = '<span style="color:var(--fg-2)">测试中…</span>'; return; }
+    var r = state2.result || {};
+    if (r.ok) {
+      var region = [r.countryCode, r.region, r.city].filter(Boolean).join(' · ') || '-';
+      box.innerHTML = '<span class="tag tag-green">连通' + (r.status ? ' · ' + r.status : '') + '</span>' +
+        '<div class="mt-1.5 font-mono">延迟 ' + esc(fmtMs(r.latencyMs)) + ' · 出口 ' + esc(r.egressIp || '-') + '</div>' +
+        '<div class="mt-0.5" style="color:var(--fg-2)">' + esc(region) + (r.org ? ' · ' + esc(r.org) : '') + '</div>' +
+        (!r.egressIp && r.geoError ? '<div class="mt-0.5" style="color:var(--muted)">出口信息不可用</div>' : '');
+    } else {
+      box.innerHTML = '<span class="tag tag-red">失败</span>' +
+        (r.error ? '<div class="mt-1" style="color:var(--err,#dc2626)">' + esc(r.error) + '</div>' : '');
+    }
+  }
+  window.openProxyDrawer = function () {
+    var d = document.getElementById('proxyDrawer'); if (!d) return;
+    ['proxyHost', 'proxyPort', 'proxyUser', 'proxyPass'].forEach(function (id) { var e = document.getElementById(id); if (e) e.value = ''; });
+    var t = document.getElementById('proxyType'); if (t) t.value = 'socks5';
+    ['proxyType', 'proxyHost', 'proxyPort', 'proxyUser', 'proxyPass'].forEach(function (id) {
+      var e = document.getElementById(id); if (e) { e.oninput = updateProxyPreview; e.onchange = updateProxyPreview; }
+    });
+    updateProxyPreview();
+    d.classList.add('show');
+    document.getElementById('proxyDrawerBackdrop').classList.add('show');
+    var h = document.getElementById('proxyHost'); if (h) h.focus();
+  };
+  window.closeProxyDrawer = function () {
+    var d = document.getElementById('proxyDrawer');
+    var b = document.getElementById('proxyDrawerBackdrop');
+    if (d) d.classList.remove('show');
+    if (b) b.classList.remove('show');
+  };
+  window.submitProxy = function () {
+    var url = validatedProxyURL();
+    if (!url) return;
+    var list = parseProxyList((state.settings || {})['proxy_urls']);
+    if (list.indexOf(url) !== -1) { toast('该出口已存在'); return; }
+    list.push(url);
+    api('/api/settings', { method: 'PUT', body: JSON.stringify({ settings: { proxy_urls: list.join('\n') } }) })
+      .then(function () { closeProxyDrawer(); toast('出口已添加并生效'); return loadAll(); })
+      .catch(function (e) { toast(e.message); });
+  };
+  // testProxyDraft 在添加前，用表单当前值实测一次连通性与出口信息。
+  window.testProxyDraft = function () {
+    var url = validatedProxyURL();
+    if (!url) return;
+    var btn = document.getElementById('proxyDraftTestBtn');
+    if (btn) btn.disabled = true;
+    renderDraftResult({ loading: true });
+    return api('/api/proxy-test', { method: 'POST', body: JSON.stringify({ url: url }) })
+      .then(function (data) { renderDraftResult({ result: data.result || {} }); })
+      .catch(function (e) { renderDraftResult({ result: { ok: false, error: e.message } }); })
+      .then(function () { if (btn) btn.disabled = false; });
+  };
+  window.removeProxy = function (i) {
+    var list = parseProxyList((state.settings || {})['proxy_urls']);
+    var url = list[i];
+    if (!url) return;
+    if (!confirm('删除出口 ' + url + '？')) return;
+    list.splice(i, 1);
+    api('/api/settings', { method: 'PUT', body: JSON.stringify({ settings: { proxy_urls: list.join('\n') } }) })
+      .then(function () { toast('出口已删除'); if (state.proxyTests) delete state.proxyTests[url]; return loadAll(); })
+      .catch(function (e) { toast(e.message); });
+  };
+  // testProxy 对第 i 个（已保存的）出口做详细测试，返回连通性 + 出口 IP/地区。
+  window.testProxy = function (i) {
+    var list = parseProxyList((state.settings || {})['proxy_urls']);
+    var url = list[i];
+    if (!url) return;
+    state.proxyTests = state.proxyTests || {};
+    state.proxyTests[url] = { loading: true };
+    renderProxiesReal();
+    return api('/api/proxy-test', { method: 'POST', body: JSON.stringify({ url: url }) })
+      .then(function (data) { state.proxyTests[url] = { result: data.result || {} }; renderProxiesReal(); })
+      .catch(function (e) { state.proxyTests[url] = { result: { ok: false, error: e.message } }; renderProxiesReal(); });
+  };
+  window.testAllProxies = function () {
+    var list = parseProxyList((state.settings || {})['proxy_urls']);
+    if (!list.length) { toast('尚未配置任何出口代理'); return; }
+    list.forEach(function (_, i) { testProxy(i); });
+  };
+  window.toggleProxyEnabled = function (on) {
+    api('/api/settings', { method: 'PUT', body: JSON.stringify({ settings: { proxy_enabled: on ? 'true' : 'false' } }) })
+      .then(function () { toast(on ? '出口代理已启用' : '出口代理已关闭'); return refreshCurrentPage(); })
+      .catch(function (e) { toast(e.message); });
+  };
+  window.toggleProxyFallbackDirect = function (on) {
+    api('/api/settings', { method: 'PUT', body: JSON.stringify({ settings: { proxy_fallback_direct: on ? 'true' : 'false' } }) })
+      .then(function () { toast(on ? '代理全挂兜底直连已开启' : '已关闭兜底直连（严格只走代理）'); return refreshCurrentPage(); })
+      .catch(function (e) { toast(e.message); });
   };
   window.saveRouting = function () {
     var retry = document.getElementById('routingRetry');
@@ -696,6 +868,148 @@
       loadAll().then(function () { toast(msg); });
     }).catch(function (e) { toast('探测失败：' + e.message); });
   };
+  // ─── 账号连通性测试（直连 / 网关，完整现场）────────────────
+  window.testAccount = function (id) {
+    var acc = state.accounts.filter(function (a) { return a.id === id; })[0];
+    var who = acc ? acc.email : ('#' + id);
+    var old = document.getElementById('acctTestOverlay'); if (old) old.remove();
+    var ov = document.createElement('div');
+    ov.id = 'acctTestOverlay';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55);padding:24px';
+    ov.onclick = function (e) { if (e.target === ov) window.closeAccountTest(); };
+    ov.innerHTML =
+      '<div class="card" style="width:min(900px,96vw);max-height:90vh;display:flex;flex-direction:column;overflow:hidden">' +
+        '<div class="flex items-center justify-between p-5" style="border-bottom:1px solid var(--border)">' +
+          '<div><div class="text-[11px] uppercase tracking-wider" style="color:var(--muted)">连通性测试</div>' +
+          '<h2 class="font-display text-[20px] font-medium">' + esc(who) + ' <span class="text-[12px]" style="color:var(--muted)">ID ' + id + '</span></h2></div>' +
+          '<button class="icon-btn" onclick="closeAccountTest()">✕</button>' +
+        '</div>' +
+        '<div class="p-5" style="border-bottom:1px solid var(--border)">' +
+          '<div class="flex items-end gap-2 flex-wrap">' +
+            '<div style="min-width:150px">' +
+              '<label class="text-[12px] font-semibold block mb-1.5">模型</label>' +
+              '<select id="acctTestModel" class="input">' + acctTestModelOptions() + '</select>' +
+            '</div>' +
+            '<div style="flex:1;min-width:220px">' +
+              '<label class="text-[12px] font-semibold block mb-1.5">用户输入（可编辑）</label>' +
+              '<input id="acctTestPrompt" class="input" value="如何使用curl发起请求" placeholder="如何使用curl发起请求">' +
+            '</div>' +
+            '<button class="btn btn-primary" id="acctTestDirect" onclick="runAccountTest(' + id + ',&#39;direct&#39;)">直连测试</button>' +
+            '<button class="btn btn-ghost" id="acctTestGateway" onclick="runAccountTest(' + id + ',&#39;gateway&#39;)">代理测试</button>' +
+            '<button class="btn btn-ghost" id="acctTestService" onclick="runAccountTest(' + id + ',&#39;service&#39;)">网关测试</button>' +
+          '</div>' +
+          '<div id="acctTestStatus" class="text-[12px] mt-2" style="color:var(--muted)">选择一种模式发起测试</div>' +
+        '</div>' +
+        '<div class="flex-1 overflow-y-auto p-5" id="acctTestResult"><div class="text-[13px]" style="color:var(--muted)">直连测试：绕过出口代理，直接请求上游 Postman（针对本账号）。<br>代理测试：走网关真实出站路径（按账号粘性选代理出口；未配置代理即本机直连）。<br>网关测试：回环调用本服务对外端点（claude→/v1/messages，其它→/v1/responses），带面板 API Key 走完整网关链路，端到端验证整条服务。<br>测试会真实消耗极少量额度；完整请求/响应现场会写入服务端测试日志文件，便于排查。</div></div>' +
+      '</div>';
+    document.body.appendChild(ov);
+  };
+  window.closeAccountTest = function () { var o = document.getElementById('acctTestOverlay'); if (o) o.remove(); };
+  // 测试可选模型（对外名，与后端 PostmanModelMap 对齐）；默认 claude-opus-4-8。
+  function acctTestModelOptions() {
+    var models = ['claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-opus-4-5', 'claude-sonnet-4-6', 'claude-sonnet-4-5', 'claude-haiku-4-5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.2', 'auto'];
+    return models.map(function (m) {
+      return '<option value="' + m + '"' + (m === 'claude-opus-4-8' ? ' selected' : '') + '>' + esc(m) + '</option>';
+    }).join('');
+  }
+  window.runAccountTest = function (id, mode) {
+    var status = document.getElementById('acctTestStatus');
+    var out = document.getElementById('acctTestResult');
+    var bd = document.getElementById('acctTestDirect'), bg = document.getElementById('acctTestGateway'), bs = document.getElementById('acctTestService');
+    // 每次测试开始前，禁用全部按钮并清空上一轮结果。
+    if (bd) bd.disabled = true; if (bg) bg.disabled = true; if (bs) bs.disabled = true;
+    var label = mode === 'direct' ? '直连' : (mode === 'service' ? '网关' : '代理');
+    var promptEl = document.getElementById('acctTestPrompt');
+    var prompt = promptEl ? promptEl.value : '';
+    var modelEl = document.getElementById('acctTestModel');
+    var model = modelEl ? modelEl.value : '';
+    if (status) status.textContent = label + '测试中…（SSE 实时输出，最长约 60s）';
+    // 初始化结果区骨架：meta（请求现场）待填 + 响应体实时区（逐行追加）+ done（响应头/概览）待填。
+    if (out) out.innerHTML =
+      '<div id="acctTestMeta"></div>' +
+      '<div class="mb-4"><div class="text-[11px] uppercase tracking-wider mb-1" style="color:var(--muted)">响应内容（响应体 · SSE 逐行）</div>' +
+      '<pre id="acctTestRespBody" style="white-space:pre-wrap;word-break:break-all;background:var(--bg-2,rgba(127,127,127,.08));border:1px solid var(--border);border-radius:8px;padding:10px;font-size:11.5px;max-height:340px;overflow:auto;margin:0"></pre></div>' +
+      '<div id="acctTestDone"></div>';
+    var respPre = function () { return document.getElementById('acctTestRespBody'); };
+
+    fetch('/api/accounts/' + id + '/test', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + key(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: mode, model: model, prompt: prompt })
+    }).then(function (resp) {
+      if (!resp.ok || !resp.body) {
+        return resp.text().then(function (t) { throw new Error('HTTP ' + resp.status + ' ' + t); });
+      }
+      var reader = resp.body.getReader();
+      var dec = new TextDecoder();
+      var buf = '';
+      function pump() {
+        return reader.read().then(function (r) {
+          if (r.done) {
+            if (buf.trim()) { try { handleAcctTestEvent(JSON.parse(buf), label); } catch (e) {} }
+            return;
+          }
+          buf += dec.decode(r.value, { stream: true });
+          var idx;
+          while ((idx = buf.indexOf('\n')) >= 0) {
+            var chunk = buf.slice(0, idx); buf = buf.slice(idx + 1);
+            if (chunk.trim()) { try { handleAcctTestEvent(JSON.parse(chunk), label); } catch (e) {} }
+          }
+          return pump();
+        });
+      }
+      return pump();
+    }).catch(function (e) {
+      if (status) status.textContent = '❌ 测试请求失败：' + e.message;
+    }).finally(function () {
+      if (bd) bd.disabled = false; if (bg) bg.disabled = false; if (bs) bs.disabled = false;
+    });
+
+    // 处理单条 NDJSON 事件：meta（请求现场）/ line（响应体逐行）/ done（收尾）。
+    function handleAcctTestEvent(ev, label) {
+      if (!ev || !ev.type) return;
+      if (ev.type === 'meta') {
+        var m = ev.meta || {};
+        var metaEl = document.getElementById('acctTestMeta');
+        if (metaEl) metaEl.innerHTML =
+          acctTestBlock('请求地址', esc((m.method || 'POST') + ' ' + (m.url || ''))) +
+          acctTestBlock('请求头', acctTestHeaderText(m.requestHeaders)) +
+          acctTestBlock('请求参数（请求体）', esc(m.requestBody || ''));
+      } else if (ev.type === 'line') {
+        var pre = respPre();
+        if (pre) { pre.textContent += ev.line + '\n'; pre.scrollTop = pre.scrollHeight; }
+      } else if (ev.type === 'done') {
+        if (ev.error && !ev.result) {
+          if (status) status.textContent = '❌ ' + ev.error;
+          return;
+        }
+        var r = ev.result || {};
+        if (status) status.textContent = (r.ok ? '✅ ' : '❌ ') + label + '测试完成 · 状态码 ' + (r.status || 0) + ' · ' + (r.durationMs || 0) + ' ms';
+        var doneEl = document.getElementById('acctTestDone');
+        var overview = '模式: ' + esc(r.mode || '') + '   出口: ' + esc(r.egress || '-') + '   状态码: ' + (r.status || 0) + '   耗时: ' + (r.durationMs || 0) + ' ms' + (r.error ? ('\n错误: ' + esc(r.error)) : '');
+        if (doneEl) doneEl.innerHTML =
+          acctTestBlock('概览', overview) +
+          (r.logFile ? acctTestBlock('测试日志文件（服务端本地）', esc(r.logFile)) : '') +
+          acctTestBlock('响应头', acctTestHeaderText(r.responseHeaders));
+        // 兜底：若逐行区为空（例如无换行的错误页），用完整响应体补上。
+        var pre = respPre();
+        if (pre && !pre.textContent && r.responseBody) pre.textContent = r.responseBody;
+      }
+    }
+  };
+  function acctTestBlock(title, content) {
+    return '<div class="mb-4"><div class="text-[11px] uppercase tracking-wider mb-1" style="color:var(--muted)">' + title + '</div>' +
+      '<pre style="white-space:pre-wrap;word-break:break-all;background:var(--bg-2,rgba(127,127,127,.08));border:1px solid var(--border);border-radius:8px;padding:10px;font-size:11.5px;max-height:260px;overflow:auto;margin:0">' + content + '</pre></div>';
+  }
+  function acctTestHeaderText(h) {
+    if (!h) return '(无)';
+    var keys = Object.keys(h).sort();
+    if (!keys.length) return '(无)';
+    return keys.map(function (k) {
+      return (h[k] || []).map(function (v) { return esc(k) + ': ' + esc(v); }).join('\n');
+    }).join('\n');
+  }
+
   window.refreshAccountQuota = function (id) {
     var acc = state.accounts.filter(function (a) { return a.id === id; })[0];
     var who = acc ? acc.email : ('#' + id);
@@ -741,7 +1055,7 @@
     }
   });
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') closeDrawer();
+    if (e.key === 'Escape') { closeDrawer(); closeProxyDrawer(); }
   });
 
   function startDashboard() {

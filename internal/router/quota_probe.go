@@ -4,17 +4,21 @@ import (
 	"context"
 	"sync"
 
+	"ps2api/internal/provider"
 	"ps2api/internal/store"
 )
 
 // ProbeResult 单个账号额度探测的结果。
 type ProbeResult struct {
-	AccountID int64   `json:"accountId"`
-	Email     string  `json:"email"`
-	OK        bool    `json:"ok"`
-	Limit     float64 `json:"limit"`
-	Remaining float64 `json:"remaining"`
-	Error     string  `json:"error,omitempty"`
+	AccountID int64             `json:"accountId"`
+	Email     string            `json:"email"`
+	OK        bool              `json:"ok"`
+	Limit     float64           `json:"limit"`
+	Remaining float64           `json:"remaining"`
+	Error     string            `json:"error,omitempty"`
+	// Detail 仅在单账号探测时填充，携带上游返回的完整原始结果（内容、usage、错误状态等），
+	// 供「刷新额度」按钮的调用方展示完整响应现场；批量探测时为 nil 以节省内存。
+	Detail    *provider.Result  `json:"detail,omitempty"`
 }
 
 // probeConcurrency 额度探测的并发数。
@@ -47,7 +51,7 @@ func (r *Router) ProbeQuotas(ctx context.Context) []ProbeResult {
 		go func(acc *store.Account) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			pr := r.probeAccountQuota(ctx, acc)
+			pr := r.probeAccountQuota(ctx, acc, false)
 			mu.Lock()
 			out = append(out, pr)
 			mu.Unlock()
@@ -75,7 +79,7 @@ func (r *Router) ProbeAccountsByIDs(ctx context.Context, ids []int64) []ProbeRes
 		go func(acc *store.Account) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			pr := r.probeAccountQuota(ctx, acc)
+			pr := r.probeAccountQuota(ctx, acc, false)
 			mu.Lock()
 			out = append(out, pr)
 			mu.Unlock()
@@ -87,12 +91,16 @@ func (r *Router) ProbeAccountsByIDs(ctx context.Context, ids []int64) []ProbeRes
 
 // probeAccountQuota 对单个账号执行一次探测并写库，返回逐账号结果。
 // ProbeQuotas（批量）与 ProbeAccountQuota（单账号）共用此逻辑。
-func (r *Router) probeAccountQuota(ctx context.Context, acc *store.Account) ProbeResult {
+// withDetail 为 true 时将上游原始结果填入 ProbeResult.Detail，供单账号接口透传给前端。
+func (r *Router) probeAccountQuota(ctx context.Context, acc *store.Account, withDetail bool) ProbeResult {
 	pr := ProbeResult{AccountID: acc.ID, Email: acc.Email}
 	res := r.Provider.ProbeQuota(ctx, acc)
 	// 限流头可能在没有 usage 对象的响应中返回，也要先落库。
 	if res != nil {
 		r.persistQuota(acc, res)
+		// 依据网关返回的 usageState 同步账号健康：BLOCKED 视为账号异常（error）并停用，
+		// AVAILABLE 视为恢复正常并启用。其它状态（如无 usage）不动账号。
+		r.applyUsageState(acc, res)
 	}
 	if res != nil && res.Usage != nil && res.Usage.Limit > 0 {
 		remaining := res.Usage.Limit - res.Usage.Usage - res.Usage.Overage
@@ -107,15 +115,52 @@ func (r *Router) probeAccountQuota(ctx context.Context, acc *store.Account) Prob
 	} else {
 		pr.Error = "no usage returned"
 	}
+	if withDetail {
+		pr.Detail = res
+	}
 	return pr
 }
 
 // ProbeAccountQuota 对指定 ID 的单个账号发起一次额度探测并写库，
-// 供号池页每行「刷新额度」按钮调用。账号不存在时返回错误。
+// 供号池页每行「刷新额度」按钮调用。返回结果中携带完整的上游原始响应（Detail 字段）。
+// 账号不存在时返回错误。
 func (r *Router) ProbeAccountQuota(ctx context.Context, id int64) (ProbeResult, error) {
 	acc, err := r.Store.GetAccount(id)
 	if err != nil {
 		return ProbeResult{}, err
 	}
-	return r.probeAccountQuota(ctx, acc), nil
+	return r.probeAccountQuota(ctx, acc, true), nil
+}
+
+// applyUsageState 依据上游网关返回的 usage.usageState 同步账号的健康状态与启用开关：
+//   - BLOCKED：账号被网关封锁，属账号异常（而非单纯额度用尽），故标记为 error 并停用
+//     （enabled=false），从选号池中摘除；待再次探测到 AVAILABLE 时自动恢复。注意这与「额度
+//     耗尽」是两回事——额度是否耗尽只看余量（remaining==0），由 persistQuota/QuotaExhausted
+//     分支据实际用量判定，不因 usageState 字面值而混淆。
+//   - AVAILABLE：额度可用，账号恢复正常（status=active，清空错误信息）并启用（enabled=true），
+//     供此前被停用的账号在再次探测通过后自动恢复。
+//
+// 其它状态或无 usage 时不改动账号，避免误判。仅在 usageState 明确变化时才写库。
+func (r *Router) applyUsageState(acc *store.Account, res *provider.Result) {
+	if res == nil || res.Usage == nil {
+		return
+	}
+	switch res.Usage.UsageState {
+	case "BLOCKED":
+		// BLOCKED = 账号被网关封锁的异常状态，须停用（不是额度用尽）：标记 error 并 disable，
+		// 从选号池摘除；额度是否耗尽由余量单独判定，二者互不干扰。
+		if acc.Status != "error" {
+			_ = r.Store.SetAccountStatus(acc.ID, "error", "usage state BLOCKED: account blocked by gateway")
+		}
+		if acc.Enabled {
+			_ = r.Store.SetAccountEnabled(acc.ID, false)
+		}
+	case "AVAILABLE":
+		if acc.Status != "active" {
+			_ = r.Store.SetAccountStatus(acc.ID, "active", "")
+		}
+		if !acc.Enabled {
+			_ = r.Store.SetAccountEnabled(acc.ID, true)
+		}
+	}
 }

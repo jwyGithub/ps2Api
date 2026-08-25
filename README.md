@@ -160,7 +160,7 @@ curl http://127.0.0.1:1930/v1/messages \
 
 > 控制台链路日志默认开启（`GATEWAY_LOG_LEVEL=debug`）：每个请求都会生成贯穿全链路的 `trace_id`，入口访问日志行与各链路事件行都以 `[<短trace_id>]` 前缀对齐，`body`/`headers`/`content`/`messages` 只打字节数，其它值截断，不含对话正文。需要降噪时可调高级别（如 `warn`）或设 `off` 关闭。
 >
-> 深追踪文件（`GATEWAY_TRACE_LOG=1`）默认关闭，含完整请求 / 响应正文与工具结果；开启后 `Authorization`、`Cookie`、密码、API Key、access token、会话 token 会自动脱敏，排查后应关闭并妥善处理。响应头 `X-Postman2API-Trace-ID` 对应该次请求的深追踪文件名。
+> 深追踪文件（`GATEWAY_TRACE_LOG=1`）默认关闭，含完整请求 / 响应正文与工具结果；开启后 `Authorization`、`Cookie`、密码、API Key、access token、会话 token 会自动脱敏，排查后应关闭并妥善处理。响应头 `X-PS2API-Trace-ID` 对应该次请求的深追踪文件名。
 
 ### 链路排错
 

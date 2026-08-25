@@ -202,6 +202,76 @@ func (s *Server) refreshAccountQuota(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonWrite(w, 200, map[string]interface{}{"ok": ok, "failed": failed, "result": pr})
 }
+
+// testAccount 对单个账号发起一次连通性测试并完整留档（请求地址/头/体 + 响应状态/头/体）。
+// 模式来自 query 或 body 的 mode：direct（直连上游，绕过代理）/ gateway（走网关真实出站）。
+// 无论测试成功与否都返回 200，结果里的 ok/error 表达测试结论；仅账号不存在时返回 404。
+func (s *Server) testAccount(w http.ResponseWriter, r *http.Request) {
+	if !s.auth(w, r) {
+		return
+	}
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	var q struct {
+		Mode   string `json:"mode"`
+		Model  string `json:"model"`
+		Prompt string `json:"prompt"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&q)
+	modeStr := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mode")))
+	if modeStr == "" {
+		modeStr = strings.ToLower(strings.TrimSpace(q.Mode))
+	}
+	mode := provider.AccountTestMode(modeStr)
+	if mode != provider.TestModeDirect && mode != provider.TestModeGateway && mode != provider.TestModeService {
+		mode = provider.TestModeDirect
+	}
+	// 测试需等待上游 SSE 自然收尾（ProbeTimeout=60s），给 handler ctx 留足余量。
+	ctx, cancel := context.WithTimeout(r.Context(), provider.ProbeTimeout+10*time.Second)
+	defer cancel()
+
+	// 以 NDJSON 流式返回：每行一个 JSON 事件（meta / line / done），前端用 fetch reader
+	// 逐行解析，实现请求现场先行展示、上游 SSE 响应体逐行实时追加。
+	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(200)
+	flusher, _ := w.(http.Flusher)
+	enc := json.NewEncoder(w)
+	emit := func(v interface{}) {
+		_ = enc.Encode(v)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	onMeta := func(meta *provider.AccountTestResult) {
+		emit(map[string]interface{}{"type": "meta", "meta": meta})
+	}
+	onLine := func(line string) {
+		emit(map[string]interface{}{"type": "line", "line": line})
+	}
+
+	// service（前端「网关测试」）：回环调用本服务对外端点，带面板 API Key，走完整网关链路。
+	// baseURL 取自当前请求的 Host（即用户正访问的本服务地址），API Key 从 settings 读取。
+	if mode == provider.TestModeService {
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		baseURL := scheme + "://" + r.Host
+		result := s.Router.Provider.StreamServiceTest(ctx, baseURL, s.apiKey(), q.Model, q.Prompt, onMeta, onLine)
+		emit(map[string]interface{}{"type": "done", "result": result})
+		return
+	}
+
+	result, err := s.Router.StreamTestAccount(ctx, id, mode, q.Model, q.Prompt, onMeta, onLine)
+	if err != nil {
+		// 账号不存在等错误：流已开启（200），只能通过 done 事件回传错误。
+		emit(map[string]interface{}{"type": "done", "error": err.Error()})
+		return
+	}
+	emit(map[string]interface{}{"type": "done", "result": result})
+}
+
 func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
 	if !s.auth(w, r) {
 		return

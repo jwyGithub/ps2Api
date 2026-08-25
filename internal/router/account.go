@@ -6,12 +6,11 @@ import (
 	"ps2api/internal/store"
 )
 
-// usableForSticky 判断账号能否承接「会话粘性 / 钉账号」的回落，比号池选号刻意更宽松：
-// 允许 status=="error"。续聊的 Postman 服务端会话只存在于这一个账号上，换号必然丢上下文
-// （降级为无历史的 USER_QUERY），所以宁可在原号上重试到失败，也不要静默换号交付一个失忆的
-// 答案。而 status 会被 Pool.MarkError 因「与账号无关的上游错误」误写成 error——若这里跟着
-// 号池一样只认 active，粘性就会被自己打断，故障便从一个账号扩散成一片。
-// "exhausted"（额度已确定为 0）除外：那种号发出去必然拿不到结果，只能换号。
+// usableForSticky 判断账号能否承接「会话粘性 / 钉账号」的回落：要求账号已启用，且额度
+// 未耗尽（status!="exhausted"）。续聊的 Postman 服务端会话只存在于这一个账号上，换号会丢
+// 上下文（降级为无历史的 USER_QUERY），故优先固定在原账号上——即便该号上次是普通异常
+// （status=="error"）也宁可原号退避重试，也不要静默换号交付「失忆」答案。唯有额度确定耗尽
+// （exhausted）才放弃粘性：那种号发出去必然拿不到结果，继续钉住只会重试到失败，须回退号池。
 func usableForSticky(acc *store.Account, err error) bool {
 	return err == nil && acc != nil && acc.Enabled && acc.Status != "exhausted"
 }

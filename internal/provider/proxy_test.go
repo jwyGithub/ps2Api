@@ -59,9 +59,15 @@ func TestProxyPoolStickyAndRotateOnAttempt(t *testing.T) {
 		t.Fatalf("egress must rotate across attempts: %q %q %q", e0a, e1, e2)
 	}
 
-	// attempt >= N（所有出口都试过）→ 回退直连。
-	if _, _, ok := pp.selectFor(7, 3); ok {
-		t.Fatal("egressAttempt >= N must fall back to direct (ok=false)")
+	// 启用出口代理后每次出站都必须经代理：attempt >= N 时按出口数环回到有效出口，
+	// 而非回退本机直连——保证「开启即全量走代理」。此处 (stickyBase(7)+3)%3 == (7+0)%3，
+	// 因此 attempt 3 环回到 attempt 0 的同一出口。
+	_, e3, ok := pp.selectFor(7, 3)
+	if !ok {
+		t.Fatal("egressAttempt >= N must still select a proxy (wrap), never fall back to direct")
+	}
+	if e3 != e0a {
+		t.Fatalf("egressAttempt >= N must wrap to a valid egress: got %q want %q", e3, e0a)
 	}
 }
 

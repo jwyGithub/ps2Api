@@ -7,8 +7,7 @@ import (
 )
 
 type splitResult struct {
-	Query           string
-	SeedingMessages []map[string]string
+	Query string
 }
 
 func toolTail(messages []ChatMessage) bool {
@@ -93,11 +92,7 @@ func (p *Provider) splitMessages(messages []ChatMessage, convID string) splitRes
 		}
 		block := strings.Join(parts, "\n\n")
 		instruction := "\n\nProcess these tool results and continue. If you need another tool, emit <tool_call> markup; otherwise answer the user."
-		budget := MaxQueryLen - len(instruction)
-		if len(block) > budget {
-			head := 256
-			block = block[:head] + "\n...[tool result truncated]...\n" + block[len(block)-(budget-head-32):]
-		}
+		// 工具结果不截断：Postman 接受很大的单轮 query，截断只会让模型拿到残缺的工具输出。
 		query = block + instruction
 	} else {
 		for i := len(messages) - 1; i >= 0; i-- {
@@ -106,21 +101,24 @@ func (p *Provider) splitMessages(messages []ChatMessage, convID string) splitRes
 				break
 			}
 		}
-		raw := ""
+		// 这里不做截断；上游 10000 字符硬上限由出站前的 capUpstreamQuery 统一兜底。
 		if queryIdx >= 0 {
-			raw = ExtractText(messages[queryIdx].Content)
+			query = ExtractText(messages[queryIdx].Content)
 		}
-		if len(raw) > MaxQueryLen {
-			raw = raw[len(raw)-MaxQueryLen:]
-		}
-		query = raw
 	}
 
 	if hasConv {
+		// 命中已有 Postman 会话：与网页版一致，只发新增的这一轮 query，
+		// 历史由服务端按 conversationId 保存。
 		return splitResult{Query: query}
 	}
 
-	// 首轮：把历史塞进 seedingMessages
+	// 未命中任何会话（冷启动/首轮/指纹未命中）：
+	// 绝不使用 seedingMessages —— 上游 Postman 会以 INPUT_VALIDATION_ERROR/Forbidden 拒收
+	// （已由网页/桌面全量抓包证实：真实客户端多轮只靠 conversationId，从不发 seedingMessages）。
+	// 改为把完整历史线性折叠进单条 USER_QUERY（conversationId=null）。折叠本身不截断；
+	// 上游 10000 字符硬上限由出站前的 capUpstreamQuery 统一兜底（保头保尾、省略中段）。
+	// 后续轮次靠稳定指纹命中 conversationId 后自动切回增量发送。
 	var contextParts []string
 	for i, msg := range messages {
 		if i == queryIdx || i >= skipFrom {
@@ -155,18 +153,30 @@ func (p *Provider) splitMessages(messages []ChatMessage, convID string) splitRes
 	if context == "" {
 		return splitResult{Query: query}
 	}
-	if len(context) > MaxQueryLen {
-		const marker = "\n...[conversation context truncated]...\n"
-		budget := MaxQueryLen - len(marker)
-		head := budget / 2
-		context = strings.ToValidUTF8(context[:head], "") + marker +
-			strings.ToValidUTF8(context[len(context)-(budget-head):], "")
+	// 折叠：历史在前，最新一轮在后。tool-tail 的 query 已是带指令的工具块，直接拼接；
+	// 普通对话把最新用户输入标注为 [User] 以保留角色边界。
+	tail := query
+	if !isToolTail && queryIdx >= 0 && query != "" {
+		tail = "[User]\n" + query
 	}
-	return splitResult{
-		Query: query,
-		SeedingMessages: []map[string]string{
-			{"role": "user", "content": context},
-			{"role": "assistant", "content": "I have the full conversation history above and will continue from where we left off."},
-		},
+	if tail != "" {
+		context = context + "\n\n" + tail
 	}
+	return splitResult{Query: context}
+}
+
+// capUpstreamQuery 把出站 query 压进上游 MaxUpstreamQueryRunes（10000 字符）校验上限。
+// 超限时保留开头（系统提示核心）与结尾（最新一轮输入，信息权重最高），省略中段并留标记。
+// 只改出站文本、不触碰 req.Messages，因此不影响会话指纹与账号粘性。
+func capUpstreamQuery(q string) string {
+	const marker = "\n\n...[middle context omitted: upstream limits query to 10000 chars]...\n\n"
+	// 留 100 字符余量，防止服务端计数口径（如换行/转义）与本地存在细微差异。
+	limit := MaxUpstreamQueryRunes - 100
+	runes := []rune(q)
+	if len(runes) <= limit {
+		return q
+	}
+	head := limit * 3 / 10
+	tailLen := limit - head - len([]rune(marker))
+	return string(runes[:head]) + marker + string(runes[len(runes)-tailLen:])
 }

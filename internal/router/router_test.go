@@ -283,7 +283,7 @@ func TestStreamAllAccountsBlockedReturnsClearError(t *testing.T) {
 	}
 }
 
-func TestStreamQuotaExhaustedSwitchesAccountBeforeOutput(t *testing.T) {
+func TestStreamBlockedAccountSwitchesAndDisablesBeforeOutput(t *testing.T) {
 	r := newTestRouter(t)
 	accounts, err := r.Store.ListAccounts()
 	if err != nil || len(accounts) != 2 {
@@ -319,9 +319,11 @@ func TestStreamQuotaExhaustedSwitchesAccountBeforeOutput(t *testing.T) {
 	if output.String() != "ok" {
 		t.Fatalf("client saw intermediate quota error: %q", output.String())
 	}
-	exhausted, err := r.Store.GetAccount(accounts[0].ID)
-	if err != nil || exhausted.Status != "exhausted" || exhausted.QuotaRemaining != 0 {
-		t.Fatalf("first account was not marked exhausted: %+v err=%v", exhausted, err)
+	// 实时聊天收到 BLOCKED：账号被网关封锁属账号异常，须标 error 并停用（从选号池摘除），
+	// 立即 failover 到下一个账号——而不是按额度耗尽（exhausted）处理，即使余量恰好算到 0。
+	blocked, err := r.Store.GetAccount(accounts[0].ID)
+	if err != nil || blocked.Status != "error" || blocked.Enabled {
+		t.Fatalf("first account was not marked error+disabled on BLOCKED: %+v err=%v", blocked, err)
 	}
 }
 

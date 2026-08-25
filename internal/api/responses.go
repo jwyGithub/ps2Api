@@ -110,22 +110,29 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	var rr ResponsesReq
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxChatBody)).Decode(&rr); err != nil {
-		jsonError(w, 400, err.Error(), "invalid_request")
+		openAIError(w, 400, err.Error(), "invalid_request_error")
 		return
 	}
 	if rr.Model == "" {
-		jsonError(w, 400, "model is required", "invalid_request")
+		openAIError(w, 400, "model is required", "invalid_request_error")
+		return
+	}
+	// 必须扫原始 rr.Input：responsesToOpenAI 走 extractResponsesText 只取 .text 字段，
+	// input_image / input_file 在转换那一步就被丢掉了，转成 ChatMessage 之后查不到。
+	if kind, ok := provider.UnsupportedMediaInJSON(rr.Input); ok {
+		provider.Trace(r.Context(), "client.unsupported_media", map[string]interface{}{"kind": kind})
+		openAIError(w, 400, unsupportedMediaMessage(kind), "invalid_request_error")
 		return
 	}
 	req := responsesToOpenAI(rr)
 	req.Endpoint = "openai"
 	if len(req.Messages) == 0 {
-		jsonError(w, 400, "input is required", "invalid_request")
+		openAIError(w, 400, "input is required", "invalid_request_error")
 		return
 	}
 	if name, ok := provider.UnsupportedToolResult(req.Messages); ok {
 		provider.Trace(r.Context(), "client.tool_loop_blocked", map[string]interface{}{"tool": name, "reason": "unsupported custom tool call"})
-		jsonError(w, 400, fmt.Sprintf("tool %q was not executed by the client; register a handler for this tool before retrying", name), "tool_execution_error")
+		openAIError(w, 400, fmt.Sprintf("tool %q was not executed by the client; register a handler for this tool before retrying", name), "invalid_request_error")
 		return
 	}
 	if rr.Stream {
@@ -134,7 +141,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	res, _, err := s.Router.Chat(r.Context(), &req)
 	if err != nil {
-		jsonError(w, 503, err.Error(), "provider_error")
+		openAIError(w, 503, err.Error(), "service_unavailable")
 		return
 	}
 	jsonWrite(w, 200, responsesObject(res, req.Model, "completed"))
@@ -245,7 +252,7 @@ func extractResponsesText(raw json.RawMessage) string {
 func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *provider.ChatRequest) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
-		jsonError(w, 500, "stream unsupported", "internal_error")
+		openAIError(w, 500, "stream unsupported", "server_error")
 		return
 	}
 	respID := newID("resp_")
@@ -404,9 +411,9 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *pr
 	}
 
 	if err != nil {
-		// 产出任何输出前就失败：还没开流，回退为干净的 HTTP 503 JSON 错误，调用方可明确停止任务。
+		// 产出任何输出前就失败：还没开流，回退为干净的 HTTP 错误，调用方可明确停止任务。
 		if !started {
-			jsonError(w, 503, err.Error(), "provider_error")
+			openAIError(w, 503, err.Error(), "service_unavailable")
 			return
 		}
 		// 已开流后失败：发 response.failed 作为终止事件，让流干净收尾。

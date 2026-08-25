@@ -182,7 +182,7 @@ func TestInjectToolProtocolKeepsUserRequestWithManyTools(t *testing.T) {
 	}
 	query := "请分析 employee/list 的组织数据关联"
 	out := injectToolProtocol(query, tools)
-	if len(out) > MaxQueryLen || !strings.Contains(out, "User request:\n"+query) || !strings.Contains(out, "tool_099(command*:string)") {
+	if !strings.Contains(out, "User request:\n"+query) || !strings.Contains(out, "tool_099(command*:string)") {
 		t.Fatalf("tool protocol lost the user request or tools: len=%d\n%s", len(out), out)
 	}
 }

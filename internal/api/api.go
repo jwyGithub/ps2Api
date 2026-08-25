@@ -8,7 +8,8 @@
 //   - accounts.go    账号 CRUD、导入导出、额度刷新
 //   - metrics.go     告警、设置、analytics、代理检查
 //   - ops.go         运维只读端点与面板静态资源
-//   - helpers.go     公共 helper（jsonWrite/jsonError/sse/...）
+//   - helpers.go     公共 helper（jsonWrite/sse/... 与协议专属错误体
+//     anthropicError/openAIError/protoError；jsonError 只给面板端点用）
 package api
 
 import (
@@ -50,12 +51,14 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/accounts/{id}", s.deleteAccount)
 	mux.HandleFunc("PATCH /api/accounts/{id}", s.toggleAccount)
 	mux.HandleFunc("POST /api/accounts/{id}/refresh-quota", s.refreshAccountQuota)
+	mux.HandleFunc("POST /api/accounts/{id}/test", s.testAccount)
 	mux.HandleFunc("POST /api/refresh-quota", s.refreshQuota)
 
 	// 管理类端点（/api/*）——设置、告警、analytics、代理检查（见 metrics.go）
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
 	mux.HandleFunc("POST /api/proxy-check", s.proxyCheck)
+	mux.HandleFunc("POST /api/proxy-test", s.proxyTest)
 	mux.HandleFunc("GET /api/analytics", s.analytics)
 	mux.HandleFunc("GET /api/alerts", s.alerts)
 	mux.HandleFunc("POST /api/alerts/{id}/resolve", s.resolveAlert)
@@ -84,7 +87,11 @@ func (s *Server) auth(w http.ResponseWriter, r *http.Request) bool {
 	if r.Header.Get("Authorization") == "Bearer "+key || r.Header.Get("x-api-key") == key {
 		return true
 	}
-	jsonError(w, 401, "Invalid API key", "invalid_api_key")
+	// 鉴权失败的错误体也要按调用方协议走：Anthropic 客户端期望 authentication_error，
+	// OpenAI 客户端期望 invalid_request_error + code:invalid_api_key。面板端点(/api/*)
+	// 不经过这里的协议分流也无妨——protoError 对非 /v1/messages 路径统一走 OpenAI 形状，
+	// 面板前端只读 error.message。
+	protoError(w, r, 401, "Invalid API key", "authentication_error", "invalid_request_error", "invalid_api_key")
 	return false
 }
 

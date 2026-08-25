@@ -29,12 +29,12 @@ func traceChat(next http.HandlerFunc) http.HandlerFunc {
 		body, err := io.ReadAll(io.LimitReader(r.Body, maxChatBody+1))
 		if err != nil {
 			provider.Trace(ctx, "client.request.error", map[string]interface{}{"error": err.Error()})
-			jsonError(w, 400, err.Error(), "invalid_request")
+			protoError(w, r, 400, err.Error(), "invalid_request_error", "invalid_request_error")
 			return
 		}
 		if len(body) > maxChatBody {
 			provider.Trace(ctx, "client.request.error", map[string]interface{}{"error": "request body too large", "bytes": len(body)})
-			jsonError(w, http.StatusRequestEntityTooLarge, "request body too large", "invalid_request")
+			protoError(w, r, http.StatusRequestEntityTooLarge, "request body too large", "request_too_large", "invalid_request_error")
 			return
 		}
 		var loggedBody interface{} = string(body)
@@ -43,7 +43,7 @@ func traceChat(next http.HandlerFunc) http.HandlerFunc {
 		}
 		r = r.WithContext(ctx)
 		r.Body = io.NopCloser(bytes.NewReader(body))
-		w.Header().Set("X-Postman2API-Trace-ID", traceID)
+		w.Header().Set("X-PS2API-Trace-ID", traceID)
 		provider.Trace(ctx, "client.request", map[string]interface{}{
 			"method": r.Method, "path": r.URL.RequestURI(), "remote_addr": r.RemoteAddr,
 			"headers": r.Header, "body": loggedBody,

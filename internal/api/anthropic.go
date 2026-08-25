@@ -33,18 +33,24 @@ func (s *Server) anthropic(w http.ResponseWriter, r *http.Request) {
 	}
 	var ar AnthropicReq
 	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<20)).Decode(&ar); err != nil {
-		jsonError(w, 400, err.Error(), "invalid_request_error")
+		anthropicError(w, 400, err.Error(), "invalid_request_error")
 		return
 	}
 	if ar.Model == "" || len(ar.Messages) == 0 {
-		jsonError(w, 400, "model and messages are required", "invalid_request_error")
+		anthropicError(w, 400, "model and messages are required", "invalid_request_error")
 		return
 	}
 	req := anthropicToOpenAI(ar)
 	req.Endpoint = "anthropic"
+	if kind, ok := provider.UnsupportedMediaContent(req.Messages); ok {
+		provider.Trace(r.Context(), "client.unsupported_media", map[string]interface{}{"kind": kind})
+		anthropicError(w, 400, unsupportedMediaMessage(kind), "invalid_request_error")
+		return
+	}
 	if name, ok := provider.UnsupportedToolResult(req.Messages); ok {
 		provider.Trace(r.Context(), "client.tool_loop_blocked", map[string]interface{}{"tool": name, "reason": "unsupported custom tool call"})
-		jsonError(w, 400, fmt.Sprintf("tool %q was not executed by the client; register a handler for this tool before retrying", name), "tool_execution_error")
+		// tool_execution_error 不在 Anthropic 的错误类型枚举内，用 invalid_request_error。
+		anthropicError(w, 400, fmt.Sprintf("tool %q was not executed by the client; register a handler for this tool before retrying", name), "invalid_request_error")
 		return
 	}
 	if ar.Stream {
@@ -54,7 +60,9 @@ func (s *Server) anthropic(w http.ResponseWriter, r *http.Request) {
 	}
 	res, _, err := s.Router.Chat(r.Context(), &req)
 	if err != nil {
-		jsonError(w, 503, err.Error(), "api_error")
+		// 529 overloaded_error 是 Anthropic 协议表达「上游暂时不可用」的标准方式；
+		// 503 不在其状态码枚举内(400/401/403/404/413/429/500/529)，客户端只能归为未知 5xx。
+		anthropicError(w, 529, err.Error(), "overloaded_error")
 		return
 	}
 	jsonWrite(w, 200, openAIToAnthropic(res, ar.Model))
@@ -177,7 +185,7 @@ func openAIToAnthropic(res *provider.Result, model string) map[string]interface{
 func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, req *provider.ChatRequest, ar AnthropicReq) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
-		jsonError(w, 500, "stream unsupported", "internal_error")
+		anthropicError(w, 500, "stream unsupported", "api_error")
 		return
 	}
 	id := newID("msg_")
@@ -221,7 +229,7 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, req *pr
 			textOpen = false
 		}
 	}
-	_, _, err := s.Router.Stream(r.Context(), req, func(d provider.Delta) error {
+	res, _, err := s.Router.Stream(r.Context(), req, func(d provider.Delta) error {
 		ensureStarted() // 首个增量到达才真正开流（提交 200 + message_start）
 		if d.ReasoningContent != "" {
 			closeText()
@@ -284,10 +292,15 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, req *pr
 		writeEvent("content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": toolIndexes[toolIndex]})
 	}
 	if err != nil {
-		// 已开流(发过 message_start/内容)后失败：补发 error + message_delta + message_stop，
-		// 让 SSE 流按 Anthropic 协议干净终止，避免终端等不到终止事件而永久挂起。
-		writeEvent("error", map[string]interface{}{"type": "error", "error": map[string]string{"type": "api_error", "message": err.Error()}})
-		writeEvent("message_delta", map[string]interface{}{"type": "message_delta", "delta": map[string]interface{}{"stop_reason": "error"}, "usage": map[string]int{"output_tokens": 0}})
+		// 已开流后失败：补发 error 事件让流按 Anthropic 协议干净终止。
+		// 认 error 事件的 SDK 会就地抛异常停止；随后的 message_stop 是给不认 error 的
+		// 客户端兜底，避免等不到终止事件而永久挂起。
+		//
+		// 这里刻意不发 message_delta：其 stop_reason 只能取自 Anthropic 的枚举
+		// (end_turn/max_tokens/stop_sequence/tool_use/pause_turn/refusal)，此前发的
+		// "error" 是枚举外的值，会让类型化 SDK 解析失败；而发 end_turn 又会谎报成功完成。
+		// 干脆省掉这一帧——error 事件已经把失败说清楚了。
+		writeEvent("error", map[string]interface{}{"type": "error", "error": map[string]string{"type": "overloaded_error", "message": err.Error()}})
 		writeEvent("message_stop", map[string]string{"type": "message_stop"})
 		return
 	}
@@ -295,6 +308,11 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, req *pr
 	if sawTools {
 		stop = "tool_use"
 	}
-	writeEvent("message_delta", map[string]interface{}{"type": "message_delta", "delta": map[string]string{"stop_reason": stop}, "usage": map[string]int{"output_tokens": 0}})
+	// output_tokens 取本次真实产出（此前硬编码 0，靠 usage 计费/展示的客户端会读到 0）。
+	outputTokens := 0
+	if res != nil {
+		outputTokens = res.CompletionTokens
+	}
+	writeEvent("message_delta", map[string]interface{}{"type": "message_delta", "delta": map[string]string{"stop_reason": stop}, "usage": map[string]int{"output_tokens": outputTokens}})
 	writeEvent("message_stop", map[string]string{"type": "message_stop"})
 }

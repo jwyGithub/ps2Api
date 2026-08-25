@@ -1,0 +1,114 @@
+<section class="page" id="page-proxies">
+    <div class="p-8">
+      <div class="flex items-end justify-between mb-8 gap-6 flex-wrap">
+        <div>
+          <div class="text-[11px] font-semibold tracking-wider uppercase mb-2" style="color: var(--muted);">Proxy Egress</div>
+          <h1 class="hero-title">代理 <em>出口</em></h1>
+          <p class="mt-2 text-[14px]" style="color: var(--fg-2);">管理出口代理池，逐个测试连通性与出口 IP / 归属地。</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <button class="btn" onclick="testAllProxies()">全部测试</button>
+          <button class="btn btn-primary" onclick="openProxyDrawer()">添加出口</button>
+        </div>
+      </div>
+
+      <div class="space-y-4">
+        <div class="card p-6">
+          <div class="flex items-center justify-between p-3 rounded-lg" style="background: var(--bg);">
+            <div>
+              <div class="text-[13px] font-semibold">启用出口代理</div>
+              <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">开启后上游请求经代理池出站，遇 Cloudflare 403 重试时自动轮换出口 IP；关闭则走本机直连</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="proxyEnabledToggle" onchange="toggleProxyEnabled(this.checked)"><div class="slider"></div></label>
+          </div>
+          <div class="flex items-center justify-between p-3 mt-3 rounded-lg" style="background: var(--bg);">
+            <div>
+              <div class="text-[13px] font-semibold">代理全挂兜底直连</div>
+              <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">开启后，出口代理不可达（拨号/CONNECT 失败）时改用本机直连重试一次而非直接失败；关闭则严格只走代理</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="proxyFallbackToggle" onchange="toggleProxyFallbackDirect(this.checked)"><div class="slider"></div></label>
+          </div>
+        </div>
+
+        <div class="card p-6">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="font-display text-[20px] font-medium">出口检测</h3>
+            <span class="text-[12px]" id="proxyRowsCount" style="color: var(--muted);"></span>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-[13px]" style="border-collapse:collapse">
+              <thead>
+                <tr class="text-left" style="color:var(--muted);border-bottom:1px solid var(--border)">
+                  <th class="py-2 pr-3 font-semibold">出口代理</th>
+                  <th class="py-2 pr-3 font-semibold">状态</th>
+                  <th class="py-2 pr-3 font-semibold">延迟</th>
+                  <th class="py-2 pr-3 font-semibold">出口 IP</th>
+                  <th class="py-2 pr-3 font-semibold">地区</th>
+                  <th class="py-2 pr-3 font-semibold">运营商</th>
+                  <th class="py-2 pr-3 font-semibold text-right">操作</th>
+                </tr>
+              </thead>
+              <tbody id="proxyListRows"></tbody>
+            </table>
+          </div>
+          <div id="proxyListEmpty" class="text-[13px] py-6 text-center" style="color:var(--muted);display:none">尚未配置任何出口代理，点击右上角「添加出口」。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 添加出口抽屉 -->
+    <div class="drawer-backdrop" id="proxyDrawerBackdrop" onclick="closeProxyDrawer()"></div>
+    <aside class="drawer" id="proxyDrawer">
+      <div class="flex items-center justify-between p-6" style="border-bottom: 1px solid var(--border);">
+        <div>
+          <div class="text-[11px] uppercase tracking-wider" style="color: var(--muted);">新建</div>
+          <h2 class="font-display text-[24px] font-medium">添加出口代理</h2>
+        </div>
+        <button class="icon-btn" onclick="closeProxyDrawer()">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="flex-1 overflow-y-auto p-6">
+        <div class="space-y-4">
+          <div>
+            <label class="text-[12.5px] font-semibold block mb-1.5">类型</label>
+            <select class="input select" id="proxyType">
+              <option value="socks5">SOCKS5</option>
+              <option value="http">HTTP</option>
+              <option value="https">HTTPS</option>
+            </select>
+          </div>
+          <div class="flex gap-3">
+            <div style="flex:1">
+              <label class="text-[12.5px] font-semibold block mb-1.5">主机</label>
+              <input class="input font-mono" id="proxyHost" placeholder="127.0.0.1 / host.example.com">
+            </div>
+            <div style="width:110px">
+              <label class="text-[12.5px] font-semibold block mb-1.5">端口</label>
+              <input class="input font-mono" id="proxyPort" placeholder="1080" inputmode="numeric">
+            </div>
+          </div>
+          <div class="flex gap-3">
+            <div style="flex:1">
+              <label class="text-[12.5px] font-semibold block mb-1.5">用户名 <span style="color:var(--muted);font-weight:400">（可选）</span></label>
+              <input class="input font-mono" id="proxyUser" placeholder="留空表示免认证">
+            </div>
+            <div style="flex:1">
+              <label class="text-[12.5px] font-semibold block mb-1.5">密码 <span style="color:var(--muted);font-weight:400">（可选）</span></label>
+              <input class="input font-mono" id="proxyPass" type="password" placeholder="留空表示免认证">
+            </div>
+          </div>
+          <div class="rounded-lg p-3 text-[12px]" style="background:var(--bg);color:var(--fg-2)">
+            预览：<span class="font-mono" id="proxyPreview" style="color:var(--fg);word-break:break-all">socks5://127.0.0.1:1080</span>
+          </div>
+          <div id="proxyDraftResult" class="rounded-lg p-3 text-[12px]" style="display:none;background:var(--bg)"></div>
+          <p class="text-[12px]" style="color: var(--muted);">同一账号默认粘同一出口，遇 403 才切换下一个，全部试完回退直连。凭据只写入服务端，不会回显。</p>
+        </div>
+      </div>
+      <div class="p-6 flex items-center gap-2" style="border-top: 1px solid var(--border);">
+        <button class="btn btn-ghost" onclick="closeProxyDrawer()">取消</button>
+        <button class="btn flex-1" id="proxyDraftTestBtn" onclick="testProxyDraft()">测试连通</button>
+        <button class="btn btn-primary flex-1" onclick="submitProxy()">添加</button>
+      </div>
+    </aside>
+  </section>

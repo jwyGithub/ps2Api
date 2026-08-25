@@ -17,16 +17,21 @@ func (s *Server) openAI(w http.ResponseWriter, r *http.Request) {
 	}
 	var req provider.ChatRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<20)).Decode(&req); err != nil {
-		jsonError(w, 400, err.Error(), "invalid_request")
+		openAIError(w, 400, err.Error(), "invalid_request_error")
 		return
 	}
 	if req.Model == "" || len(req.Messages) == 0 {
-		jsonError(w, 400, "model and messages are required", "invalid_request")
+		openAIError(w, 400, "model and messages are required", "invalid_request_error")
+		return
+	}
+	if kind, ok := provider.UnsupportedMediaContent(req.Messages); ok {
+		provider.Trace(r.Context(), "client.unsupported_media", map[string]interface{}{"kind": kind})
+		openAIError(w, 400, unsupportedMediaMessage(kind), "invalid_request_error")
 		return
 	}
 	if name, ok := provider.UnsupportedToolResult(req.Messages); ok {
 		provider.Trace(r.Context(), "client.tool_loop_blocked", map[string]interface{}{"tool": name, "reason": "unsupported custom tool call"})
-		jsonError(w, 400, fmt.Sprintf("tool %q was not executed by the client; register a handler for this tool before retrying", name), "tool_execution_error")
+		openAIError(w, 400, fmt.Sprintf("tool %q was not executed by the client; register a handler for this tool before retrying", name), "invalid_request_error")
 		return
 	}
 	req.Endpoint = "openai"
@@ -36,7 +41,7 @@ func (s *Server) openAI(w http.ResponseWriter, r *http.Request) {
 	}
 	res, _, err := s.Router.Chat(r.Context(), &req)
 	if err != nil {
-		jsonError(w, 503, err.Error(), "provider_error")
+		openAIError(w, 503, err.Error(), "service_unavailable")
 		return
 	}
 	jsonWrite(w, 200, openAIResponse(res, req.Model))
@@ -44,7 +49,7 @@ func (s *Server) openAI(w http.ResponseWriter, r *http.Request) {
 func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, req *provider.ChatRequest) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
-		jsonError(w, 500, "stream unsupported", "internal_error")
+		openAIError(w, 500, "stream unsupported", "server_error")
 		return
 	}
 	id := newID("chatcmpl-")
@@ -71,11 +76,19 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, req *provi
 	}
 	_, _, err := s.Router.Stream(r.Context(), req, emit)
 	if err != nil && !started {
-		jsonError(w, 503, err.Error(), "provider_error")
+		openAIError(w, 503, err.Error(), "service_unavailable")
 		return
 	}
 	if err != nil {
-		_ = sse(w, fl, map[string]interface{}{"error": map[string]string{"message": err.Error()}})
+		// 已开流后失败：发一帧 error 后直接关闭连接，**不发 data: [DONE]**。
+		// [DONE] 的语义是「流正常完成」——发了它，SDK 会把前面的 error 帧当作可忽略的
+		// 中间数据、认定本轮成功但内容为空，于是 agent 不报错、直接进入下一轮。
+		// 这正是「网关失败但客户端不停止」的直接原因。省掉 [DONE] 后，连接 EOF 即流终止，
+		// SDK 读到 error 帧就抛异常停止。
+		_ = sse(w, fl, map[string]interface{}{"error": map[string]interface{}{
+			"message": err.Error(), "type": "service_unavailable", "param": nil, "code": nil,
+		}})
+		return
 	}
 	_, _ = io.WriteString(w, "data: [DONE]\n\n")
 	fl.Flush()

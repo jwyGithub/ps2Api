@@ -23,8 +23,13 @@ const (
 	WebProduct     = "workspace_v12"
 
 	RequestTimeout = 300 * time.Second
-	MaxQueryLen    = 9500
 	MaxToolDescLen = 512
+
+	// MaxUpstreamQueryRunes 是上游 Postman 服务端对 input.query 的硬性校验上限。
+	// 2026-08-25 二分探测实测：10000 字符通过、10001 字符即被 INPUT_VALIDATION_ERROR
+	// （"Invalid input query. If you have a large file, try importing it..."）拒收；
+	// 9000 个中文字符（26994 字节）可通过，证明按字符数（rune）而非字节数计。
+	MaxUpstreamQueryRunes = 10000
 
 	// MaxToolResponseContentLen 是 TOOL_RESPONSE 续期时单条 toolResponses[].content 的上限。
 	// 该字段此前不设限，续期时容易把出站 body 顶过 ~80KB 的 Cloudflare WAF 信封而触发 403
@@ -60,13 +65,12 @@ type ChatMessage struct {
 }
 
 type ChatRequest struct {
-	Model             string          `json:"model"`
-	Messages          []ChatMessage   `json:"messages"`
-	Stream            bool            `json:"stream,omitempty"`
-	Tools             []interface{}   `json:"tools,omitempty"`
-	ToolChoice        interface{}     `json:"tool_choice,omitempty"`
-	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
-	Raw               json.RawMessage `json:"-"`
+	Model             string        `json:"model"`
+	Messages          []ChatMessage `json:"messages"`
+	Stream            bool          `json:"stream,omitempty"`
+	Tools             []interface{} `json:"tools,omitempty"`
+	ToolChoice        interface{}   `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool         `json:"parallel_tool_calls,omitempty"`
 	// Endpoint 调用来源兼容端点：anthropic(/v1/messages) | openai(/v1/chat/completions)，
 	// 由 HTTP handler 注入，只进日志，不随请求体透传。
 	Endpoint string `json:"-"`

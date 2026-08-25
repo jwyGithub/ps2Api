@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -53,12 +54,14 @@ func (s *accountCookieJars) remember(accountID int64, u *url.URL, egress string,
 //
 // 出口选择是无状态确定式：索引 = (stickyBase(accountID) + egressAttempt) mod N。
 // 因此同一账号默认粘在同一出口（连接复用、会话稳定），只有当 egressAttempt 递增
-// （router 遇 Cloudflare 403 重试时 +1）才切到下一个出口 IP；当 egressAttempt >= N
-// （所有出口都试过）或未配置代理时回退本机直连，保证服务不中断。
+// （router 遇 Cloudflare 403 重试时 +1）才切到下一个出口 IP。只要配置了至少一个出口代理，
+// 每次出站都经代理（egressAttempt 越界会环回到有效出口，不再回退直连）；仅当未配置任何
+// 代理时才走本机直连。
 type proxyPool struct {
-	list    func() []string // 运行时代理列表来源（读自持久化设置），面板改动即时生效
-	mu      sync.Mutex
-	clients map[string]*http.Client // 按代理 URL 缓存，复用连接池
+	list     func() []string // 运行时代理列表来源（读自持久化设置），面板改动即时生效
+	fallback func() bool     // 「代理全挂兜底直连」开关来源；nil 视为关闭
+	mu       sync.Mutex
+	clients  map[string]*http.Client // 按代理 URL 缓存，复用连接池
 }
 
 func newProxyPool() *proxyPool {
@@ -68,25 +71,45 @@ func newProxyPool() *proxyPool {
 // SetProxyList 注入运行时代理列表来源。fn 返回原始配置串（可含换行/逗号分隔的多个 URL）。
 func (p *Provider) SetProxyList(fn func() []string) { p.proxies.list = fn }
 
+// SetProxyFallbackDirect 注入「代理全挂兜底直连」开关来源。开启后，当出口代理在传输层
+// 不可达（拨号/CONNECT 失败）时，本次请求改用本机直连重试一次而非直接失败；关闭则严格
+// 只走代理（代理全挂即请求失败）。每次请求实时读取，面板改动即时生效。
+func (p *Provider) SetProxyFallbackDirect(fn func() bool) { p.proxies.fallback = fn }
+
+// fallbackDirectEnabled 报告是否开启「代理全挂兜底直连」。来源未注入时视为关闭。
+func (pp *proxyPool) fallbackDirectEnabled() bool {
+	return pp != nil && pp.fallback != nil && pp.fallback()
+}
+
 // CheckProxies 检测给定的代理列表（原始配置串，可含多行/逗号分隔），
 // 返回每个出口的连通性与响应耗时。单个代理超时上限 8s。
 func (p *Provider) CheckProxies(ctx context.Context, urls []string) []ProxyCheckResult {
 	return p.proxies.CheckProxies(ctx, urls, 8*time.Second)
 }
 
+// CheckProxyDetail 对单个代理做「详细测试」：在连通性/耗时之外，额外经该代理查询出口
+// 公网 IP 与归属地（地区码/省/市/运营商），供代理页单条「测试」按钮展示出口现场。
+// 每一步超时上限 10s。
+func (p *Provider) CheckProxyDetail(ctx context.Context, raw string) ProxyCheckResult {
+	return p.proxies.checkOneDetail(ctx, raw, 10*time.Second)
+}
+
 // selectFor 返回本次出站应使用的代理 client 与出口标签。
-// ok=false 表示应走本机直连：未配置代理，或本次 egressAttempt 已越过所有出口
-// （即所有代理都试过后的兜底）。
+// ok=false 仅表示未配置任何可用出口代理（proxy_enabled 关闭或 proxy_urls 为空/全部无效）
+// → 走本机直连。只要配置了至少一个出口代理，本次请求就一定经代理出站：egressAttempt 越界
+//（>=N 或 <0）时按出口数环回到有效出口，而非回退本机直连——即「开启启用出口代理后所有发往
+// 上游的请求都走代理」。egressAttempt 递增仅用于在多出口间轮换 IP（403 换号时）。
 func (pp *proxyPool) selectFor(accountID int64, egressAttempt int) (client *http.Client, egress string, ok bool) {
 	if pp == nil {
 		return nil, "", false
 	}
 	urls := pp.urls()
 	n := len(urls)
-	if n == 0 || egressAttempt < 0 || egressAttempt >= n {
+	if n == 0 {
 		return nil, "", false
 	}
-	idx := (stickyBase(accountID) + egressAttempt) % n
+	// 非负取模：把出口序号钉进 [0,N)，越界即环回，绝不因序号越界回退直连。
+	idx := ((stickyBase(accountID)+egressAttempt)%n + n) % n
 	raw := urls[idx]
 	c := pp.clientFor(raw)
 	if c == nil {
@@ -134,12 +157,21 @@ const proxyCheckTarget = "https://gateway.postman.com/"
 
 // ProxyCheckResult 单个代理的检测结果。URL 已脱敏（隐藏密码）。
 // OK 项之间可按 LatencyMs 比较，值越小代理越快。
+// 出口地理信息（EgressIP/CountryCode/Region/City/Org）仅在单代理「详细测试」时填充，
+// 批量连通性检测为节省耗时不做地理查询，这些字段留空。
 type ProxyCheckResult struct {
 	URL       string `json:"url"`
 	OK        bool   `json:"ok"`
 	LatencyMs int64  `json:"latencyMs"`
 	Status    int    `json:"status,omitempty"`
 	Error     string `json:"error,omitempty"`
+	// 出口现场信息：经该代理实际出站时对端看到的公网 IP 与其归属地。
+	EgressIP    string `json:"egressIp,omitempty"`
+	CountryCode string `json:"countryCode,omitempty"` // 两位地区码，如 US、JP、HK
+	Region      string `json:"region,omitempty"`      // 省/州
+	City        string `json:"city,omitempty"`
+	Org         string `json:"org,omitempty"` // 运营商/ASN，如 "AS15169 Google LLC"
+	GeoError    string `json:"geoError,omitempty"`
 }
 
 // CheckProxies 并发检测每个代理能否连通上游并测其响应耗时。
@@ -190,6 +222,56 @@ func (pp *proxyPool) checkOne(ctx context.Context, raw string, perTimeout time.D
 	r.LatencyMs = time.Since(started).Milliseconds()
 	r.Status = resp.StatusCode
 	r.OK = true // 拿到 HTTP 响应即代理隧道已打通
+	return r
+}
+
+// proxyGeoTarget 是查询出口公网 IP 与归属地的目标。ipinfo.io/json 支持 https、
+// 免 token 有免费额度，返回 ip/country(两位地区码)/region/city/org。
+const proxyGeoTarget = "https://ipinfo.io/json"
+
+// checkOneDetail 在 checkOne（连通上游 + 耗时）基础上，再经同一代理 client 查询出口
+// 公网 IP 与归属地。地理查询失败不影响连通性判定，仅在 GeoError 里记原因。
+func (pp *proxyPool) checkOneDetail(ctx context.Context, raw string, perTimeout time.Duration) ProxyCheckResult {
+	r := pp.checkOne(ctx, raw, perTimeout)
+	client := pp.clientFor(raw)
+	if client == nil {
+		return r
+	}
+	gctx, cancel := context.WithTimeout(ctx, perTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(gctx, http.MethodGet, proxyGeoTarget, nil)
+	if err != nil {
+		r.GeoError = err.Error()
+		return r
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		if gctx.Err() == context.DeadlineExceeded {
+			r.GeoError = "查询出口 IP 超时"
+		} else {
+			r.GeoError = strings.TrimSpace(err.Error())
+		}
+		return r
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	var g struct {
+		IP      string `json:"ip"`
+		Country string `json:"country"`
+		Region  string `json:"region"`
+		City    string `json:"city"`
+		Org     string `json:"org"`
+	}
+	if err := json.Unmarshal(body, &g); err != nil {
+		r.GeoError = "解析出口 IP 响应失败"
+		return r
+	}
+	r.EgressIP = g.IP
+	r.CountryCode = g.Country
+	r.Region = g.Region
+	r.City = g.City
+	r.Org = g.Org
 	return r
 }
 

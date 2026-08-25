@@ -27,6 +27,11 @@ func New(s *store.Store) *Router {
 		}
 		return []string{v}
 	})
+	// 代理全挂兜底直连：仅当显式开启时，代理出口不可达才回退本机直连重试；默认关闭（严格走代理）。
+	r.Provider.SetProxyFallbackDirect(func() bool {
+		on, _ := r.Store.GetSetting("proxy_fallback_direct")
+		return on == "true"
+	})
 	return r
 }
 
