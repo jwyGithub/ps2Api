@@ -537,6 +537,265 @@ func jsonStringT(t *testing.T, s string) string {
 	return string(b)
 }
 
+// upstreamPolicyErrorSSE 是线上 trace 里那条上游自身模型故障的原文（Postman → Bedrock）：
+// 服务端先确认会话存在，随后 failure 事件报 Policy Error。account/请求都没问题。
+const upstreamPolicyErrorSSE = "data: {\"eventType\":\"conversation\",\"data\":{\"id\":\"conv-A\",\"interactionCount\":21}}\n\n" +
+	"data: {\"eventType\":\"failure\",\"data\":{\"errorType\":\"LLM_STREAM_ERROR\"," +
+	"\"message\":\"LLM stream error: Failed after 3 attempts. Last error: AI_APICallError: Policy Error\"," +
+	"\"userMessage\":\"That was unexpected :(. Try starting a new chat, or remove any configured MCP servers.\"}}\n\n" +
+	"data: [DONE]\n\n"
+
+// continuationMsgs 构造一段「有可复用历史」的续聊（Anthropic tool_result），
+// 即 Postman 服务端已有会话、换号必然丢上下文的那一类请求。
+func continuationMsgs(t *testing.T) []provider.ChatMessage {
+	t.Helper()
+	return []provider.ChatMessage{
+		mustMsg(t, "user", "read the file"),
+		{Role: "assistant", Content: mustRaw(t, `"reading"`)},
+		{Role: "user", Content: mustRaw(t, `[{"type":"tool_result","tool_use_id":"toolu_1","content":"File created successfully"}]`)},
+	}
+}
+
+// 回归（线上事故 trace 179ede71）：上游自己调模型失败（LLM_STREAM_ERROR / Policy Error）时，
+// 续聊必须钉住原账号原地重试——绝不换号。换号会让服务端 conversationId 失效，请求降级为
+// 只剩几百字节的 USER_QUERY（失忆），失忆后必然再次失败并把同一个错误传染给下一个账号。
+// 同时：账号绝不能被标记为 error（那会把它踢出 ActiveAccounts，一次上游抖动毁一批号）。
+func TestStreamUpstreamModelFailureContinuationStaysOnOriginalAccount(t *testing.T) {
+	r := newTestRouter(t)
+	accounts, err := r.Store.ListAccounts()
+	if err != nil || len(accounts) != 2 {
+		t.Fatalf("accounts=%v err=%v", accounts, err)
+	}
+	for i, account := range accounts {
+		tokens, _ := json.Marshal(provider.Tokens{AccessToken: "token-" + string(rune('1'+i)), UserID: "u", WorkspaceID: "w"})
+		if err := r.Store.UpdateTokens(account.ID, string(tokens)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	acc1 := accounts[0] // 会话粘性绑定的原账号
+
+	cont := continuationMsgs(t)
+	// 建立粘性：token-1 上已有「首轮 + 助手回复」这段前缀的服务端会话。
+	r.Provider.RememberConversation(acc1.ID, cont[:1], &provider.Result{ConversationID: "conv-A", Content: "reading"})
+
+	var token1Calls, token2Calls int32
+	r.Provider.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Header.Get("x-access-token") == "token-2" {
+			atomic.AddInt32(&token2Calls, 1) // 发生即说明错误地换了号 → 上下文已丢
+			body := "data: {\"eventType\":\"conversation\",\"data\":{\"id\":\"conv-B\"}}\n\n" +
+				"data: {\"eventType\":\"textChunk\",\"data\":{\"textContent\":\"AMNESIAC\"}}\n\n" +
+				"data: [DONE]\n\n"
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+		}
+		if atomic.AddInt32(&token1Calls, 1) == 1 {
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(upstreamPolicyErrorSSE)), Request: req}, nil
+		}
+		body := "data: {\"eventType\":\"conversation\",\"data\":{\"id\":\"conv-A\"}}\n\n" +
+			"data: {\"eventType\":\"textChunk\",\"data\":{\"textContent\":\"ok\"}}\n\n" +
+			"data: [DONE]\n\n"
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	})}
+
+	var output strings.Builder
+	res, account, err := r.Stream(context.Background(), &provider.ChatRequest{
+		Model: "claude-opus-4-8", Messages: cont,
+	}, func(delta provider.Delta) error {
+		output.WriteString(delta.Content)
+		return nil
+	})
+	if err != nil || res == nil || !res.Success || account == nil {
+		t.Fatalf("upstream failure should retry on the same account and recover: res=%+v account=%+v err=%v", res, account, err)
+	}
+	if n := atomic.LoadInt32(&token2Calls); n != 0 {
+		t.Fatalf("must NOT fail over on a continuation (would drop the server-side session and answer amnesiac), but the other account was called %d time(s)", n)
+	}
+	if account.ID != acc1.ID {
+		t.Fatalf("must recover on the ORIGINAL account %d, got %d", acc1.ID, account.ID)
+	}
+	if n := atomic.LoadInt32(&token1Calls); n != 2 {
+		t.Fatalf("expected exactly 2 calls to the original account (policy error, then retry success), got %d", n)
+	}
+	if output.String() != "ok" {
+		t.Fatalf("client should see the original account's output, got %q", output.String())
+	}
+	// 上游模型故障与账号健康无关：绝不能写成 error（会被 ActiveAccounts 过滤掉，并打断会话粘性）。
+	same, err := r.Store.GetAccount(acc1.ID)
+	if err != nil || same.Status != "active" {
+		t.Fatalf("account must stay active after an upstream-side model failure, got %+v err=%v", same, err)
+	}
+	if alerts, err := r.Store.ListAlerts("", 10); err != nil || len(alerts) != 0 {
+		t.Fatalf("upstream model failure must not raise an account alert, got %d alert(s) err=%v", len(alerts), err)
+	}
+}
+
+// 上游持续报 Policy Error（换号也没用，因为故障在上游侧）：必须把重试全部消耗在原账号上、
+// 一个都不传染给其他账号，返回的错误里要带上真正的根因，且没有任何账号被打成 error。
+func TestStreamPersistentUpstreamFailureDoesNotSpreadAcrossAccounts(t *testing.T) {
+	r := newTestRouter(t)
+	accounts, err := r.Store.ListAccounts()
+	if err != nil || len(accounts) != 2 {
+		t.Fatalf("accounts=%v err=%v", accounts, err)
+	}
+	for i, account := range accounts {
+		tokens, _ := json.Marshal(provider.Tokens{AccessToken: "token-" + string(rune('1'+i)), UserID: "u", WorkspaceID: "w"})
+		if err := r.Store.UpdateTokens(account.ID, string(tokens)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	acc1 := accounts[0]
+	cont := continuationMsgs(t)
+	r.Provider.RememberConversation(acc1.ID, cont[:1], &provider.Result{ConversationID: "conv-A", Content: "reading"})
+
+	var token1Calls, token2Calls int32
+	r.Provider.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Header.Get("x-access-token") == "token-2" {
+			atomic.AddInt32(&token2Calls, 1)
+		} else {
+			atomic.AddInt32(&token1Calls, 1)
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(upstreamPolicyErrorSSE)), Request: req}, nil
+	})}
+
+	var output strings.Builder
+	res, account, err := r.Stream(context.Background(), &provider.ChatRequest{
+		Model: "claude-opus-4-8", Messages: cont,
+	}, func(delta provider.Delta) error {
+		output.WriteString(delta.Content)
+		return nil
+	})
+	if err == nil || res != nil || account != nil {
+		t.Fatalf("persistent upstream failure should return an error: res=%+v account=%+v err=%v", res, account, err)
+	}
+	if n := atomic.LoadInt32(&token2Calls); n != 0 {
+		t.Fatalf("a continuation must never be retried on another account, but it was called %d time(s)", n)
+	}
+	if n := atomic.LoadInt32(&token1Calls); n < 2 {
+		t.Fatalf("retries should be spent on the sticky account, got only %d call(s)", n)
+	}
+	if !strings.Contains(err.Error(), "Policy Error") {
+		t.Fatalf("returned error must carry the upstream root cause, got %q", err.Error())
+	}
+	// 两个账号都必须保持可用：故障在上游侧，不该有任何号被踢出池。
+	for _, a := range accounts {
+		got, err := r.Store.GetAccount(a.ID)
+		if err != nil || got.Status != "active" {
+			t.Fatalf("account %d must stay active after upstream-side failures, got %+v err=%v", a.ID, got, err)
+		}
+	}
+}
+
+// 回归（线上事故 trace 3898bd74）：客户端断开后必须立刻停。那次非流式请求的 attempt 1 失败时
+// 客户端已经走了，可循环还继续换了 3 个账号——每次都在 ~240ms 内报 "Client disconnected"，
+// 白建 3 个 Postman 会话、把 3 个账号记成异常，最后还用 "Client disconnected" 覆盖掉真正的
+// 首因（Policy Error），对外成了 "All accounts failed. Last error: Client disconnected"。
+// 这里走非流式 Chat（emitted 恒 false，已有的 abort() 守卫不生效），才真正验证 ctx 守卫。
+func TestChatStopsImmediatelyWhenClientIsGone(t *testing.T) {
+	r := newTestRouter(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var calls int32
+	r.Provider.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		cancel() // 客户端在本次尝试进行中断开
+		return nil, context.Canceled
+	})}
+
+	res, account, err := r.Chat(ctx, &provider.ChatRequest{
+		Model: "claude-opus-4-8", Messages: []provider.ChatMessage{mustMsg(t, "user", "hello")},
+	})
+	if err == nil || res != nil || account != nil {
+		t.Fatalf("a gone client should end the request: res=%+v account=%+v err=%v", res, account, err)
+	}
+	// 关键断言：不得在客户端走后继续换号空转（此前会一路耗尽 retry_count 个账号）。
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("must not retry on other accounts after the client is gone, got %d upstream calls", got)
+	}
+	accounts, err := r.Store.ListAccounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range accounts {
+		if a.Status == "error" {
+			t.Fatalf("a client disconnect must not be blamed on account %d", a.ID)
+		}
+	}
+	if alerts, err := r.Store.ListAlerts("", 10); err != nil || len(alerts) != 0 {
+		t.Fatalf("a client disconnect must not raise account alerts, got %d err=%v", len(alerts), err)
+	}
+}
+
+// 流式路径下客户端写回失败（emit 报错）同样必须一次就停——此处由已有的 abort() 守卫兜住，
+// 与上面的 ctx 守卫互补。
+func TestStreamClientDisconnectStopsImmediately(t *testing.T) {
+	r := newTestRouter(t)
+	var calls int32
+	r.Provider.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		body := "data: {\"eventType\":\"conversation\",\"data\":{\"id\":\"conv-1\"}}\n\n" +
+			"data: {\"eventType\":\"textChunk\",\"data\":{\"textContent\":\"ok\"}}\n\n" +
+			"data: [DONE]\n\n"
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	})}
+
+	res, account, err := r.Stream(context.Background(), &provider.ChatRequest{
+		Model: "claude-opus-4-8", Messages: []provider.ChatMessage{mustMsg(t, "user", "hello")},
+	}, func(provider.Delta) error {
+		return io.ErrClosedPipe // 客户端已走：写回失败
+	})
+	if err == nil || res != nil || account != nil {
+		t.Fatalf("client disconnect should end the request: res=%+v account=%+v err=%v", res, account, err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("must not retry after the client is gone, got %d upstream calls", got)
+	}
+	if accounts, err := r.Store.ListAccounts(); err == nil {
+		for _, a := range accounts {
+			if a.Status == "error" {
+				t.Fatalf("a client disconnect must not be blamed on account %d", a.ID)
+			}
+		}
+	}
+}
+
+// 会话粘性必须容忍 status=="error"：续聊的服务端会话只在这个账号上，宁可原号失败也不要
+// 静默换号交付失忆答案。（曾经的级联根因：一次上游错误把号写成 error → 粘性失效 → 换号降级。）
+func TestStickyToleratesErrorStatusButNotExhausted(t *testing.T) {
+	r := newTestRouter(t)
+	msgsFirst := []provider.ChatMessage{mustMsg(t, "user", "agent D hello")}
+	acc1, _, err := r.pickAccount(nil, msgsFirst, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Pool.Done(acc1.ID)
+	r.Provider.RememberConversation(acc1.ID, msgsFirst, &provider.Result{ConversationID: "conv-D1", Content: "hi"})
+
+	cont := []provider.ChatMessage{
+		msgsFirst[0],
+		{Role: "assistant", Content: mustRaw(t, `"hi"`)},
+		mustMsg(t, "user", "more"),
+	}
+
+	if err := r.Store.SetAccountStatus(acc1.ID, "error", "some earlier failure"); err != nil {
+		t.Fatal(err)
+	}
+	stuck, used, err := r.pickAccount(nil, cont, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if used || stuck.ID != acc1.ID {
+		t.Fatalf("continuation must still stick to account %d despite status=error (got %d, fromPool=%v)", acc1.ID, stuck.ID, used)
+	}
+
+	// 额度确定为 0 则相反：那种号发出去必然拿不到结果，必须回退轮询。
+	if err := r.Store.SetAccountStatus(acc1.ID, "exhausted", "quota exceeded"); err != nil {
+		t.Fatal(err)
+	}
+	if _, used, err := r.pickAccount(nil, cont, false); err != nil || !used {
+		t.Fatalf("exhausted sticky account must fall back to the pool: used=%v err=%v", used, err)
+	}
+}
+
 // 出口序号必须与全局 attempt 解耦：同账号重试递增以轮换代理出口 IP，
 // 而一旦跨账号 failover 换号就归零——保证换号后新账号仍从自身粘性出口走代理池，
 // 绝不因全局重试数堆高使 seq>=N 而在 selectFor 里回退本机直连（换号多因 403，直连必再被拦）。

@@ -58,11 +58,15 @@ type RateLimit struct {
 
 // StreamReader 逐行解析 Postman agent-mode SSE 流。
 type StreamReader struct {
-	finished        bool
-	QuotaExceeded   bool
-	Usage           *Usage
-	Err             string
+	finished      bool
+	QuotaExceeded bool
+	Usage         *Usage
+	Err           string
+	// RequestRejected 表示失败源于请求内容本身（坏请求、工具名冲突等）。
 	RequestRejected bool
+	// UpstreamFailure 表示失败发生在 Postman → 模型（Bedrock）这一段，与账号健康和本地请求
+	// 格式都无关。见 isUpstreamModelFailure。
+	UpstreamFailure bool
 	ActualModel     string
 	ConversationID  string
 	sawToolCall     bool
@@ -285,11 +289,20 @@ func (r *StreamReader) handleFailure(data json.RawMessage) []Delta {
 	if r.Err == "" {
 		r.Err = "Unknown Postman error"
 	}
+	// userMessage 是给终端用户看的套话（"That was unexpected :(. Try starting a new chat…"），
+	// 真正的根因只在 message 里（如 "LLM stream error: … AI_APICallError: Policy Error"）。
+	// 拼进错误串，否则日志/告警/trace 里只剩套话，排查时无从区分「上游模型故障」与「本地请求有问题」。
+	if detail := strings.TrimSpace(d.Message); detail != "" && detail != r.Err {
+		r.Err += " | " + detail
+	}
 	if d.ErrorType == "USAGE_LIMIT_EXCEEDED" {
 		r.QuotaExceeded = true
 	}
 	if d.ErrorType == "INPUT_VALIDATION_ERROR" {
 		r.RequestRejected = true
+	}
+	if isUpstreamModelFailure(d.ErrorType) {
+		r.UpstreamFailure = true
 	}
 	return nil
 }

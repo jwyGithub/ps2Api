@@ -123,6 +123,13 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 		}
 		last = res.Error
 		provider.Trace(ctx, "router.failure", plan.trace(map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "error": res.Error}, acc, true))
+		// 客户端已断开（或请求被取消）：已经没有接收方，任何重试都无法把结果交付出去。继续换号
+		// 只会在别的账号上白建一个 Postman 会话、消耗其额度，并把这个与账号无关的失败逐个记成
+		// 账号异常；最后还会用 "Client disconnected" 覆盖掉真正的首因错误。立即返回。
+		if ctx.Err() != nil || res.Error == provider.ErrClientDisconnected {
+			provider.Trace(ctx, "router.client_gone", plan.trace(map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "error": last}, acc, false))
+			return nil, nil, &RouteError{Message: last}
+		}
 		if res.GatewayBlocked {
 			// 诱因是有状态的 Cloudflare 风控（WAF/Bot 评分/速率），退避后重试常能成功。
 			// 流式下：延迟开流（首个 delta 前不落 200 / 不发事件）保证网关 403 时 emitted 仍为 false，故可重试；
@@ -195,8 +202,23 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 		if e, done := abort(); done {
 			return nil, nil, e
 		}
-		// 未分类错误：标记账号后继续换号兜底。此处 abort() 已前置守卫，走到这里
-		// emitted 必为 false（流式尚未吐出任何 delta），故换号重试绝不会重复输出。
+		// 续聊（Postman 服务端已有会话）遇到「与账号无关」的失败：钉住原账号原地重试，绝不换号。
+		// 换号会让服务端 conversationId 失效，请求被降级为 USER_QUERY 且历史截断到几百字节（失忆），
+		// 之后必然再次失败、并把同一个错误逐个传染给后面的账号——这正是「一次上游抖动毁一批号、
+		// 同时交付一个丢了上下文的答案」的根因。额度耗尽/限流/认证失败是账号自身问题，已在上面
+		// 各自的分支里换号，走不到这里。
+		if provider.HasReusableHistory(req.Messages) {
+			pinnedAcc = acc
+		}
+		if res.UpstreamFailure {
+			// 上游自己调模型失败（Policy Error 等）：账号是健康的。只记录错误文案，绝不 MarkError——
+			// 那会把账号写成 status=error，既踢出 ActiveAccounts 又打断会话粘性（见 usableForSticky）。
+			provider.Trace(ctx, "router.upstream_failure", plan.trace(map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "error": res.Error}, acc, false))
+			r.Pool.MarkTransient(acc.ID, res.Error)
+			continue
+		}
+		// 未分类错误：标记账号后继续兜底。此处 abort() 已前置守卫，走到这里
+		// emitted 必为 false（流式尚未吐出任何 delta），故重试绝不会重复输出。
 		r.Pool.MarkError(acc.ID, res.Error)
 	}
 	return nil, nil, &RouteError{Message: "All accounts failed. Last error: " + last}

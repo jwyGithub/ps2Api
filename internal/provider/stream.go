@@ -103,8 +103,8 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			res.Error = "Upstream timeout"
-		} else if strings.Contains(err.Error(), "Client disconnected") || ctx.Err() == context.Canceled {
-			res.Error = "Client disconnected"
+		} else if strings.Contains(err.Error(), ErrClientDisconnected) || ctx.Err() == context.Canceled {
+			res.Error = ErrClientDisconnected
 		} else {
 			res.Error = "Postman request failed: " + err.Error()
 		}
@@ -177,7 +177,7 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 		}
 		for _, d := range reader.Feed(line) {
 			if err := emit(d); err != nil {
-				res.Error = "Client disconnected"
+				res.Error = ErrClientDisconnected
 				return err
 			}
 		}
@@ -199,6 +199,9 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 	if reader.Err != "" {
 		res.Error = reader.Err
 		res.Usage = reader.Usage
+		// 上游自己调模型失败(Policy Error 等):账号健康、请求也没问题,router 据此不标记账号、
+		// 续聊也不换号(换号会丢服务端会话上下文)。见 isUpstreamModelFailure。
+		res.UpstreamFailure = reader.UpstreamFailure
 		// 工具相关的 failure(工具名冲突、无可用工具等)是请求内容问题,不是账号故障——
 		// 换账号重试无用,标记 RequestRejected 让 router 直接返回、不把账号踢出池。
 		if reader.RequestRejected || isRequestRejectionMessage(reader.Err) {
@@ -215,7 +218,7 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 
 	for _, d := range reader.Finish() {
 		if err := emit(d); err != nil {
-			res.Error = "Client disconnected"
+			res.Error = ErrClientDisconnected
 			return err
 		}
 	}

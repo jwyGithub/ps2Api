@@ -9,6 +9,29 @@ import (
 	"time"
 )
 
+// ErrClientDisconnected 是「客户端在本次请求交付完成前就断开了」的错误串。
+// router 见到它必须立即停止重试：已经没有接收方，换号只会在别的账号上白建一个 Postman
+// 会话、消耗其额度，并把一个与账号无关的失败记成账号异常。
+const ErrClientDisconnected = "Client disconnected"
+
+// upstreamModelFailureTypes 是「上游自己调模型失败」的 failure.errorType：故障落在
+// Postman → 模型(Bedrock)这一段，与本地账号健康、也与请求格式无关。典型上游原文：
+//
+//	{"errorType":"LLM_STREAM_ERROR","message":"LLM stream error: Failed after 3 attempts.
+//	 Last error: AI_APICallError: Policy Error","userMessage":"That was unexpected :(…"}
+//
+// 这类失败有两条铁律（都由 router 的未分类兜底分支落实）：
+//   - 不得把账号标记为 error：那会把号从 ActiveAccounts 里踢出去，一次上游抖动毁一批号；
+//   - 续聊不得换号：换号让服务端 conversationId 失效，请求降级为无历史的 USER_QUERY，
+//     失忆后必然再次失败，并把同样的错误逐个传染给后面的账号。
+var upstreamModelFailureTypes = map[string]bool{
+	"LLM_STREAM_ERROR": true,
+}
+
+func isUpstreamModelFailure(errorType string) bool {
+	return upstreamModelFailureTypes[strings.ToUpper(strings.TrimSpace(errorType))]
+}
+
 func postmanIdentityError(headers http.Header) string {
 	var errors []string
 	for key, values := range headers {

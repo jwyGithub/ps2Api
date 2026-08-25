@@ -99,6 +99,11 @@ type Result struct {
 	// RequestRejected 表示失败源于请求内容本身(坏请求、工具名冲突等),而非账号健康。
 	// 这种错误换账号重试无用、且会污染整个号池,router 应直接返回、不标记账号。
 	RequestRejected bool
+	// UpstreamFailure 表示失败发生在上游自己调模型那一段(Postman → Bedrock,如 Policy Error),
+	// 既非请求内容问题也非账号故障。router 据此:不把账号标记为 error(避免一次上游抖动就把号
+	// 踢出 ActiveAccounts),且续聊时钉住原账号重试而不换号(换号会丢服务端会话上下文)。
+	// 详见 provider.isUpstreamModelFailure。
+	UpstreamFailure bool
 	// GatewayBlocked 表示请求被上游网关(Cloudflare)的安全/风控拦截(WAF、Bot 评分、
 	// 速率限制、Managed Challenge)。这类 403 是有状态、按评分/速率判定的瞬时拦截,而非
 	// 请求内容错误也非账号损坏——退避后重试常能成功。router 应退避重试(不标记账号、不换号),

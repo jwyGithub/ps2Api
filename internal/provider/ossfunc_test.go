@@ -3,6 +3,7 @@ package provider
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -52,6 +53,38 @@ func TestInputValidationFailureIsRequestRejected(t *testing.T) {
 	r.Feed(`data: {"eventType":"failure","data":{"errorType":"INPUT_VALIDATION_ERROR","userMessage":"Forbidden"}}`)
 	if r.Err != "Forbidden" || !r.RequestRejected {
 		t.Fatalf("input validation failure = err %q, requestRejected %v", r.Err, r.RequestRejected)
+	}
+}
+
+// 上游自己调模型失败（Postman → Bedrock）：userMessage 只是给终端用户的套话，真正的根因
+// 在 message 里。必须 (a) 标记 UpstreamFailure 让 router 别把账号打成 error、续聊也别换号，
+// (b) 把 message 细节拼进错误串，否则日志/告警里只剩 "That was unexpected :(" 无从排查。
+// 报文取自线上 trace（LLM_STREAM_ERROR / AI_APICallError: Policy Error）。
+func TestUpstreamModelFailureIsFlaggedAndKeepsRootCause(t *testing.T) {
+	r := NewStreamReader()
+	r.Feed(`data: {"eventType":"failure","data":{"errorType":"LLM_STREAM_ERROR","message":"LLM stream error: Failed after 3 attempts. Last error: AI_APICallError: Policy Error","userMessage":"That was unexpected :(. Try starting a new chat, or remove any configured MCP servers."}}`)
+	if !r.UpstreamFailure {
+		t.Fatalf("LLM_STREAM_ERROR must be flagged as an upstream model failure, err=%q", r.Err)
+	}
+	if r.RequestRejected || r.QuotaExceeded {
+		t.Fatalf("upstream model failure is neither a rejected request nor a quota problem: rejected=%v quota=%v", r.RequestRejected, r.QuotaExceeded)
+	}
+	if !strings.Contains(r.Err, "Policy Error") {
+		t.Fatalf("root cause from `message` must survive into the error string, got %q", r.Err)
+	}
+	if !strings.Contains(r.Err, "That was unexpected") {
+		t.Fatalf("user-facing text should still be present, got %q", r.Err)
+	}
+}
+
+// 其他 errorType 不得被误判成上游模型故障——否则真正坏掉的账号会被一直留在池子里重试。
+func TestNonUpstreamFailureTypesAreNotFlagged(t *testing.T) {
+	for _, errorType := range []string{"INPUT_VALIDATION_ERROR", "USAGE_LIMIT_EXCEEDED", "SOMETHING_ELSE", ""} {
+		r := NewStreamReader()
+		r.Feed(`data: {"eventType":"failure","data":{"errorType":"` + errorType + `","userMessage":"x"}}`)
+		if r.UpstreamFailure {
+			t.Fatalf("errorType %q must not be treated as an upstream model failure", errorType)
+		}
 	}
 }
 
