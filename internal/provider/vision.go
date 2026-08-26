@@ -36,6 +36,10 @@ import (
 //   - 识别结果按「图片指纹 + 模型」缓存（配置 Redis 则跨实例共享，否则进程内），同一张图在
 //     多轮对话里只识别一次。
 
+// defaultOCRAPIBase 是随 ps2api 镜像内置的 OCR 服务地址：容器内 uvicorn 监听 127.0.0.1:8000，
+// 接口为 /ocr。ocr_api_base 留空时默认用它——ocr / ocr_then_vision 模式开箱即用，无需再单独配置地址。
+const defaultOCRAPIBase = "http://127.0.0.1:8000/ocr"
+
 // imageBlockTypes 是三种入站协议里的图片内容块类型（与 unsupportedMediaKinds 中 image 类对齐）。
 var imageBlockTypes = map[string]bool{
 	"image":       true, // Anthropic /v1/messages
@@ -98,10 +102,11 @@ func (m *MediaResolver) Enabled() bool {
 	if m.getSetting("vision_enabled", "false") != "true" {
 		return false
 	}
-	// 纯 OCR 模式不需要视觉模型 Key，但需要 OCR 服务地址；其余模式（含 ocr_then_vision，
-	// 视觉模型作兜底）仍以已配置 vision_api_key 为启用前提。
+	// 纯 OCR 模式不需要视觉模型 Key，也不需要单独配置 OCR 地址：ps2api 镜像已内置 OCR 服务
+	// （ocr_api_base 留空即用 defaultOCRAPIBase）。其余模式（含 ocr_then_vision，视觉模型作兜底）
+	// 仍以已配置 vision_api_key 为启用前提。
 	if m.getSetting("vision_recognize_mode", "vision") == "ocr" {
-		return m.getSetting("ocr_api_base", "") != ""
+		return true
 	}
 	return m.getSetting("vision_api_key", "") != ""
 }
@@ -125,7 +130,7 @@ func (m *MediaResolver) config() visionConfig {
 	cfg.maxImageBytes = int64(atoiDef("vision_max_image_mb", 20)) * 1024 * 1024
 	cfg.proxyURL = m.proxySetting()
 	cfg.mode = m.getSetting("vision_recognize_mode", "vision")
-	cfg.ocrAPIBase = strings.TrimRight(m.getSetting("ocr_api_base", ""), "/")
+	cfg.ocrAPIBase = strings.TrimRight(m.getSetting("ocr_api_base", defaultOCRAPIBase), "/")
 	cfg.ocrAPIKey = m.getSetting("ocr_api_key", "")
 	cfg.ocrLang = m.getSetting("ocr_lang", "chi_sim+eng")
 	cfg.ocrTimeout = time.Duration(atoiDef("ocr_timeout_seconds", 30)) * time.Second

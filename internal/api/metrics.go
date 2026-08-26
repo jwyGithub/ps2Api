@@ -57,8 +57,8 @@ var settingDefs = []settingDef{
 	// OCR 只抽可读文本、更快更省，但丢失图表/排版/视觉语义；视觉模型能整体转述。三者共用同一段图片提取、
 	// 体积/数量限制、结果截断、缓存与替换逻辑，只是识别这一步不同。
 	{Key: "vision_recognize_mode", Label: "识别引擎", Type: "select", Default: "vision", Options: []string{"vision", "ocr", "ocr_then_vision"}, Group: "vision", Description: "vision=仅视觉模型(默认)；ocr=仅外部 OCR 服务；ocr_then_vision=OCR 优先，空结果或失败时回退视觉模型"},
-	{Key: "ocr_api_base", Label: "OCR 服务地址", Type: "text", Default: "", Group: "vision", Description: "外部 OCR HTTP 服务的完整接口 URL（直接 POST 到该地址）。请求体为 JSON {\"image\":\"<data URL 或 http(s) 直链>\",\"lang\":\"...\"}；响应会从 text/result/transcription/stdout 等字段提取识别文本。留空则 OCR 模式不生效"},
-	{Key: "ocr_api_key", Label: "OCR 服务 Key", Type: "text", Default: "", Group: "vision", Description: "调用 OCR 服务的 Bearer Key，存入本地 SQLite。留空则不带 Authorization 头"},
+	{Key: "ocr_api_base", Label: "OCR 服务地址（可选）", Type: "text", Default: "", Group: "vision", Description: "留空即用 ps2api 镜像内置的 OCR 服务（容器内 http://127.0.0.1:8000/ocr），选 ocr / ocr_then_vision 引擎开箱即用、无需配置。仅当要接外部 OCR 服务时才填：完整接口 URL，请求体 JSON{\"image\":\"<data URL 或 http(s) 直链>\",\"lang\":\"...\"}；响应会从 text/result/transcription/stdout 等字段提取识别文本"},
+	{Key: "ocr_api_key", Label: "OCR 服务 Key（可选）", Type: "text", Default: "", Group: "vision", Description: "调用 OCR 服务的 Bearer Key，存入本地 SQLite。使用内置 OCR 服务时留空即可；仅当外部 OCR 服务需要鉴权时才填"},
 	{Key: "ocr_lang", Label: "OCR 识别语言", Type: "text", Default: "chi_sim+eng", Group: "vision", Description: "随请求发给 OCR 服务的 lang 字段，如 chi_sim+eng / eng。具体取值取决于你的 OCR 服务"},
 	{Key: "ocr_timeout_seconds", Label: "OCR 超时(秒)", Type: "number", Default: "30", Group: "vision", Description: "单次 OCR 服务调用的超时时间（秒）"},
 }

@@ -18,43 +18,21 @@ services:
       - REDIS_URL=redis://sub2api-redis:6379/1
       - REDIS_KEY_PREFIX=ps2api
       # - REDIS_CONV_TTL=72h      # 会话映射存活时长，0/off/none/never 表示永不过期
+      # 内置 OCR 服务（RapidOCR + ONNXRuntime）已打进本镜像，容器内监听 127.0.0.1:8000。
+      # 面板「系统设置 → 图片识别」把识别引擎选 ocr（或 ocr_then_vision）即开箱即用，
+      # 无需再配置 OCR 服务地址。仅当要改端口/上限时才用下面这些变量。
+      # - OCR_PORT=8000
+      # - OCR_MAX_IMAGE_MB=20
+      # - OCR_ALLOW_REMOTE_FETCH=true
     networks:
       - default
       - sub2api-net
-    depends_on:
-      ocr:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:1930/health"]
       interval: 30s
       timeout: 3s
       retries: 3
-
-  # 精准 OCR 识别服务（RapidOCR + ONNXRuntime）。
-  # 网关内部通过 http://ocr:8000/ocr 调用：在面板「系统设置 → 图片识别」把
-  #   识别引擎 = ocr（或 ocr_then_vision）、ocr_api_base = http://ocr:8000/ocr
-  # 配置好即可生效。若设了 OCR_API_KEY，需在面板 ocr_api_key 填相同值。
-  ocr:
-    build: ./ocr
-    image: ps2api-ocr
-    container_name: ps2api-ocr
-    restart: unless-stopped
-    # 仅在项目默认网络内暴露给 ps2api；如需宿主机直连调试可放开下面的端口映射。
-    # ports:
-    #   - "8000:8000"
-    environment:
-      - OCR_PORT=8000
-      # 可选鉴权：设置后网关侧 ocr_api_key 需填相同值；留空则内网放行。
-      # - OCR_API_KEY=change-me
-      # - OCR_MAX_IMAGE_MB=20
-      # - OCR_ALLOW_REMOTE_FETCH=true
-    networks:
-      - default
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
-      interval: 30s
-      timeout: 3s
-      retries: 3
+      # 首次启动需下载/预热已内置的 OCR 模型并起进程，给足冷启动时间。
       start_period: 40s
 
 networks:
