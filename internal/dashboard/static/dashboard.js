@@ -52,7 +52,7 @@
   }
 
   function bootstrapDashboard() {
-    var names = ['fragments/topnav.html', 'fragments/sidebar.html', 'fragments/page-overview.html', 'fragments/page-stats.html', 'fragments/page-pools.html', 'fragments/page-quota.html', 'fragments/page-routing.html', 'fragments/page-alerts.html', 'fragments/page-settings.html', 'fragments/page-proxies.html', 'fragments/drawer.html'];
+    var names = ['fragments/topnav.html', 'fragments/sidebar.html', 'fragments/page-overview.html', 'fragments/page-stats.html', 'fragments/page-pools.html', 'fragments/page-quota.html', 'fragments/page-routing.html', 'fragments/page-alerts.html', 'fragments/page-settings.html', 'fragments/page-proxies.html', 'fragments/page-vision.html', 'fragments/drawer.html'];
     return Promise.all(names.map(loadFragment)).then(function (parts) {
       var app = document.getElementById('dashboard-app');
       if (!app) return;
@@ -146,12 +146,13 @@
     state.page = page;
     document.querySelectorAll('.page').forEach(function (el) { el.classList.toggle('active', el.id === 'page-' + page); });
     document.querySelectorAll('.sidebar-item[data-page]').forEach(function (el) { el.classList.toggle('active', el.dataset.page === page); });
-    var names = { overview:'概览', stats:'统计分析', pools:'号池 & 额度', routing:'路由策略', proxies:'代理出口', alerts:'告警中心', settings:'系统设置' };
+    var names = { overview:'概览', stats:'统计分析', pools:'号池 & 额度', routing:'路由策略', proxies:'代理出口', vision:'图片识别', alerts:'告警中心', settings:'系统设置' };
     setText('#crumb', names[page] || page);
     if (page === 'pools') { renderPoolsReal(); renderQuotaReal(); }
     if (page === 'alerts') renderAlertsReal();
     if (page === 'routing') renderRoutingReal();
     if (page === 'proxies') renderProxiesReal();
+    if (page === 'vision') renderVisionReal();
     if (page === 'settings') renderSettingsReal();
     refreshCurrentPage();
   };
@@ -210,6 +211,7 @@
       quota: ['accounts', 'analytics', 'settings', 'alerts'],
       routing: ['settings'],
       proxies: ['settings'],
+      vision: ['settings'],
       alerts: ['alerts'],
       settings: ['settings']
     };
@@ -220,7 +222,7 @@
   function renderAll() {
     renderRealData(); renderStatsReal(); renderChartsReal(); renderTopAccounts();
     renderPoolsReal(); renderQuotaReal(); renderAlertsReal();
-    renderRoutingReal(); renderSettingsReal(); renderProxiesReal(); renderOverviewActivity(); renderSidebarBadges();
+    renderRoutingReal(); renderSettingsReal(); renderProxiesReal(); renderVisionReal(); renderOverviewActivity(); renderSidebarBadges();
     renderCacheProbeReal();
   }
 
@@ -476,8 +478,8 @@
     if (auth && document.activeElement !== auth) auth.value = state.apiKey || '';
     var form = document.getElementById('settingsForm');
     if (form) {
-      // 代理相关项（group=proxy）已迁移到独立的「代理出口」菜单，通用设置表单不再渲染。
-      form.innerHTML = state.settingsDefs.filter(function (d) { return d.group !== 'proxy'; }).map(function (d) {
+      // 代理(group=proxy)、图片识别(group=vision)相关项已迁移到各自独立菜单页，通用设置表单不再渲染。
+      form.innerHTML = state.settingsDefs.filter(function (d) { return d.group !== 'proxy' && d.group !== 'vision'; }).map(function (d) {
         var val = state.settings[d.key] != null ? state.settings[d.key] : d.default;
         var input;
         if (d.type === 'bool') {
@@ -669,6 +671,39 @@
     });
     api('/api/settings', {method:'PUT', body:JSON.stringify({settings:payload})}).then(function(){toast('配置已保存并生效');return loadAll();}).catch(function(e){toast(e.message);});
   };
+
+  // ─── 图片识别（独立页面，group=vision）──────────────────────────
+  function renderVisionReal() {
+    var form = document.getElementById('visionForm');
+    if (!form) return;
+    var defs = (state.settingsDefs || []).filter(function (d) { return d.group === 'vision'; });
+    if (!defs.length) { form.innerHTML = '<div class="text-[12px]" style="color:var(--muted)">配置项加载中…</div>'; return; }
+    form.innerHTML = defs.map(function (d) {
+      var val = state.settings[d.key] != null ? state.settings[d.key] : d.default;
+      var input;
+      if (d.type === 'bool') {
+        input = '<label class="switch"><input type="checkbox" data-vkey="'+d.key+'" '+(val === 'true' ? 'checked' : '')+'><div class="slider"></div></label>';
+      } else if (d.type === 'select') {
+        input = '<select class="input" data-vkey="'+d.key+'" style="max-width:280px">' + (d.options || []).map(function (o) { return '<option value="'+esc(o)+'"'+(o === val ? ' selected' : '')+'>'+esc(o)+'</option>'; }).join('') + '</select>';
+      } else if (d.key === 'vision_api_key') {
+        input = '<input class="input font-mono" type="password" data-vkey="'+d.key+'" value="'+esc(val)+'" placeholder="未设置" style="max-width:280px">';
+      } else if (d.key === 'vision_prompt') {
+        input = '<textarea class="input" data-vkey="'+d.key+'" rows="3" style="max-width:360px;min-width:280px">'+esc(val)+'</textarea>';
+      } else {
+        input = '<input class="input font-mono" type="'+(d.type === 'number' ? 'number' : 'text')+'" data-vkey="'+d.key+'" value="'+esc(val)+'" style="max-width:280px">';
+      }
+      return '<div class="flex items-start justify-between gap-4 p-3 rounded-lg" style="background:var(--bg)"><div style="flex:1"><div class="text-[13px] font-semibold">'+esc(d.label)+'</div><div class="text-[12px] mt-0.5" style="color:var(--fg-2)">'+esc(d.description)+'</div></div>'+input+'</div>';
+    }).join('') + '<div class="pt-2 flex items-center gap-2"><button class="btn btn-primary" onclick="saveVision()">保存配置</button></div>';
+  }
+
+  window.saveVision = function () {
+    var payload = {};
+    document.querySelectorAll('#visionForm [data-vkey]').forEach(function (el) {
+      payload[el.dataset.vkey] = el.type === 'checkbox' ? (el.checked ? 'true' : 'false') : el.value;
+    });
+    api('/api/settings', {method:'PUT', body:JSON.stringify({settings:payload})}).then(function(){toast('图片识别配置已保存并生效');return refreshCurrentPage();}).catch(function(e){toast(e.message);});
+  };
+
   // ─── 代理出口（独立页面）──────────────────────────────────────
   // parseProxyList 把配置串按换行/逗号/分号/空白拆成去重列表（与后端 parseProxyURLs 对齐）。
   function parseProxyList(raw) {
@@ -1076,7 +1111,6 @@
   function startDashboard() {
     bootstrapDashboard().then(function () {
       loadAll();
-      setInterval(function () { refreshCurrentPage(); }, 5000);
     }).catch(function (err) {
       var app = document.getElementById('dashboard-app');
       if (app) app.innerHTML = '<div style="padding:32px;color:#B91C1C;font-family:monospace">Dashboard load failed: ' + esc(err.message) + '</div>';

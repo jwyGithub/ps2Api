@@ -24,6 +24,11 @@ func (s *Server) openAI(w http.ResponseWriter, r *http.Request) {
 		openAIError(w, 400, "model and messages are required", "invalid_request_error")
 		return
 	}
+	if err := s.resolveVisionMessages(r.Context(), req.Messages); err != nil {
+		provider.Trace(r.Context(), "client.vision_failed", map[string]interface{}{"error": err.Error()})
+		openAIError(w, 400, "图片识别失败: "+err.Error(), "invalid_request_error")
+		return
+	}
 	if kind, ok := provider.UnsupportedMediaContent(req.Messages); ok {
 		provider.Trace(r.Context(), "client.unsupported_media", map[string]interface{}{"kind": kind})
 		openAIError(w, 400, unsupportedMediaMessage(kind), "invalid_request_error")

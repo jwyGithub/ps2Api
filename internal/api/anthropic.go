@@ -42,6 +42,11 @@ func (s *Server) anthropic(w http.ResponseWriter, r *http.Request) {
 	}
 	req := anthropicToOpenAI(ar)
 	req.Endpoint = "anthropic"
+	if err := s.resolveVisionMessages(r.Context(), req.Messages); err != nil {
+		provider.Trace(r.Context(), "client.vision_failed", map[string]interface{}{"error": err.Error()})
+		anthropicError(w, 400, "图片识别失败: "+err.Error(), "invalid_request_error")
+		return
+	}
 	if kind, ok := provider.UnsupportedMediaContent(req.Messages); ok {
 		provider.Trace(r.Context(), "client.unsupported_media", map[string]interface{}{"kind": kind})
 		anthropicError(w, 400, unsupportedMediaMessage(kind), "invalid_request_error")

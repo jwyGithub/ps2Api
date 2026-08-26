@@ -24,10 +24,11 @@ import (
 type Server struct {
 	Store  *store.Store
 	Router *router.Router
+	Vision *provider.MediaResolver
 }
 
 func New(s *store.Store) *Server {
-	srv := &Server{Store: s, Router: router.New(s)}
+	srv := &Server{Store: s, Router: router.New(s), Vision: provider.NewMediaResolver(s)}
 	// 后台告警评估器：基于真实日志/额度统计定期落告警（见 metrics.go）
 	go srv.runAlertEvaluator()
 	return srv

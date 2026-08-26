@@ -72,14 +72,15 @@ func (p *Provider) splitMessages(messages []ChatMessage, convID string) splitRes
 				var blocks []map[string]interface{}
 				if json.Unmarshal(msg.Content, &blocks) == nil {
 					for _, b := range blocks {
-						if b["type"] == "tool_result" {
+						switch b["type"] {
+						case "tool_result":
 							id, _ := b["tool_use_id"].(string)
 							label := "Tool Result"
 							if failed, _ := b["is_error"].(bool); failed {
 								label = "Tool Error"
 							}
 							parts = append([]string{fmt.Sprintf("[%s id=%s]\n%s", label, id, toolResultText(b["content"]))}, parts...)
-						} else if b["type"] == "text" {
+						case "text":
 							if text, _ := b["text"].(string); text != "" {
 								parts = append(parts, "[User Message]\n"+text)
 							}

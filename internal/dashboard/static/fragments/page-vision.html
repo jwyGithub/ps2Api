@@ -1,0 +1,29 @@
+<section class="page" id="page-vision">
+    <div class="p-8">
+      <div class="flex items-end justify-between mb-8 gap-6 flex-wrap">
+        <div>
+          <div class="text-[11px] font-semibold tracking-wider uppercase mb-2" style="color: var(--muted);">Vision</div>
+          <h1 class="hero-title">图片 <em>识别</em></h1>
+          <p class="mt-2 text-[14px]" style="color: var(--fg-2);">用外部视觉模型（如 xAI Grok）把请求中的图片识别成文字，再转发给纯文本上游。</p>
+        </div>
+      </div>
+
+      <div class="space-y-4">
+        <div class="card p-6">
+          <div class="p-3 rounded-lg mb-4" style="background: var(--bg);">
+            <div class="text-[13px] font-semibold mb-1">工作原理</div>
+            <div class="text-[12px]" style="color: var(--fg-2);">
+              上游 Postman /chat 只接受纯文本，没有图片通道。开启后，网关在入站发现图片内容块时，先调用下方配置的视觉模型识别成文字，
+              原地替换为 <span class="font-mono">[图片识别内容]…[/图片识别内容]</span> 文本块，再走正常链路发上游。
+              识别失败或图片超出限制会返回 400（不会静默丢图）；关闭时维持「带图请求直接拒绝」的原有行为。
+              识别结果会按图片指纹缓存（配置 Redis 则跨实例共享），同一张图多轮对话只识别一次。
+            </div>
+          </div>
+
+          <h3 class="font-display text-[20px] font-medium mb-1">配置</h3>
+          <p class="text-[12px] mb-5" style="color: var(--muted);">以下配置真实读写后端 SQLite settings 表，保存后立即生效，无需重启</p>
+          <div class="space-y-3" id="visionForm"></div>
+        </div>
+      </div>
+    </div>
+  </section>

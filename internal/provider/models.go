@@ -12,9 +12,9 @@ var PostmanModelMap = map[string]string{
 	"claude-sonnet-4-5": "CLAUDE_45_SONNET_BEDROCK",
 	"claude-haiku-4-5":  "CLAUDE_45_HAIKU_BEDROCK",
 	"gpt-5.6-sol":       "GPT_56_SOL",
-	// codex-mini-latest 是 Codex CLI 用来激活内建 local_shell 执行器的模型名 gate:
-	// 自定义 provider 下 Codex 只按这个字符串判断要不要接线 local_shell,与真实模型无关。
-	// 映射到 GPT_56_SOL,让 Codex 以为在用 codex-mini(从而启用 local_shell),上游仍走 gpt-5.6-sol。
+	// codex-mini-latest:codex 客户端常用的模型名别名,映射到 GPT_56_SOL,上游仍走 gpt-5.6-sol。
+	// 注:工具执行现在靠运行时探测客户端声明的 exec custom 工具(见 api/codex_exec.go),
+	// 与模型名无关;此条目仅为兼容仍以 codex-mini-latest 请求的客户端而保留。
 	"codex-mini-latest": "GPT_56_SOL",
 	"gpt-5.6-terra":     "GPT_56_TERRA",
 	"gpt-5.6-luna":      "GPT_56_LUNA",

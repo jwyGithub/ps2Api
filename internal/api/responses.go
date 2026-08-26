@@ -5,70 +5,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"strings"
 
 	"ps2api/internal/provider"
 )
 
-// codexLocalShell 开启后,把 Postman 的 executeShellCommand 工具调用翻译成 Responses API 的
-// 内建 local_shell_call 项类型。前面所有路径都撞在「Codex 不执行自定义 provider 透传的
-// function_call/MCP 工具」这堵墙;而 local_shell_call 是 Codex CLI 原生自带、自己执行的项类型
-// (见 OpenAI docs: Local shell tool "designed to work with Codex CLI"),它不走自定义工具的
-// handler 查找表,理论上能被 Codex 内建 shell 执行器直接跑。默认关(空 env),不影响其他客户端。
-var codexLocalShell = os.Getenv("PS2API_CODEX_LOCAL_SHELL") != ""
-
-// toLocalShellAction 把 executeShellCommand 的参数转成 local_shell_call 的 action 对象。
-// command 用 bash -lc 包裹(对齐 Codex CLI 自身惯例),保留管道/重定向等 shell 语义。
-func toLocalShellAction(argsJSON string) (map[string]interface{}, bool) {
-	var a struct {
-		ProjectPath  string `json:"projectPath"`
-		Command      string `json:"command"`
-		BlockUntilMs int    `json:"blockUntilMs"`
-	}
-	if json.Unmarshal([]byte(argsJSON), &a) != nil || a.Command == "" {
-		return nil, false
-	}
-	action := map[string]interface{}{
-		"type":    "exec",
-		"command": []string{"bash", "-lc", a.Command},
-	}
-	if a.ProjectPath != "" {
-		action["working_directory"] = a.ProjectPath
-	}
-	if a.BlockUntilMs > 0 {
-		action["timeout_ms"] = a.BlockUntilMs
-	}
-	return action, true
-}
-
-// localShellActionToArgs 把回显的 local_shell_call.action 还原成 executeShellCommand 参数,
-// 供入站历史重建(内部管道只认 executeShellCommand)。best-effort:bash -lc <cmd> 取 <cmd>,
-// 否则 argv 空格拼接。精确度不影响续期——nativeToolResponse 靠 call_id→groupID 闭环,
-// LookupConversation 在 assistant 消息之前的前缀即可命中。
-func localShellActionToArgs(rawAction json.RawMessage) string {
-	var act struct {
-		Command          []string `json:"command"`
-		WorkingDirectory string   `json:"working_directory"`
-		TimeoutMs        int      `json:"timeout_ms"`
-	}
-	_ = json.Unmarshal(rawAction, &act)
-	cmd := ""
-	if n := len(act.Command); n >= 3 && (act.Command[0] == "bash" || act.Command[0] == "sh" || act.Command[0] == "/bin/sh") && (act.Command[1] == "-lc" || act.Command[1] == "-c") {
-		cmd = act.Command[n-1]
-	} else if n > 0 {
-		cmd = strings.Join(act.Command, " ")
-	}
-	out := map[string]interface{}{"command": cmd}
-	if act.WorkingDirectory != "" {
-		out["projectPath"] = act.WorkingDirectory
-	}
-	if act.TimeoutMs > 0 {
-		out["blockUntilMs"] = act.TimeoutMs
-	}
-	b, _ := json.Marshal(out)
-	return string(b)
-}
+// Codex 客户端 exec custom 工具的双向翻译逻辑见 codex_exec.go
+// (codexExecDeclared / execMappable / execInputFor / execInputToArgs 等)。
 
 // Responses API 适配层。Codex 新版只支持 wire_api="responses"(/v1/responses),
 // 不再支持 chat/completions。本文件把 Responses 请求转成内部 ChatRequest 走同一条
@@ -101,7 +43,7 @@ type respInputItem struct {
 	Name      string          `json:"name"`
 	Arguments string          `json:"arguments"`
 	Output    json.RawMessage `json:"output"`
-	Action    json.RawMessage `json:"action"` // local_shell_call 的 exec 动作
+	Input     string          `json:"input"` // custom_tool_call 的原始 input(exec 的 JS 文本)
 }
 
 func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
@@ -119,6 +61,15 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	// 必须扫原始 rr.Input：responsesToOpenAI 走 extractResponsesText 只取 .text 字段，
 	// input_image / input_file 在转换那一步就被丢掉了，转成 ChatMessage 之后查不到。
+	if s.Vision.Enabled() {
+		if resolved, changed, err := s.Vision.ResolveMedia(r.Context(), rr.Input); err != nil {
+			provider.Trace(r.Context(), "client.vision_failed", map[string]interface{}{"error": err.Error()})
+			openAIError(w, 400, "图片识别失败: "+err.Error(), "invalid_request_error")
+			return
+		} else if changed {
+			rr.Input = resolved
+		}
+	}
 	if kind, ok := provider.UnsupportedMediaInJSON(rr.Input); ok {
 		provider.Trace(r.Context(), "client.unsupported_media", map[string]interface{}{"kind": kind})
 		openAIError(w, 400, unsupportedMediaMessage(kind), "invalid_request_error")
@@ -135,8 +86,10 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		openAIError(w, 400, fmt.Sprintf("tool %q was not executed by the client; register a handler for this tool before retrying", name), "invalid_request_error")
 		return
 	}
+	// exec custom tool 探测:客户端声明了 exec(type:custom)才把原生工具翻译成 custom_tool_call。
+	execMode := codexExecDeclared(rr.Tools, rr.Input) || codexExecForce
 	if rr.Stream {
-		s.streamResponses(w, r, &req)
+		s.streamResponses(w, r, &req, execMode)
 		return
 	}
 	res, _, err := s.Router.Chat(r.Context(), &req)
@@ -144,7 +97,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		openAIError(w, 503, err.Error(), "service_unavailable")
 		return
 	}
-	jsonWrite(w, 200, responsesObject(res, req.Model, "completed"))
+	jsonWrite(w, 200, responsesObject(res, req.Model, "completed", execMode))
 }
 
 // responsesToOpenAI 把 Responses 请求转为内部 ChatRequest。
@@ -203,17 +156,18 @@ func respItemToMessage(it respInputItem) (provider.ChatMessage, bool) {
 		content := extractResponsesText(it.Output)
 		b, _ := json.Marshal(content)
 		return provider.ChatMessage{Role: "tool", ToolCallID: it.CallID, Content: b}, it.CallID != ""
-	case "local_shell_call":
-		// Codex 内建 shell 执行的调用回显 → 还原成内部的 executeShellCommand assistant tool_call,
-		// 内部管道/nativeToolResponse 只认裸名 executeShellCommand。
+	case "custom_tool_call":
+		// exec custom 工具调用的回显 → 还原成内部 executeShellCommand assistant tool_call,
+		// 内部管道/nativeToolResponse 只认裸名 executeShellCommand。input 的还原是 best-effort
+		// (见 execInputToArgs),不影响 call_id→groupID 续期闭环。
 		call := provider.ToolCall{ID: it.CallID, Type: "function"}
 		call.Function.Name = "executeShellCommand"
-		call.Function.Arguments = localShellActionToArgs(it.Action)
+		call.Function.Arguments = execInputToArgs(it.Input)
 		tc, _ := json.Marshal([]provider.ToolCall{call})
 		empty, _ := json.Marshal("")
 		return provider.ChatMessage{Role: "assistant", Content: empty, ToolCalls: tc}, it.CallID != ""
-	case "local_shell_call_output":
-		// Codex 本机执行 shell 的结果 → tool 结果消息,按 call_id 走 nativeToolResponse 回传。
+	case "custom_tool_call_output":
+		// 客户端执行 exec 的结果 → tool 结果消息,按 call_id 走 nativeToolResponse 回传。
 		content := extractResponsesText(it.Output)
 		b, _ := json.Marshal(content)
 		return provider.ChatMessage{Role: "tool", ToolCallID: it.CallID, Content: b}, it.CallID != ""
@@ -247,184 +201,10 @@ func extractResponsesText(raw json.RawMessage) string {
 	return ""
 }
 
-// ---- 流式:把内部 Delta 流转成 Responses SSE 事件 ----
-
-func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *provider.ChatRequest) {
-	fl, ok := w.(http.Flusher)
-	if !ok {
-		openAIError(w, 500, "stream unsupported", "server_error")
-		return
-	}
-	respID := newID("resp_")
-	seq := 0
-	emit := func(typ string, obj map[string]interface{}) {
-		obj["type"] = typ
-		obj["sequence_number"] = seq
-		seq++
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", typ, mustJSON(obj))
-		fl.Flush()
-	}
-	skeleton := func(status string, output []interface{}) map[string]interface{} {
-		return map[string]interface{}{"id": respID, "object": "response", "status": status, "model": req.Model, "output": output}
-	}
-	// started：延迟提交 SSE 响应头 + response.created 到首个增量到达。若产出任何输出前就失败，
-	// 回退为干净的 HTTP 503 JSON 错误，避免半截流让调用方挂起。
-	started := false
-	ensureStarted := func() {
-		if started {
-			return
-		}
-		started = true
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		emit("response.created", map[string]interface{}{"response": skeleton("in_progress", []interface{}{})})
-	}
-
-	// 输出项累积:一个可选的 message 项 + 若干 function_call 项,按创建顺序排列。
-	var output []interface{}
-	nextIndex := 0
-
-	msgID := newID("msg_")
-	msgOpen := false
-	msgIndex := 0
-	var textBuf string
-
-	// reasoning 输出项:思考内容以 summary_text 流式回写。reasoning 在 text/tool 之前收尾,
-	// 保证 output 数组顺序为 reasoning -> message -> function_call(与真实 Responses 流一致)。
-	rsID := newID("rs_")
-	rsOpen := false
-	rsIndex := 0
-	var rsBuf string
-	closeReasoning := func() {
-		if !rsOpen {
-			return
-		}
-		emit("response.reasoning_summary_text.done", map[string]interface{}{"item_id": rsID, "output_index": rsIndex, "summary_index": 0, "text": rsBuf})
-		emit("response.reasoning_summary_part.done", map[string]interface{}{"item_id": rsID, "output_index": rsIndex, "summary_index": 0, "part": map[string]interface{}{"type": "summary_text", "text": rsBuf}})
-		item := map[string]interface{}{"id": rsID, "type": "reasoning", "summary": []interface{}{map[string]interface{}{"type": "summary_text", "text": rsBuf}}}
-		emit("response.output_item.done", map[string]interface{}{"output_index": rsIndex, "item": item})
-		output = append(output, item)
-		rsOpen = false
-	}
-
-	type toolAcc struct {
-		id, callID, name, args string
-		index                  int
-		localShell             bool // 该调用翻译成 Codex 内建 local_shell_call
-	}
-	tools := map[int]*toolAcc{}
-	var toolOrder []int
-
-	closeText := func() {
-		if !msgOpen {
-			return
-		}
-		emit("response.output_text.done", map[string]interface{}{"item_id": msgID, "output_index": msgIndex, "content_index": 0, "text": textBuf})
-		emit("response.content_part.done", map[string]interface{}{"item_id": msgID, "output_index": msgIndex, "content_index": 0, "part": map[string]interface{}{"type": "output_text", "text": textBuf}})
-		item := map[string]interface{}{"id": msgID, "type": "message", "status": "completed", "role": "assistant", "content": []interface{}{map[string]interface{}{"type": "output_text", "text": textBuf}}}
-		emit("response.output_item.done", map[string]interface{}{"output_index": msgIndex, "item": item})
-		output = append(output, item)
-		msgOpen = false
-	}
-
-	_, _, err := s.Router.Stream(r.Context(), req, func(d provider.Delta) error {
-		ensureStarted() // 首个增量到达才真正开流（提交 200 + response.created）
-		if d.ReasoningContent != "" {
-			if !rsOpen {
-				rsIndex = nextIndex
-				nextIndex++
-				rsOpen = true
-				emit("response.output_item.added", map[string]interface{}{"output_index": rsIndex, "item": map[string]interface{}{"id": rsID, "type": "reasoning", "summary": []interface{}{}}})
-				emit("response.reasoning_summary_part.added", map[string]interface{}{"item_id": rsID, "output_index": rsIndex, "summary_index": 0, "part": map[string]interface{}{"type": "summary_text", "text": ""}})
-			}
-			rsBuf += d.ReasoningContent
-			emit("response.reasoning_summary_text.delta", map[string]interface{}{"item_id": rsID, "output_index": rsIndex, "summary_index": 0, "delta": d.ReasoningContent})
-		}
-		if d.Content != "" {
-			closeReasoning() // reasoning 在正文之前收尾
-			if !msgOpen {
-				msgIndex = nextIndex
-				nextIndex++
-				msgOpen = true
-				emit("response.output_item.added", map[string]interface{}{"output_index": msgIndex, "item": map[string]interface{}{"id": msgID, "type": "message", "status": "in_progress", "role": "assistant", "content": []interface{}{}}})
-				emit("response.content_part.added", map[string]interface{}{"item_id": msgID, "output_index": msgIndex, "content_index": 0, "part": map[string]interface{}{"type": "output_text", "text": ""}})
-			}
-			textBuf += d.Content
-			emit("response.output_text.delta", map[string]interface{}{"item_id": msgID, "output_index": msgIndex, "content_index": 0, "delta": d.Content})
-		}
-		for _, tc := range d.ToolCalls {
-			acc, exists := tools[tc.Index]
-			if !exists {
-				closeReasoning() // reasoning/文本项在工具项之前收尾
-				closeText()
-				acc = &toolAcc{id: newID("fc_"), index: nextIndex}
-				nextIndex++
-				tools[tc.Index] = acc
-				toolOrder = append(toolOrder, tc.Index)
-			}
-			if tc.ID != "" {
-				acc.callID = tc.ID
-			}
-			if tc.Function != nil && tc.Function.Name != "" {
-				if codexLocalShell && tc.Function.Name == "executeShellCommand" {
-					acc.localShell = true // 翻译成 local_shell_call,在收尾时一次性发出
-				}
-				acc.name = tc.Function.Name
-			}
-			// local_shell_call 无增量 arguments 事件,整个 action 在收尾时发出;此处只累积不 emit。
-			if !exists && !acc.localShell {
-				emit("response.output_item.added", map[string]interface{}{"output_index": acc.index, "item": map[string]interface{}{"id": acc.id, "type": "function_call", "status": "in_progress", "call_id": acc.callID, "name": acc.name, "arguments": ""}})
-			}
-			if tc.Function != nil && tc.Function.Arguments != "" {
-				acc.args += tc.Function.Arguments
-				if !acc.localShell {
-					emit("response.function_call_arguments.delta", map[string]interface{}{"item_id": acc.id, "output_index": acc.index, "delta": tc.Function.Arguments})
-				}
-			}
-		}
-		return nil
-	})
-
-	closeReasoning() // 纯思考、无正文/工具时的兜底收尾
-	closeText()
-	for _, idx := range toolOrder {
-		acc := tools[idx]
-		if acc.args == "" {
-			acc.args = "{}"
-		}
-		if acc.localShell {
-			if action, ok := toLocalShellAction(acc.args); ok {
-				item := map[string]interface{}{"id": acc.id, "type": "local_shell_call", "status": "completed", "call_id": acc.callID, "action": action}
-				emit("response.output_item.added", map[string]interface{}{"output_index": acc.index, "item": item})
-				emit("response.output_item.done", map[string]interface{}{"output_index": acc.index, "item": item})
-				output = append(output, item)
-				continue
-			}
-			// 参数解析失败:退回普通 function_call(带 mcp 前缀名),至少不丢调用。
-			emit("response.output_item.added", map[string]interface{}{"output_index": acc.index, "item": map[string]interface{}{"id": acc.id, "type": "function_call", "status": "in_progress", "call_id": acc.callID, "name": acc.name, "arguments": ""}})
-		}
-		emit("response.function_call_arguments.done", map[string]interface{}{"item_id": acc.id, "output_index": acc.index, "arguments": acc.args})
-		item := map[string]interface{}{"id": acc.id, "type": "function_call", "status": "completed", "call_id": acc.callID, "name": acc.name, "arguments": acc.args}
-		emit("response.output_item.done", map[string]interface{}{"output_index": acc.index, "item": item})
-		output = append(output, item)
-	}
-
-	if err != nil {
-		// 产出任何输出前就失败：还没开流，回退为干净的 HTTP 错误，调用方可明确停止任务。
-		if !started {
-			openAIError(w, 503, err.Error(), "service_unavailable")
-			return
-		}
-		// 已开流后失败：发 response.failed 作为终止事件，让流干净收尾。
-		emit("response.failed", map[string]interface{}{"response": map[string]interface{}{"id": respID, "object": "response", "status": "failed", "model": req.Model, "error": map[string]string{"code": "provider_error", "message": err.Error()}}})
-		return
-	}
-	emit("response.completed", map[string]interface{}{"response": skeleton("completed", output)})
-}
+// 流式实现见 responses_stream.go(streamResponses:把内部 Delta 流转成 Responses SSE 事件)。
 
 // responsesObject 构造非流式的 Responses 响应体(output 数组 + usage)。
-func responsesObject(res *provider.Result, model, status string) map[string]interface{} {
+func responsesObject(res *provider.Result, model, status string, execMode bool) map[string]interface{} {
 	var output []interface{}
 	if res.ReasoningContent != "" {
 		output = append(output, map[string]interface{}{
@@ -443,11 +223,11 @@ func responsesObject(res *provider.Result, model, status string) map[string]inte
 		if args == "" {
 			args = "{}"
 		}
-		if codexLocalShell && tc.Function.Name == "executeShellCommand" {
-			if action, ok := toLocalShellAction(args); ok {
+		if execMode && execMappable(tc.Function.Name) {
+			if input, ok := execInputFor(tc.Function.Name, args); ok {
 				output = append(output, map[string]interface{}{
-					"id": newID("fc_"), "type": "local_shell_call", "status": "completed",
-					"call_id": tc.ID, "action": action,
+					"id": newID("ctc_"), "type": "custom_tool_call", "status": "completed",
+					"call_id": tc.ID, "name": codexExecName, "input": input,
 				})
 				continue
 			}

@@ -40,6 +40,27 @@ var settingDefs = []settingDef{
 	{Key: "proxy_enabled", Label: "启用出口代理", Type: "bool", Default: "false", Group: "proxy", Description: "开启后所有发往上游的请求都经代理池出站（不再直连），遇 Cloudflare 403 重试时自动轮换出口 IP；仅对纯源 IP 限速有效"},
 	{Key: "proxy_urls", Label: "代理出口列表", Type: "text", Default: "", Group: "proxy", Description: "换行或逗号分隔的代理 URL，支持 http/https/socks5，如 socks5://127.0.0.1:1080、http://user:pass@host:port。同一账号默认粘同一出口，403 才换下一个出口 IP 轮换"},
 	{Key: "proxy_fallback_direct", Label: "代理全挂兜底直连", Type: "bool", Default: "false", Group: "proxy", Description: "开启后，当出口代理不可达（拨号/CONNECT 失败）时改用本机直连重试一次而非直接失败；关闭则严格只走代理（代理全挂即请求失败）。默认关闭"},
+	// 图片识别（vision）：上游 Postman /chat 只接受纯文本 query，无图片通道。开启后，网关在入站遇到
+	// 图片内容块时先用外部视觉模型（如 xAI Grok）识别成文字，原地替换为文本块再发上游；识别失败一律
+	// 回退 400（绝不静默丢图）。这组 group="vision" 的项不在通用设置表单渲染，由独立的「图片识别」菜单页管理。
+	{Key: "vision_enabled", Label: "启用图片识别", Type: "bool", Default: "false", Group: "vision", Description: "开启后，含图片的请求会先经外部视觉模型识别成文字再转发纯文本上游；关闭则维持原有「带图请求直接 400 拒绝」行为"},
+	{Key: "vision_api_base", Label: "视觉模型 Base URL", Type: "text", Default: "http://125.122.23.233:9080/v1", Group: "vision", Description: "OpenAI 兼容的视觉模型接口基址（不含 /chat/completions）。xAI Grok 为 https://api.x.ai/v1"},
+	{Key: "vision_api_key", Label: "视觉模型 API Key", Type: "text", Default: "", Group: "vision", Description: "调用视觉模型的 Bearer Key，存入本地 SQLite。留空则视为未配置、图片识别不生效"},
+	{Key: "vision_model", Label: "视觉模型名", Type: "text", Default: "grok-4.6", Group: "vision", Description: "用于识图的模型名，如 grok-4.6 / grok-4.6-latest / grok-4"},
+	{Key: "vision_max_images", Label: "单请求最多识别图片数", Type: "number", Default: "4", Group: "vision", Description: "一次请求中最多识别多少张图片；超过则回退 400。防止单请求触发过多外部调用"},
+	{Key: "vision_max_image_mb", Label: "单图最大体积(MB)", Type: "number", Default: "20", Group: "vision", Description: "单张图片解码后字节数上限（MB），超过则回退 400。xAI 上限为 20MiB"},
+	{Key: "vision_max_result_chars", Label: "单图识别文本上限(字符)", Type: "number", Default: "2000", Group: "vision", Description: "每张图识别结果最多保留多少字符，超出截断。防止多图识别文本顶爆上游 10000 字符 query 上限"},
+	{Key: "vision_timeout_seconds", Label: "识别超时(秒)", Type: "number", Default: "60", Group: "vision", Description: "单次视觉模型调用的超时时间（秒）"},
+	{Key: "vision_prompt", Label: "识别提示词", Type: "text", Default: "请把这张图片的内容尽量完整、结构化地转述成文字，包含其中所有可读文本（OCR）、图表与关键视觉信息。只输出转述内容本身，不要加任何前后缀说明。", Group: "vision", Description: "发给视觉模型的指令，决定识别输出的风格与详略"},
+	// OCR：除视觉模型外的第二种识别引擎。vision_recognize_mode 决定用哪种：
+	//   vision（默认，仅视觉模型）| ocr（仅外部 OCR HTTP 服务）| ocr_then_vision（OCR 优先，空结果或失败回退视觉模型）。
+	// OCR 只抽可读文本、更快更省，但丢失图表/排版/视觉语义；视觉模型能整体转述。三者共用同一段图片提取、
+	// 体积/数量限制、结果截断、缓存与替换逻辑，只是识别这一步不同。
+	{Key: "vision_recognize_mode", Label: "识别引擎", Type: "select", Default: "vision", Options: []string{"vision", "ocr", "ocr_then_vision"}, Group: "vision", Description: "vision=仅视觉模型(默认)；ocr=仅外部 OCR 服务；ocr_then_vision=OCR 优先，空结果或失败时回退视觉模型"},
+	{Key: "ocr_api_base", Label: "OCR 服务地址", Type: "text", Default: "", Group: "vision", Description: "外部 OCR HTTP 服务的完整接口 URL（直接 POST 到该地址）。请求体为 JSON {\"image\":\"<data URL 或 http(s) 直链>\",\"lang\":\"...\"}；响应会从 text/result/transcription/stdout 等字段提取识别文本。留空则 OCR 模式不生效"},
+	{Key: "ocr_api_key", Label: "OCR 服务 Key", Type: "text", Default: "", Group: "vision", Description: "调用 OCR 服务的 Bearer Key，存入本地 SQLite。留空则不带 Authorization 头"},
+	{Key: "ocr_lang", Label: "OCR 识别语言", Type: "text", Default: "chi_sim+eng", Group: "vision", Description: "随请求发给 OCR 服务的 lang 字段，如 chi_sim+eng / eng。具体取值取决于你的 OCR 服务"},
+	{Key: "ocr_timeout_seconds", Label: "OCR 超时(秒)", Type: "number", Default: "30", Group: "vision", Description: "单次 OCR 服务调用的超时时间（秒）"},
 }
 
 func defaultSettings() map[string]string {
@@ -106,9 +127,9 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, 400, "unknown setting key: "+k, "invalid_request")
 			return
 		}
-		// 代理出口列表允许被清空（用户删除所有出口后应真正落库为空、回退直连）；
+		// 代理出口列表、视觉模型 Key 允许被清空（前者删空出口回退直连，后者清空以停用图片识别）；
 		// 其它设置项保留「空值跳过」语义，避免误把未随表单提交的项清掉。
-		if v == "" && k != "proxy_urls" {
+		if v == "" && k != "proxy_urls" && k != "vision_api_key" {
 			continue
 		}
 		if err := s.Store.SetSetting(k, v); err != nil {

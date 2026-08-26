@@ -21,11 +21,41 @@ services:
     networks:
       - default
       - sub2api-net
+    depends_on:
+      ocr:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:1930/health"]
       interval: 30s
       timeout: 3s
       retries: 3
+
+  # 精准 OCR 识别服务（RapidOCR + ONNXRuntime）。
+  # 网关内部通过 http://ocr:8000/ocr 调用：在面板「系统设置 → 图片识别」把
+  #   识别引擎 = ocr（或 ocr_then_vision）、ocr_api_base = http://ocr:8000/ocr
+  # 配置好即可生效。若设了 OCR_API_KEY，需在面板 ocr_api_key 填相同值。
+  ocr:
+    build: ./ocr
+    image: ps2api-ocr
+    container_name: ps2api-ocr
+    restart: unless-stopped
+    # 仅在项目默认网络内暴露给 ps2api；如需宿主机直连调试可放开下面的端口映射。
+    # ports:
+    #   - "8000:8000"
+    environment:
+      - OCR_PORT=8000
+      # 可选鉴权：设置后网关侧 ocr_api_key 需填相同值；留空则内网放行。
+      # - OCR_API_KEY=change-me
+      # - OCR_MAX_IMAGE_MB=20
+      # - OCR_ALLOW_REMOTE_FETCH=true
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 40s
 
 networks:
   # 项目自身的默认网络（保持 ps2api 原有的对外/对内连通性）

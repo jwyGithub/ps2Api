@@ -209,7 +209,7 @@ func consoleLevel() int {
 // eventLevel 把链路事件映射到日志级别，方便按严重程度着色/过滤。
 func eventLevel(event string) int {
 	switch event {
-	case "router.error", "client.request.error":
+	case "router.error", "client.request.error", "vision.error", "ocr.error":
 		return logError
 	case "router.failure", "router.gateway_blocked", "router.gateway_sticky_retry",
 		"router.request_rejected", "upstream.request.oversize":
