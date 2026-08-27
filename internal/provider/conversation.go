@@ -128,13 +128,23 @@ func assistantFollowup(res *Result) *ChatMessage {
 
 // RememberConversation 在会话成功后记录会话映射（请求历史 + 请求+助手回复），
 // 供 LookupConversation / StickyAccount 复用。
+//
+// 无条件存 fp(messages)：首轮请求 messages=[user1] 时 hasReusableHistory 为 false，
+// 若只存「+重构 assistant」这一条，下一轮续聊就全靠该重构与客户端回发的 assistant 轮
+// 逐字节命中——而真实客户端常重塑 assistant 轮（content 数组化、夹带 thinking/tool_use、
+// 追加 action-recommendation、tool_calls 参数空白差异等），指纹极易对不上 → 首个 follow-up
+// 落空、降级为 conversationId=null 的 USER_QUERY 重建。故这里也存不含 assistant 的裸历史
+// 前缀作为可靠兜底：客户端下一轮必逐字重发既有 user 前缀，`messages[:i]` 必命中它。
+// 隔离不受影响——LookupConversation/StickyAccount 的读侧仍以 hasReusableHistory 为门槛，
+// 全新单条 user 对话一律开新会话，不会误匹配裸前缀。
+// 说明（安全级别 A）：裸 user 前缀不唯一，若两个会话首条 user 消息逐字相同，后写者会覆盖
+// 该裸键；仅当更精确的 +assistant 前缀也未命中时，兜底才可能落到另一会话。此为已知窄场景，
+// 换取首轮续聊的高命中率。
 func (p *Provider) RememberConversation(accountID int64, messages []ChatMessage, res *Result) {
 	if res == nil || res.ConversationID == "" || len(messages) == 0 {
 		return
 	}
-	if hasReusableHistory(messages) {
-		p.setConversationID(accountID, messages, res.ConversationID)
-	}
+	p.setConversationID(accountID, messages, res.ConversationID)
 	if asst := assistantFollowup(res); asst != nil {
 		next := append(append([]ChatMessage{}, messages...), *asst)
 		p.setConversationID(accountID, next, res.ConversationID)
@@ -143,6 +153,39 @@ func (p *Provider) RememberConversation(accountID int64, messages []ChatMessage,
 
 func (p *Provider) ResetConversation(accountID int64) {
 	p.convStore.Reset(accountID)
+}
+
+// trailingToolCallIDs 收集消息里携带的所有 tool_call_id（本次交回的工具结果）。会话失效时
+// 一并删除这些 toolCallId 的组映射，使下一轮不会再据此构造 native TOOL_RESPONSE 交回死会话。
+func trailingToolCallIDs(messages []ChatMessage) []string {
+	var ids []string
+	for _, m := range messages {
+		if m.ToolCallID != "" {
+			ids = append(ids, m.ToolCallID)
+		}
+	}
+	return ids
+}
+
+// InvalidateConversation 定点失效一个已损坏(空流被消费 / TOOL_CALL_NOT_FOUND)的 Postman
+// 会话：删掉指向该 conversationId 的会话映射与对应归属映射，以及本次请求携带的 pending
+// toolCallId 组映射。下一轮续聊会因 LookupConversation 落空而降级为 conversationId=null 的
+// USER_QUERY 重建，不再反复把已消费的 toolCallId 交回死会话。与账号级 ResetConversation 不同，
+// 这里只动这一个会话，绝不误伤同账号上并发的健康会话。
+func (p *Provider) InvalidateConversation(accountID int64, messages []ChatMessage) {
+	convID := p.LookupConversation(accountID, messages)
+	if convID == "" {
+		return
+	}
+	p.convStore.InvalidateConversation(accountID, convID, trailingToolCallIDs(messages))
+}
+
+// invalidateIfCorrupt 在 provider 层收敛「会话损坏后失效映射」的调用点：仅当 res 标记
+// SessionCorrupt 时才定点失效，其余情况零副作用。
+func (p *Provider) invalidateIfCorrupt(accountID int64, messages []ChatMessage, res *Result) {
+	if res != nil && res.SessionCorrupt {
+		p.InvalidateConversation(accountID, messages)
+	}
 }
 
 // ---------- 消息提取 ----------

@@ -229,6 +229,7 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 		if reader.RequestRejected || isRequestRejectionMessage(reader.Err) {
 			res.RequestRejected = true
 		}
+		res.SessionCorrupt = reader.SessionCorrupt
 		return fmt.Errorf("%s", res.Error)
 	}
 
@@ -237,6 +238,19 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 	}
 	res.ActualModel = reader.ActualModel
 	res.Usage = reader.Usage
+
+	// 上游干净结束(EOF)但既没有 [DONE] 收尾、也没有吐出任何正文/工具调用(failure/quota 已在
+	// 上面各自返回)：这是一次不完整的空流——典型为 Postman 已收下 TOOL_RESPONSE 但 Bedrock
+	// 生成被掐断。绝不能当成功：那会向客户端发 end_turn(空回复)，并把已被服务端消费的 tool call
+	// 会话固化成映射，导致后续续聊必然 TOOL_CALL_NOT_FOUND。标记为可重试的上游失败(账号健康,
+	// 不 MarkError)，并置 SessionCorrupt 让上层失效该会话映射——续聊重试时降级为 USER_QUERY
+	// 重建，而不是再交一次已消费的 toolCallId。对照：真正成功的空回复一定带 [DONE]。
+	if !reader.sawDone && !reader.hadOutput() {
+		res.Error = "Upstream returned an empty stream (no content and no completion marker)"
+		res.UpstreamFailure = true
+		res.SessionCorrupt = true
+		return fmt.Errorf("%s", res.Error)
+	}
 
 	for _, d := range reader.Finish() {
 		if err := emit(d); err != nil {

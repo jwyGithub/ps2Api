@@ -40,6 +40,11 @@ type RouteError struct {
 	// GatewayBlocked 标记该失败源于上游网关(Cloudflare)风控拦截(403)且所有尝试账号均被拦。
 	// 供 HTTP 层选择合适的状态码/文案,让 agent 终端能明确「上游拦截、非本地错误」。
 	GatewayBlocked bool
+	// Rejected 标记该失败源于请求内容/会话状态本身(坏请求、工具名冲突、TOOL_CALL_NOT_FOUND
+	// 等),换账号或重试都不会成功。HTTP 层据此返回 400 invalid_request_error 让客户端立即停止,
+	// 而不是 529 overloaded_error——后者会触发 SDK 退避重试,把一次性的会话损坏放大成
+	// "Repeated 529 Overloaded errors"。
+	Rejected bool
 }
 
 func (e *RouteError) Error() string { return e.Message }

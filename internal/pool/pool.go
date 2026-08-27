@@ -18,10 +18,18 @@ type Pool struct {
 	// 这类 403 是账号身份被 WAF/Bot 评分标记，短期内换号才有效、重试同号必然再被拦，
 	// 故在冷却窗口内 Next 优先跳过这些「被烧」账号。内存态、重启归零（与 inFlight 一致）。
 	gatewayCooldown map[int64]time.Time
+	// reservedUntil 记录账号「最近被某客户端占用」的软预留截止时间：每次成功交付后由
+	// 路由层 Reserve 刷新。inFlight 只在请求真正在飞时 >0，一个对话在回合间隙（用户打字/
+	// agent 思考）里 inFlight 归 0，账号看起来空闲，别的客户端就会挑到同一个号，导致多客户端
+	// 挤同一账号、额度被快速烧穿、频繁换号。reservedUntil 补上这个「回合间隙」的空档：普通
+	// 轮询选号时把仍在预留窗口内的账号作为「次级」避让项——同等 inFlight 负载下优先挑没被占用
+	// 的号，从而把不同客户端摊到不同账号上。纯软避让：永不把账号踢出候选，池子小/全被预留时
+	// 仍照常复用，不影响可用性。内存态、重启归零（与 inFlight / gatewayCooldown 一致）。
+	reservedUntil map[int64]time.Time
 }
 
 func New(s *store.Store) *Pool {
-	return &Pool{store: s, last: -1, inFlight: map[int64]int{}, gatewayCooldown: map[int64]time.Time{}}
+	return &Pool{store: s, last: -1, inFlight: map[int64]int{}, gatewayCooldown: map[int64]time.Time{}, reservedUntil: map[int64]time.Time{}}
 }
 
 // QuotaMode 控制 403 网关 failover 换号时的选号策略（由设置 prefer_quota_on_403 决定）。
@@ -94,15 +102,19 @@ func quotaExhausted(acc *store.Account) bool {
 // skipExhausted 为真时额外跳过 AI 用量额度已耗尽（quotaExhausted）的账号——这类号即便
 // 速率窗口新鲜（RateRemaining 高）也发不出有效结果，若不跳会在 403 换号「选额度最满」策略里
 // 反被优先选中，白白浪费重试预算。
-//   - mode=RoundRobin（默认/普通选号）：从轮询起点 (last+1) 出发挑 inFlight 负载最低的账号，
-//     命中 0 负载即提前返回，保持原有的 round-robin 负载均衡语义。
+//   - mode=RoundRobin（默认/普通选号）：从轮询起点 (last+1) 出发，以 inFlight 负载升序为主键、
+//     「是否仍在软预留窗口内」升序为次键挑账号——即同等负载下优先挑没被别的客户端占用的号，
+//     把多客户端摊到不同账号上；仅当命中「负载 0 且未被预留」的理想账号才提前返回。预留只是
+//     软避让、永不淘汰账号：全被预留时最优候选照样是某个被预留号，不影响可用性。
 //   - mode=Ratio/Absolute（403 换号）：以剩余额度（比例或绝对值）降序为主键、
 //     inFlight 负载升序为次键，必须遍历全部账号以找出额度最高者（不能提前 break）。
-//     额度同、负载同时由轮询起点决定先后。
+//     额度同、负载同时由轮询起点决定先后。软预留避让只作用于 RoundRobin，不介入 403 换号
+//     （那一步的目标是切到「最新鲜、余量最满」的号，与占用避让正交）。
 func (p *Pool) pickIndex(accounts []*store.Account, excluded map[int64]bool, now time.Time, skipCooldown, skipExhausted bool, mode QuotaMode) int {
 	start := (p.last + 1) % len(accounts)
 	best := -1
 	bestLoad := int(^uint(0) >> 1)
+	bestReserved := 2 // 0=未预留,1=预留中；初值 2 保证首个候选必被采纳
 	bestRemaining, bestLimit := -1, 0
 	for i := 0; i < len(accounts); i++ {
 		idx := (start + i) % len(accounts)
@@ -134,10 +146,16 @@ func (p *Pool) pickIndex(accounts []*store.Account, excluded map[int64]bool, now
 			}
 			continue
 		}
-		if load < bestLoad {
-			best, bestLoad = idx, load
+		// 主键 inFlight 负载升序、次键「软预留」升序：同等负载下优先未被占用的号。
+		reserved := 0
+		if until, ok := p.reservedUntil[acc.ID]; ok && now.Before(until) {
+			reserved = 1
 		}
-		if load == 0 {
+		if load < bestLoad || (load == bestLoad && reserved < bestReserved) {
+			best, bestLoad, bestReserved = idx, load, reserved
+		}
+		// 仅「负载 0 且未被预留」才是理想账号，可提前收工；否则继续找更优的。
+		if load == 0 && reserved == 0 {
 			break
 		}
 	}
@@ -212,6 +230,19 @@ func (p *Pool) Done(id int64) {
 	} else {
 		p.inFlight[id]--
 	}
+}
+
+// Reserve 把账号标记为「最近被占用」，软预留窗口 d 内的普通轮询选号会优先避开它（次级避让，
+// 见 pickIndex）。由路由层在每次成功交付后刷新，使「占用」标记从本回合完成时刻起算，覆盖对话
+// 回合之间 inFlight 已归零的空档，避免别的客户端在这段间隙里挤到同一个账号。d<=0 时不预留
+// （等价于关闭该机制，由设置 account_reservation_seconds=0 触发）。内存态、重启归零。
+func (p *Pool) Reserve(id int64, d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.reservedUntil[id] = time.Now().Add(d)
 }
 
 func (p *Pool) MarkUsed(id int64) { _ = p.store.MarkUsed(id) }

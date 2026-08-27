@@ -32,6 +32,11 @@ type ConversationStore interface {
 	// Reset 清空某账号名下的全部会话映射与归属映射。
 	Reset(accountID int64)
 
+	// InvalidateConversation 定点删除一个已损坏会话的映射：清掉该账号下所有指向 conversationID
+	// 的会话映射与对应归属映射，并删除给定 toolCallID 的工具调用组映射。与 Reset(账号级全清)
+	// 不同，只影响这一个会话，绝不误伤同账号并发的其他健康会话。
+	InvalidateConversation(accountID int64, conversationID string, toolCallIDs []string)
+
 	// Mode 返回人类可读的存储模式描述，供启动日志体现当前会话存储去向。
 	Mode() string
 }
@@ -108,4 +113,38 @@ func (m *memoryConversationStore) Reset(accountID int64) {
 		}
 		return true
 	})
+}
+
+func (m *memoryConversationStore) InvalidateConversation(accountID int64, conversationID string, toolCallIDs []string) {
+	if conversationID != "" {
+		prefix := strconv.FormatInt(accountID, 10) + ":"
+		// 会话映射：删掉本账号名下所有值==conversationID 的项，并记下其 fingerprint（复合键去掉
+		// "account:" 前缀即得；fingerprint 是 sha256 hex，不含冒号，切分无歧义）。
+		deadFPs := make([]string, 0, 2)
+		m.convMap.Range(func(k, v any) bool {
+			ks, ok := k.(string)
+			if !ok || !strings.HasPrefix(ks, prefix) {
+				return true
+			}
+			if cv, ok := v.(string); ok && cv == conversationID {
+				m.convMap.Delete(k)
+				deadFPs = append(deadFPs, strings.TrimPrefix(ks, prefix))
+			}
+			return true
+		})
+		// 归属映射：仅删这些 fingerprint 且当前归属仍==本账号的项，避免误删被其他账号覆盖过的指纹。
+		for _, fp := range deadFPs {
+			if v, ok := m.convOwn.Load(fp); ok {
+				if id, ok := v.(int64); ok && id == accountID {
+					m.convOwn.Delete(fp)
+				}
+			}
+		}
+	}
+	// 工具调用组：删掉本次请求携带的 pending toolCallId 映射，杜绝下一轮据此重建 native TOOL_RESPONSE。
+	for _, id := range toolCallIDs {
+		if id != "" {
+			m.toolGroups.Delete(toolGroupKey(accountID, id))
+		}
+	}
 }

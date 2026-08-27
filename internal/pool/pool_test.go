@@ -3,6 +3,7 @@ package pool
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"ps2api/internal/store"
 )
@@ -186,5 +187,69 @@ func TestNextFallsBackWhenAllQuotaExhausted(t *testing.T) {
 	}
 	if acc == nil {
 		t.Fatal("expected a non-nil account from last-resort fallback")
+	}
+}
+
+// 普通轮询选号应软避让「最近被占用」(Reserve) 的账号：三个号均空闲(load 0)时，
+// 若首选位置的号被预留，应跳到未被预留的号，避免多客户端挤在同一账号上。
+func TestNextAvoidsReservedAccountRoundRobin(t *testing.T) {
+	s, ids := newTestStore(t)
+	p := New(s)
+
+	// 预留 a1（轮询起点 last=-1 → start=0 即 a1）。未预留时 Next 会命中 a1 立即返回；
+	// 预留后应避开 a1，落到下一个未被占用的号。
+	p.Reserve(ids["a1@test.com"], time.Minute)
+	acc, err := p.Next(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acc.ID == ids["a1@test.com"] {
+		t.Fatalf("reserved account a1(%d) should be avoided when idle unreserved peers exist, got it", ids["a1@test.com"])
+	}
+}
+
+// 预留是「软」避让：当所有账号都被预留时仍须返回一个账号（不硬失败），保证可用性。
+func TestNextReturnsReservedWhenAllReserved(t *testing.T) {
+	s, ids := newTestStore(t)
+	p := New(s)
+	for _, e := range []string{"a1@test.com", "a2@test.com", "a3@test.com"} {
+		p.Reserve(ids[e], time.Minute)
+	}
+	acc, err := p.Next(nil)
+	if err != nil {
+		t.Fatalf("expected an account even when all reserved, got err: %v", err)
+	}
+	if acc == nil {
+		t.Fatal("expected a non-nil account when all reserved (soft avoidance must not starve)")
+	}
+}
+
+// Reserve 的时长 d<=0 时不预留（等价于 account_reservation_seconds=0 关闭该机制）：
+// 此时 a1 不被避让，轮询起点仍会命中 a1。
+func TestReserveZeroDurationIsNoop(t *testing.T) {
+	s, ids := newTestStore(t)
+	p := New(s)
+	p.Reserve(ids["a1@test.com"], 0)
+	acc, err := p.Next(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acc.ID != ids["a1@test.com"] {
+		t.Fatalf("d<=0 must not reserve; expected round-robin start a1(%d), got %d", ids["a1@test.com"], acc.ID)
+	}
+}
+
+// 过期的预留不再避让：预留窗口到期后，账号恢复为可正常命中的空闲号。
+func TestReservationExpiresRestoresAvailability(t *testing.T) {
+	s, ids := newTestStore(t)
+	p := New(s)
+	p.Reserve(ids["a1@test.com"], time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
+	acc, err := p.Next(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acc.ID != ids["a1@test.com"] {
+		t.Fatalf("expired reservation should no longer avoid a1(%d); got %d", ids["a1@test.com"], acc.ID)
 	}
 }
