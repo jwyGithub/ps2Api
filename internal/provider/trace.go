@@ -30,6 +30,25 @@ func TraceEnabled() bool {
 	}
 }
 
+// TraceImageEnabled 控制是否把入站图片原样落盘到追踪目录，由 GATEWAY_TRACE_IMG 开启。
+// 与 GATEWAY_TRACE_LOG（jsonl 深追踪）独立：可只存图不写 jsonl，或反之。
+func TraceImageEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GATEWAY_TRACE_IMG"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// traceBaseDir 返回追踪产物（jsonl / 图片）的根目录：GATEWAY_TRACE_DIR，缺省 ./data/traces。
+func traceBaseDir() string {
+	if dir := strings.TrimSpace(os.Getenv("GATEWAY_TRACE_DIR")); dir != "" {
+		return dir
+	}
+	return "./data/traces"
+}
+
 // endpoint 用作日志子目录（如 openai/anthropic），按调用方式分开存储。
 func NewTraceContext(ctx context.Context, endpoint string) (context.Context, string) {
 	// 始终生成 trace_id 作为整条请求链路的关联 id（控制台链路日志恒可用）；
@@ -66,10 +85,7 @@ func Trace(ctx context.Context, event string, data interface{}) {
 	if err != nil {
 		return
 	}
-	dir := strings.TrimSpace(os.Getenv("GATEWAY_TRACE_DIR"))
-	if dir == "" {
-		dir = "./data/traces"
-	}
+	dir := traceBaseDir()
 	// 按调用方式分目录。endpoint 来自内部常量，filepath.Base 兜底防路径穿越。
 	if ep, _ := ctx.Value(traceEndpointKey{}).(string); ep != "" {
 		dir = filepath.Join(dir, filepath.Base(ep))

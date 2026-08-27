@@ -3,13 +3,16 @@ package provider
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -77,6 +80,10 @@ type visionConfig struct {
 	timeout        time.Duration
 	proxyURL       string // 出口代理，复用上游同一份 proxy_urls 设置；空表示直连
 
+	// 识别失败时的重试次数（不含首次）。0 表示不重试；每次重试前退避 retryBackoff。
+	maxRetries   int
+	retryBackoff time.Duration
+
 	// 识别引擎选择：vision（仅视觉模型，默认）| ocr（仅外部 OCR 服务）| ocr_then_vision（OCR 优先，回退视觉）。
 	mode       string
 	ocrAPIBase string // 外部 OCR HTTP 服务完整接口 URL；空表示未配置
@@ -129,6 +136,11 @@ func (m *MediaResolver) config() visionConfig {
 	}
 	cfg.maxImageBytes = int64(atoiDef("vision_max_image_mb", 20)) * 1024 * 1024
 	cfg.proxyURL = m.proxySetting()
+	// 识别失败重试：vision_max_retries 允许为 0（不重试），故不用 atoiDef（其只接受 >0）。
+	if n, err := strconv.Atoi(m.getSetting("vision_max_retries", "")); err == nil && n >= 0 {
+		cfg.maxRetries = n
+	}
+	cfg.retryBackoff = time.Duration(atoiDef("vision_retry_backoff_ms", 500)) * time.Millisecond
 	cfg.mode = m.getSetting("vision_recognize_mode", "vision")
 	cfg.ocrAPIBase = strings.TrimRight(m.getSetting("ocr_api_base", defaultOCRAPIBase), "/")
 	cfg.ocrAPIKey = m.getSetting("ocr_api_key", "")
@@ -137,20 +149,26 @@ func (m *MediaResolver) config() visionConfig {
 	return cfg
 }
 
-// proxySetting 复用上游出口的 proxy_enabled + proxy_urls 设置：开启且已配置时返回首个代理 URL，
-// 否则返回 ""（直连）。视觉服务(如 api.x.ai)在部分区域网络需与上游走同一出口，否则本机直连超时。
+// proxySetting 由独立开关 vision_use_proxy 决定视觉/OCR 调用是否走代理，与上游出口的
+// proxy_enabled 解耦（可单独为视觉服务开关代理）：开启时从代理池 proxy_urls 中随机取一个
+// 代理 URL（复用上游同一份代理配置，随机分散出口负载）；关闭或代理池为空时返回 ""（直连）。
+// 视觉服务(如 api.x.ai)在部分区域网络需经代理出口，否则本机直连超时。
 func (m *MediaResolver) proxySetting() string {
-	if m.getSetting("proxy_enabled", "false") != "true" {
+	if m.getSetting("vision_use_proxy", "false") != "true" {
 		return ""
 	}
 	raw := m.getSetting("proxy_urls", "")
-	// proxy_urls 可含逗号/换行分隔的多个 URL，取第一个非空项。
+	// proxy_urls 可含逗号/换行分隔的多个 URL，收集全部非空项作为代理池。
+	var pool []string
 	for _, part := range strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == '\n' || r == '\r' }) {
 		if p := strings.TrimSpace(part); p != "" {
-			return p
+			pool = append(pool, p)
 		}
 	}
-	return ""
+	if len(pool) == 0 {
+		return ""
+	}
+	return pool[rand.Intn(len(pool))]
 }
 
 // httpClientFor 返回按出口代理 URL 缓存的 http.Client（复用连接池），proxyURL 为空表示直连。
@@ -193,17 +211,35 @@ func (m *MediaResolver) ResolveMedia(ctx context.Context, raw json.RawMessage) (
 		return raw, false, nil
 	}
 	cfg := m.config()
+	// 链路起点：本次入站检出的图片数量与将要走的识别引擎/上限，便于把后续每张图的
+	// cache/recognize/HTTP 事件归到同一次 ResolveMedia 调用下。
+	Trace(ctx, "vision.resolve.start", map[string]interface{}{
+		"images": n, "mode": cfg.mode, "max_images": cfg.maxImages, "model": cfg.model,
+	})
+	start := time.Now()
 	if n > cfg.maxImages {
-		return raw, false, fmt.Errorf("图片数量 %d 超过上限 %d", n, cfg.maxImages)
+		err := fmt.Errorf("图片数量 %d 超过上限 %d", n, cfg.maxImages)
+		Trace(ctx, "vision.resolve.error", map[string]interface{}{
+			"images": n, "max_images": cfg.maxImages, "error": err.Error(),
+		})
+		return raw, false, err
 	}
 	transformed, err := m.transform(ctx, v, cfg)
 	if err != nil {
+		Trace(ctx, "vision.resolve.error", map[string]interface{}{
+			"images": n, "mode": cfg.mode, "error": err.Error(),
+			"latency_ms": time.Since(start).Milliseconds(),
+		})
 		return raw, false, err
 	}
 	out, err := json.Marshal(transformed)
 	if err != nil {
 		return raw, false, err
 	}
+	// 链路终点：全部图片识别并原地替换完成，请求已回落为纯文本可走既有上游链路。
+	Trace(ctx, "vision.resolve.done", map[string]interface{}{
+		"images": n, "mode": cfg.mode, "latency_ms": time.Since(start).Milliseconds(),
+	})
 	return out, true, nil
 }
 
@@ -234,10 +270,23 @@ func (m *MediaResolver) transform(ctx context.Context, v interface{}, cfg vision
 		if typ, _ := node["type"].(string); imageBlockTypes[typ] {
 			url, err := imageToDataURL(node, cfg.maxImageBytes)
 			if err != nil {
+				// 图片块无法归一成 URL（缺 data、超体积等）：记下块类型与原因再上抛。
+				Trace(ctx, "vision.image.error", map[string]interface{}{
+					"block": typ, "stage": "extract", "error": err.Error(),
+				})
 				return nil, err
 			}
+			// 每张图的识别起点：块类型 + 紧凑图片标识，串起后续 cache/recognize/HTTP 事件。
+			Trace(ctx, "vision.image.start", map[string]interface{}{
+				"block": typ, "image": imageRef(url),
+			})
+			// GATEWAY_TRACE_IMG=1 时把入站图片原样落盘，便于回看这次请求收到的图片。
+			saveInboundImage(ctx, url)
 			text, err := m.recognize(ctx, cfg, url)
 			if err != nil {
+				Trace(ctx, "vision.image.error", map[string]interface{}{
+					"block": typ, "stage": "recognize", "image": imageRef(url), "error": err.Error(),
+				})
 				return nil, err
 			}
 			return map[string]interface{}{"type": "text", "text": wrapRecognized(text)}, nil
@@ -343,14 +392,114 @@ func checkDataURLSize(u string, maxBytes int64) error {
 	return nil
 }
 
+// imageRef 生成图片的紧凑标识，供链路日志关联同一张图而不泄露完整 data URL：
+// 短指纹 id + 类型（data/url）+ 估算字节数（data URL 取 base64 解码后大小，直链取字符串长度）。
+func imageRef(imageURL string) map[string]interface{} {
+	kind, size := "url", len(imageURL)
+	if strings.HasPrefix(imageURL, "data:") {
+		kind = "data"
+		if idx := strings.Index(imageURL, ";base64,"); idx >= 0 {
+			size = len(imageURL[idx+len(";base64,"):]) * 3 / 4
+		}
+	}
+	return map[string]interface{}{"id": fingerprint(imageURL)[:12], "kind": kind, "bytes": size}
+}
+
+// saveInboundImage 在 GATEWAY_TRACE_IMG=1 时，把入站图片原样落盘到追踪目录，便于回看请求里到底收到了什么图。
+//   - data URL：按 ";base64," 解码后依 media type 存成真正的图片文件（.png/.jpg/…）。
+//   - http(s) 直链：网关本身未接收图片字节，仅落一个 .url.txt 引用文件记录链接。
+//
+// 文件名带 trace_id 与图片短指纹（= imageRef 的 id），与链路日志一一对应。失败仅告警，绝不影响识别主流程。
+func saveInboundImage(ctx context.Context, imageURL string) {
+	if !TraceImageEnabled() {
+		return
+	}
+	imgID := fingerprint(imageURL)[:12]
+	traceID, _ := ctx.Value(traceContextKey{}).(string)
+	name := imgID
+	if traceID != "" {
+		name = traceID + "_" + imgID
+	}
+
+	// 目录：<traceBaseDir>/images[/endpoint]/<date>，与 jsonl 深追踪同根、按日期/调用方式归档。
+	dir := filepath.Join(traceBaseDir(), "images")
+	if ep, _ := ctx.Value(traceEndpointKey{}).(string); ep != "" {
+		dir = filepath.Join(dir, filepath.Base(ep))
+	}
+	dir = filepath.Join(dir, time.Now().Format("2006-01-02"))
+
+	if strings.HasPrefix(imageURL, "data:") {
+		if idx := strings.Index(imageURL, ";base64,"); idx >= 0 {
+			mediaType := strings.TrimPrefix(imageURL[:idx], "data:")
+			b64 := strings.TrimSpace(imageURL[idx+len(";base64,"):])
+			data, err := base64.StdEncoding.DecodeString(b64)
+			if err != nil {
+				Trace(ctx, "vision.image.save.error", map[string]interface{}{"id": imgID, "error": err.Error()})
+				return
+			}
+			writeTraceImage(ctx, filepath.Join(dir, name+imageExt(mediaType)), data, imgID)
+			return
+		}
+		// 非 base64 的 data URL（少见），存原文引用。
+		writeTraceImage(ctx, filepath.Join(dir, name+".dataurl.txt"), []byte(imageURL), imgID)
+		return
+	}
+	// http(s) 直链：只存链接引用。
+	writeTraceImage(ctx, filepath.Join(dir, name+".url.txt"), []byte(imageURL), imgID)
+}
+
+// writeTraceImage 建目录并写文件，成功后打一条 vision.image.saved 链路事件；任何失败仅告警。
+func writeTraceImage(ctx context.Context, path string, data []byte, imgID string) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		log.Printf("WARN: 创建图片追踪目录失败: %v", err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		log.Printf("WARN: 写入图片追踪文件失败: %v", err)
+		return
+	}
+	Trace(ctx, "vision.image.saved", map[string]interface{}{"id": imgID, "path": path, "bytes": len(data)})
+}
+
+// imageExt 依 media type 推断图片文件后缀，未知类型回退 .bin。
+func imageExt(mediaType string) string {
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+	if i := strings.Index(mediaType, ";"); i >= 0 {
+		mediaType = strings.TrimSpace(mediaType[:i])
+	}
+	switch mediaType {
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	case "image/bmp":
+		return ".bmp"
+	case "image/svg+xml":
+		return ".svg"
+	default:
+		return ".bin"
+	}
+}
+
 // recognize 调用视觉模型识别单张图，带缓存。
 func (m *MediaResolver) recognize(ctx context.Context, cfg visionConfig, imageURL string) (string, error) {
+	img := imageRef(imageURL)
 	// 缓存键纳入 mode 与 OCR 服务/语言：切换识别引擎后不复用另一引擎的旧结果。
 	cacheKey := fingerprint("vision", cfg.mode, cfg.model, cfg.ocrAPIBase, cfg.ocrLang, imageURL)
 	if cached, ok := m.cache.Get(ctx, cacheKey); ok {
+		Trace(ctx, "vision.cache.hit", map[string]interface{}{
+			"image": img, "mode": cfg.mode, "chars": len([]rune(cached)),
+		})
 		return cached, nil
 	}
-	text, err := m.doRecognize(ctx, cfg, imageURL)
+	Trace(ctx, "vision.cache.miss", map[string]interface{}{"image": img, "mode": cfg.mode})
+
+	start := time.Now()
+	text, err := m.recognizeWithRetry(ctx, cfg, imageURL, img)
 	if err != nil {
 		return "", err
 	}
@@ -358,11 +507,52 @@ func (m *MediaResolver) recognize(ctx context.Context, cfg visionConfig, imageUR
 	if text == "" {
 		return "", fmt.Errorf("视觉模型返回空内容")
 	}
+	truncated := false
 	if runes := []rune(text); cfg.maxResultChars > 0 && len(runes) > cfg.maxResultChars {
 		text = string(runes[:cfg.maxResultChars]) + "…（识别内容已截断）"
+		truncated = true
 	}
 	m.cache.Set(ctx, cacheKey, text)
+	Trace(ctx, "vision.recognize.done", map[string]interface{}{
+		"image": img, "mode": cfg.mode, "chars": len([]rune(text)),
+		"truncated": truncated, "latency_ms": time.Since(start).Milliseconds(),
+	})
 	return text, nil
+}
+
+// recognizeWithRetry 包裹 doRecognize：识别失败（返回 error 或空文本）时按 cfg.maxRetries 重试，
+// 每次重试前退避 cfg.retryBackoff（ctx 取消则立即放弃）。全部尝试失败返回最后一次错误。
+func (m *MediaResolver) recognizeWithRetry(ctx context.Context, cfg visionConfig, imageURL string, img interface{}) (string, error) {
+	var lastErr error
+	for attempt := 0; attempt <= cfg.maxRetries; attempt++ {
+		if attempt > 0 {
+			Trace(ctx, "vision.recognize.retry", map[string]interface{}{
+				"image": img, "mode": cfg.mode, "attempt": attempt,
+				"max_retries": cfg.maxRetries, "last_error": lastErr.Error(),
+			})
+			if cfg.retryBackoff > 0 {
+				select {
+				case <-ctx.Done():
+					return "", ctx.Err()
+				case <-time.After(cfg.retryBackoff):
+				}
+			}
+		}
+		text, err := m.doRecognize(ctx, cfg, imageURL)
+		if err == nil && strings.TrimSpace(text) != "" {
+			return text, nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("视觉模型返回空内容")
+		}
+		// ctx 已取消（超时/断连）时重试也不会成功，直接放弃。
+		if ctx.Err() != nil {
+			return "", lastErr
+		}
+	}
+	return "", lastErr
 }
 
 // doRecognize 按 cfg.mode 选择识别引擎：

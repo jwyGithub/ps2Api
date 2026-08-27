@@ -51,6 +51,9 @@ var settingDefs = []settingDef{
 	{Key: "vision_max_image_mb", Label: "单图最大体积(MB)", Type: "number", Default: "20", Group: "vision", Description: "单张图片解码后字节数上限（MB），超过则回退 400。xAI 上限为 20MiB"},
 	{Key: "vision_max_result_chars", Label: "单图识别文本上限(字符)", Type: "number", Default: "2000", Group: "vision", Description: "每张图识别结果最多保留多少字符，超出截断。防止多图识别文本顶爆上游 10000 字符 query 上限"},
 	{Key: "vision_timeout_seconds", Label: "识别超时(秒)", Type: "number", Default: "60", Group: "vision", Description: "单次视觉模型调用的超时时间（秒）"},
+		{Key: "vision_use_proxy", Label: "使用代理", Type: "select", Default: "false", Options: []string{"false", "true"}, Group: "vision", Description: "true=调用视觉/OCR 识别时从代理池（proxy_urls）随机取一个代理出口；false=直连。与上游出口的 proxy_enabled 独立，仅控制视觉服务是否走代理"},
+	{Key: "vision_max_retries", Label: "识别失败重试次数", Type: "number", Default: "0", Group: "vision", Description: "单张图识别失败（报错或返回空内容）时的重试次数，不含首次。0=不重试。重试会重新走当前识别引擎（含 ocr_then_vision 回退）"},
+	{Key: "vision_retry_backoff_ms", Label: "重试退避(毫秒)", Type: "number", Default: "500", Group: "vision", Description: "每次重试前的等待时间（毫秒），避免对视觉/OCR 服务瞬时打爆。仅在重试次数>0 时生效"},
 	{Key: "vision_prompt", Label: "识别提示词", Type: "text", Default: "请把这张图片的内容尽量完整、结构化地转述成文字，包含其中所有可读文本（OCR）、图表与关键视觉信息。只输出转述内容本身，不要加任何前后缀说明。", Group: "vision", Description: "发给视觉模型的指令，决定识别输出的风格与详略"},
 	// OCR：除视觉模型外的第二种识别引擎。vision_recognize_mode 决定用哪种：
 	//   vision（默认，仅视觉模型）| ocr（仅外部 OCR HTTP 服务）| ocr_then_vision（OCR 优先，空结果或失败回退视觉模型）。

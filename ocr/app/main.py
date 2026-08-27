@@ -71,6 +71,11 @@ class OCRResponse(BaseModel):
     lines: list[OCRLine] = []
     lang: str | None = None
     elapse_ms: int = 0
+    # 诊断字段（网关只读 text，这些不影响契约）：原始图尺寸、检出行数、是否放大过。
+    width: int = 0
+    height: int = 0
+    line_count: int = 0
+    upscaled: bool = False
 
 
 @app.get("/health")
@@ -100,11 +105,16 @@ async def ocr(req: OCRRequest):
     if settings.max_result_chars and len(text) > settings.max_result_chars:
         text = text[: settings.max_result_chars]
 
+    img_info = result.get("image", {})
     return OCRResponse(
         text=text,
         lines=[OCRLine(**line) for line in result["lines"]],
         lang=req.lang,
         elapse_ms=result["elapse_ms"],
+        width=img_info.get("width", 0),
+        height=img_info.get("height", 0),
+        line_count=len(result["lines"]),
+        upscaled=img_info.get("upscaled", False),
     )
 
 

@@ -7,7 +7,7 @@ import threading
 import time
 from typing import Any
 
-from .image_utils import ImageError, to_rgb_ndarray
+from .image_utils import ImageError, decode_image
 
 logger = logging.getLogger("ocr.engine")
 
@@ -37,8 +37,8 @@ def warmup() -> None:
 def recognize(raw: bytes) -> dict[str, Any]:
     """对单张图片做 OCR。返回 {text, lines:[{text,score,box}], elapse_ms}。"""
     engine = _get_engine()
-    # 统一用 Pillow 解码成 RGB ndarray，规避 CMYK/透明通道/异常格式导致的引擎内部报错。
-    img = to_rgb_ndarray(raw)
+    # 统一用 Pillow 解码（含超小图放大、RGB->BGR），规避格式/尺寸导致的空结果与精度损失。
+    img, img_info = decode_image(raw)
 
     start = time.time()
     with _engine_lock:
@@ -69,4 +69,17 @@ def recognize(raw: bytes) -> dict[str, Any]:
             )
 
     text = "\n".join(line["text"] for line in lines)
-    return {"text": text, "lines": lines, "elapse_ms": elapse_ms}
+
+    if not lines:
+        # 空结果最常见的原因是图太小/文字太小导致检测阶段一行都没框出来。
+        # 记一条带尺寸的 warning，便于线上区分「图没文字」和「图太小」。
+        logger.warning(
+            "OCR 未检出文本（可能图片过小/无文字）: width=%s height=%s final=%sx%s upscaled=%s",
+            img_info["width"],
+            img_info["height"],
+            img_info["final_width"],
+            img_info["final_height"],
+            img_info["upscaled"],
+        )
+
+    return {"text": text, "lines": lines, "elapse_ms": elapse_ms, "image": img_info}

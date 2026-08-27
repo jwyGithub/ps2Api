@@ -75,13 +75,47 @@ def load_image_bytes(image: str) -> bytes:
     return raw
 
 
-def to_rgb_ndarray(raw: bytes):
-    """用 Pillow 稳健解码为 RGB ndarray（统一 CMYK/调色板/带透明通道等图片），交给 RapidOCR。"""
+def decode_image(raw: bytes):
+    """用 Pillow 稳健解码图片，交给 RapidOCR。返回 (ndarray, info)。
+
+    - 统一 CMYK/调色板/带透明通道等图片为 3 通道。
+    - 按需对超小图放大（min_upscale_side），提升缩略图/低分辨率截图的召回。
+    - 返回 BGR ndarray：RapidOCR(onnxruntime) 底层按 BGR 处理 3 通道数组，
+      直接喂 RGB 会让彩色文本的检测/识别精度受损。
+    - info 含原始/最终尺寸与是否放大，供上层记录与诊断空结果。
+    """
     import numpy as np
 
     try:
         with Image.open(io.BytesIO(raw)) as im:
             im = im.convert("RGB")
-            return np.asarray(im)
+            orig_w, orig_h = im.size
+            final_w, final_h = orig_w, orig_h
+            upscaled = False
+
+            short_side = min(orig_w, orig_h)
+            target = settings.min_upscale_side
+            if target and short_side > 0 and short_side < target:
+                factor = target / float(short_side)
+                if settings.max_upscale_factor:
+                    factor = min(factor, settings.max_upscale_factor)
+                if factor > 1.0:
+                    final_w = max(1, int(round(orig_w * factor)))
+                    final_h = max(1, int(round(orig_h * factor)))
+                    im = im.resize((final_w, final_h), Image.LANCZOS)
+                    upscaled = True
+
+            rgb = np.asarray(im)
     except Exception as exc:  # PIL 抛出的异常类型繁杂，统一转成 ImageError
         raise ImageError(f"无法识别的图片格式: {exc}") from exc
+
+    # RGB -> BGR，并确保内存连续（负步长视图会让 onnxruntime/opencv 预处理报错）。
+    bgr = np.ascontiguousarray(rgb[:, :, ::-1])
+    info = {
+        "width": orig_w,
+        "height": orig_h,
+        "final_width": final_w,
+        "final_height": final_h,
+        "upscaled": upscaled,
+    }
+    return bgr, info

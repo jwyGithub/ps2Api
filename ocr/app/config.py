@@ -45,5 +45,11 @@ class Settings:
     # 单张图识别的返回文本上限（0 = 不截断）；网关侧也会再截断一次。
     max_result_chars: int = _int("OCR_MAX_RESULT_CHARS", 0)
 
+    # 超小图在送入 OCR 前放大到最短边 >= 该像素（0 = 关闭）。
+    # 提升缩略图/低分辨率截图的召回：太小的图 RapidOCR 检测阶段常一行都框不出来。
+    min_upscale_side: int = _int("OCR_MIN_UPSCALE_SIDE", 640)
+    # 放大倍数上限，避免极小图被放到过大导致内存/耗时暴涨。
+    max_upscale_factor: float = _float("OCR_MAX_UPSCALE_FACTOR", 8.0)
+
 
 settings = Settings()
