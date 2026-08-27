@@ -122,6 +122,10 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 		if res.Success {
 			provider.Trace(ctx, "router.success", plan.trace(map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID}, acc, true))
 			r.Pool.MarkUsed(acc.ID)
+			// 软预留：从本回合完成时刻起把该号标记为「最近被占用」，让别的客户端在对话
+			// 回合间隙（inFlight 已归零）优先避开它，避免多客户端挤同一账号。仅影响普通
+			// 轮询选号；会话粘性/钉账号照常回原号，不受影响。
+			r.Pool.Reserve(acc.ID, r.reservationTTL())
 			return res, acc, nil
 		}
 		last = res.Error
@@ -185,7 +189,7 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 			// 请求内容被拒(坏请求、工具名冲突等)——账号本身可用,不标记、不换号重试,直接返回。
 			provider.Trace(ctx, "router.request_rejected", plan.trace(map[string]interface{}{"account_id": acc.ID, "error": res.Error}, acc, false))
 			r.alertRequestRejected(acc, res)
-			return nil, nil, &RouteError{Message: res.Error}
+			return nil, nil, &RouteError{Message: res.Error, Rejected: true}
 		}
 		if res.Usage != nil && res.Usage.UsageState == "BLOCKED" {
 			// 实时聊天收到 BLOCKED：账号被网关封锁，属账号异常而非额度用尽。上面的 applyUsageState

@@ -7,11 +7,27 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
+
+	"ps2api/internal/router"
 )
+
+// routeErrorStatus 把 router 返回的错误映射为对外 HTTP 状态码与 Anthropic 错误类型。
+// 会话/请求内容类错误(RouteError.Rejected：坏请求、工具名冲突、TOOL_CALL_NOT_FOUND 等)
+// 返回 400 invalid_request_error——重试/换号都不会成功，让客户端 SDK 立即停止；其余上游失败
+// 沿用 529 overloaded_error(表达「暂时不可用」，SDK 会退避重试)。这样修正的是过度宽泛的
+// 529 映射，不推翻「暂时不可用才用 529」的协议意图。
+func routeErrorStatus(err error) (int, string) {
+	var re *router.RouteError
+	if errors.As(err, &re) && re.Rejected {
+		return 400, "invalid_request_error"
+	}
+	return 529, "overloaded_error"
+}
 
 func jsonWrite(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")

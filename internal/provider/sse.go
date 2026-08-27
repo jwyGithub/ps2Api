@@ -64,16 +64,26 @@ type StreamReader struct {
 	Err           string
 	// RequestRejected 表示失败源于请求内容本身（坏请求、工具名冲突等）。
 	RequestRejected bool
+	// SessionCorrupt 表示服务端会话已损坏、不可复用（TOOL_CALL_NOT_FOUND：pending tool call
+	// 已被消费，再交回同一组必然失败）。见 Result.SessionCorrupt。
+	SessionCorrupt bool
 	// UpstreamFailure 表示失败发生在 Postman → 模型（Bedrock）这一段，与账号健康和本地请求
 	// 格式都无关。见 isUpstreamModelFailure。
 	UpstreamFailure bool
 	ActualModel     string
 	ConversationID  string
-	sawToolCall     bool
-	toolCallIndex   map[string]int
-	toolCallGroup   map[string]string
-	lastToolID      string
+	// sawDone 记录是否见到 [DONE] 收尾帧；sawText 记录是否吐出过正文。二者与 sawToolCall
+	// 一起用于判定「上游干净 EOF 但其实是空流(不完整结束)」，避免把空流当成成功。见 stream.go。
+	sawDone       bool
+	sawText       bool
+	sawToolCall   bool
+	toolCallIndex map[string]int
+	toolCallGroup map[string]string
+	lastToolID    string
 }
+
+// hadOutput 报告本次流是否吐出过任何可交付内容（正文或工具调用）。
+func (r *StreamReader) hadOutput() bool { return r.sawText || r.sawToolCall }
 
 func NewStreamReader() *StreamReader {
 	return &StreamReader{toolCallIndex: map[string]int{}, toolCallGroup: map[string]string{}}
@@ -91,6 +101,7 @@ func (r *StreamReader) Feed(line string) []Delta {
 	}
 	payload := strings.TrimPrefix(trimmed, "data: ")
 	if payload == "[DONE]" {
+		r.sawDone = true
 		return nil
 	}
 	var ev sseEvent
@@ -172,6 +183,7 @@ func (r *StreamReader) handleTextChunk(data json.RawMessage) []Delta {
 	}
 	r.applyMeta(d.Metadata)
 	if d.TextContent != "" {
+		r.sawText = true
 		return []Delta{{Content: d.TextContent}}
 	}
 	return nil
@@ -300,6 +312,14 @@ func (r *StreamReader) handleFailure(data json.RawMessage) []Delta {
 	}
 	if d.ErrorType == "INPUT_VALIDATION_ERROR" {
 		r.RequestRejected = true
+	}
+	// TOOL_CALL_NOT_FOUND：上游已把这组 pending tool call 消费掉，现在再交回同一组
+	// toolCallId（"No tool call found for the tool response that was sent"）。换账号/重试都无用——
+	// 会话状态已坏。按请求拒绝处理(不重试、不换号、不标记账号)，并标记 SessionCorrupt 让上层
+	// 定点失效该会话映射，使下一轮降级为 USER_QUERY 重建，而不是再次命中死会话。
+	if d.ErrorType == "TOOL_CALL_NOT_FOUND" {
+		r.RequestRejected = true
+		r.SessionCorrupt = true
 	}
 	if isUpstreamModelFailure(d.ErrorType) {
 		r.UpstreamFailure = true

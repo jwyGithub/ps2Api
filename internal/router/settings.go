@@ -94,6 +94,25 @@ func (r *Router) preferQuotaMode() pool.QuotaMode {
 	}
 }
 
+// reservationTTL 读取账号「软预留」窗口时长（设置 account_reservation_seconds，默认 90s）。
+// 每次成功交付后据此把账号标记为「最近被占用」，普通轮询选号在窗口内优先避开它，把不同客户端
+// 摊到不同账号，避免多客户端挤同一号导致额度被快速烧穿、频繁换号。设为 0（或负）即关闭该机制
+// （Reserve 收到 d<=0 直接不预留）。空值/非法回退默认 90s。
+func (r *Router) reservationTTL() time.Duration {
+	v, _ := r.Store.GetSetting("account_reservation_seconds")
+	if v == "" {
+		return 90 * time.Second
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 90 * time.Second
+	}
+	if n <= 0 {
+		return 0
+	}
+	return time.Duration(n) * time.Second
+}
+
 // failoverEnabled 从持久化设置读取「失败自动切换账号」开关（默认开启）。
 func (r *Router) failoverEnabled() bool {
 	v, _ := r.Store.GetSetting("failover_enabled")

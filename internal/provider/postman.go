@@ -94,6 +94,7 @@ func (p *Provider) Chat(ctx context.Context, acc *store.Account, req *ChatReques
 		return nil
 	}, res)
 	if err != nil {
+		p.invalidateIfCorrupt(acc.ID, req.Messages, res)
 		return res
 	}
 	res.Success = true
@@ -139,6 +140,7 @@ func (p *Provider) StreamChat(ctx context.Context, acc *store.Account, req *Chat
 		}, res)
 		res.Content = captured.String()
 		res.PromptTokens = EstimateMessagesTokens(req.Messages)
+		p.invalidateIfCorrupt(acc.ID, req.Messages, res)
 		p.RememberConversation(acc.ID, req.Messages, res)
 		return res
 	}
@@ -215,6 +217,7 @@ func (p *Provider) StreamChat(ctx context.Context, acc *store.Account, req *Chat
 	if !res.Success {
 		_ = flushText()
 		res.PromptTokens = EstimateMessagesTokens(req.Messages)
+		p.invalidateIfCorrupt(acc.ID, req.Messages, res)
 		p.RememberConversation(acc.ID, req.Messages, res)
 		return res
 	}

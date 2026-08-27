@@ -37,6 +37,23 @@ const (
 	// tool result，这里对齐该行为，保留头尾、中段截断。
 	MaxToolResponseContentLen = 16 * 1024
 
+	// FoldedToolResultTotalBudgetRunes 是「换号/冷启动 → conversationId=null」时，把历史工具
+	// 结果折叠进单条 USER_QUERY 所能占用的 rune 总预算，由本次请求里参与折叠的全部 tool result
+	// 「共享」。此前该路径对历史 tool result 一律写 [Previous tool result omitted]，换号后模型
+	// 完全看不到已消费的工具输出，降级损失大；改为带上截断后的历史工具结果以减少降级损失。
+	// 单条上限不再固定，而由 foldedToolResultBudget 按当前 tool result 条数「动态分摊」这份总
+	// 预算——轮数少时每条配额大（尽量完整保留），多时自动收紧、公平分摊，避免固定上限在短会话
+	// 下平白截断、在长会话下又整体超预算。取 6000：capUpstreamQuery 在 10000 上限里给中段折叠
+	// 留的空间约为 10000 − 头部(30%≈3000) − 最新一轮尾部 ≈ 6000~7000，取其下沿留足余量。
+	// 整段最终仍由出站前的 capUpstreamQuery 兜底到 MaxUpstreamQueryRunes 以内（≈30KB，远低于
+	// Cloudflare WAF 80KB 信封，故不引入 403 风险）。
+	FoldedToolResultTotalBudgetRunes = 6000
+
+	// MinFoldedToolResultRunes 是动态分摊时单条历史 tool result 的 rune 下限：即便一次请求里
+	// tool result 极多、按总预算均分后每条不足此值，也至少保留这么多（保头保尾、中段省略），
+	// 保证再长的会话每条结果也留得下关键的命令/报错头尾，而不是被压到不可读。
+	MinFoldedToolResultRunes = 500
+
 	// MaxRequestBodyWarnBytes 是出站请求体的软告警阈值。超过此值时记录告警，
 	// 因为过大的 body 更容易触发 Postman 网关侧的 Cloudflare WAF（返回 403 HTML）。
 	// 仅告警、不阻断，避免误伤合法的大请求。
@@ -103,6 +120,12 @@ type Result struct {
 	// RequestRejected 表示失败源于请求内容本身(坏请求、工具名冲突等),而非账号健康。
 	// 这种错误换账号重试无用、且会污染整个号池,router 应直接返回、不标记账号。
 	RequestRejected bool
+	// SessionCorrupt 表示本次失败意味着 Postman 服务端会话已损坏、不可再复用：要么上游把
+	// TOOL_RESPONSE 消费后回了空流(没有 [DONE]/正文/工具/failure),要么再交同一组 tool call
+	// 收到 TOOL_CALL_NOT_FOUND。provider 据此定点失效该会话映射(见 InvalidateConversation),
+	// 使下一轮续聊因 LookupConversation 落空而降级为 conversationId=null 的 USER_QUERY 重建,
+	// 不再反复把已消费的 toolCallId 交回死会话。
+	SessionCorrupt bool
 	// UpstreamFailure 表示失败发生在上游自己调模型那一段(Postman → Bedrock,如 Policy Error),
 	// 既非请求内容问题也非账号故障。router 据此:不把账号标记为 error(避免一次上游抖动就把号
 	// 踢出 ActiveAccounts),且续聊时钉住原账号重试而不换号(换号会丢服务端会话上下文)。

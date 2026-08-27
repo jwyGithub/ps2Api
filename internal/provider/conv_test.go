@@ -2,6 +2,7 @@ package provider
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -265,6 +266,42 @@ func TestToolResultReplaysCompleteHistoryWithoutPendingConversation(t *testing.T
 	}
 }
 
+// #1 修复回归：首轮续聊必须命中，即便客户端回发的 assistant 轮结构与 res.Content 重构不一致
+// （content 数组化 / 追加正文等）——此时 +assistant 精确前缀失配，须靠无条件存下的裸 user
+// 前缀兜底命中，而不是落空降级为 conversationId=null。
+func TestFirstTurnContinuationHitsDespiteAssistantDrift(t *testing.T) {
+	p := New()
+	first := []ChatMessage{mustMsg(t, "user", "write me a poem")}
+	p.RememberConversation(1, first, &Result{ConversationID: "conv-A", Content: "Here is a poem."})
+
+	// 客户端回发的 assistant 轮：正文被重塑（数组块 + 追加的推荐行动），与重构的
+	// "Here is a poem." 不逐字相同 → [user, assistant] 前缀指纹失配。
+	driftedAssistant := ChatMessage{Role: "assistant", Content: rawJSON(t,
+		`[{"type":"text","text":"Here is a poem.\n\n[Recommended next actions: make it longer]"}]`)}
+	followup := []ChatMessage{
+		first[0],
+		driftedAssistant,
+		mustMsg(t, "user", "make it longer"),
+	}
+	if got := p.LookupConversation(1, followup); got != "conv-A" {
+		t.Fatalf("first-turn continuation should fall back to bare user prefix and reuse conv-A, got %q", got)
+	}
+}
+
+// #1 修复不得破坏隔离：全新单条 user 对话（无可复用历史）即使裸前缀恰好与既有会话首句相同，
+// 也一律开新会话（读侧 hasReusableHistory 门槛）。
+func TestBareUserPrefixDoesNotLeakToNewChat(t *testing.T) {
+	p := New()
+	first := []ChatMessage{mustMsg(t, "user", "shared opening")}
+	p.RememberConversation(1, first, &Result{ConversationID: "conv-A", Content: "ok"})
+
+	// 另一段全新对话，首条 user 逐字相同，但没有 assistant/tool 历史 → 必须返回空。
+	fresh := []ChatMessage{mustMsg(t, "user", "shared opening")}
+	if got := p.LookupConversation(1, fresh); got != "" {
+		t.Fatalf("new single-user chat must not reuse conv-A via bare prefix, got %q", got)
+	}
+}
+
 func TestBuildBodyCapsOversizedQueryToUpstreamLimit(t *testing.T) {
 	p := New()
 	body := p.buildBody(&ChatRequest{Messages: []ChatMessage{
@@ -304,17 +341,95 @@ func TestCapUpstreamQueryKeepsShortQueriesIntact(t *testing.T) {
 	}
 }
 
-func TestBuildBodyOmitsHistoricalToolPayloadsFromFoldedQuery(t *testing.T) {
+func TestBuildBodyFoldsHistoricalToolResultsIntoQuery(t *testing.T) {
 	p := New()
 	body := p.buildBody(&ChatRequest{Messages: []ChatMessage{
 		mustMsg(t, "user", "start"),
-		{Role: "assistant", ToolCalls: rawJSON(t, `[{"id":"call_1","type":"function","function":{"name":"shell","arguments":"{\"command\":\"cat secrets\"}"}}]`)},
-		{Role: "tool", ToolCallID: "call_1", Content: rawText(t, "sensitive command output")},
+		{Role: "assistant", ToolCalls: rawJSON(t, `[{"id":"call_1","type":"function","function":{"name":"shell","arguments":"{\"command\":\"cat notes\"}"}}]`)},
+		{Role: "tool", ToolCallID: "call_1", Content: rawText(t, "historical command output")},
 		mustMsg(t, "user", "continue"),
 	}}, &Tokens{PostmanSID: "sid", UserID: "u", WorkspaceID: "w", WorkspaceSubdomain: "sub"}, "test", 1)
 	query := body["input"].(map[string]interface{})["query"].(string)
-	if strings.Contains(query, "sensitive command output") || strings.Contains(query, "cat secrets") || !strings.Contains(query, "Previous tool result omitted") {
-		t.Fatalf("historical tool payload leaked into folded query: %q", query)
+	// 历史工具结果内容应被折叠进 query（减少换号/冷启动降级损失），并带上定位标签。
+	if !strings.Contains(query, "historical command output") || !strings.Contains(query, "[Tool Result id=call_1]") {
+		t.Fatalf("historical tool result should be folded into query: %q", query)
+	}
+	// 但 assistant 工具调用的 arguments 仍不应出现（只输出工具名，不新增参数泄漏面）。
+	if strings.Contains(query, "cat notes") {
+		t.Fatalf("assistant tool-call arguments must not leak into folded query: %q", query)
+	}
+	// 且不应再退回旧的占位标记。
+	if strings.Contains(query, "Previous tool result omitted") {
+		t.Fatalf("tool result should be included, not omitted: %q", query)
+	}
+}
+
+func TestFoldedToolResultIsTruncated(t *testing.T) {
+	p := New()
+	huge := strings.Repeat("A", 5000) + "MIDDLE_MARKER" + strings.Repeat("B", 5000)
+	body := p.buildBody(&ChatRequest{Messages: []ChatMessage{
+		mustMsg(t, "user", "start"),
+		{Role: "assistant", ToolCalls: rawJSON(t, `[{"id":"call_1","type":"function","function":{"name":"shell","arguments":"{}"}}]`)},
+		{Role: "tool", ToolCallID: "call_1", Content: rawText(t, huge)},
+		mustMsg(t, "user", "continue"),
+	}}, &Tokens{PostmanSID: "sid", UserID: "u", WorkspaceID: "w", WorkspaceSubdomain: "sub"}, "test", 1)
+	query := body["input"].(map[string]interface{})["query"].(string)
+	// 单条历史 tool result 应被中段截断：保头保尾、丢中段标记、且总量落在单条上限附近。
+	if !strings.Contains(query, strings.Repeat("A", 100)) || !strings.Contains(query, strings.Repeat("B", 100)) {
+		t.Fatalf("truncation must keep head and tail of tool output")
+	}
+	if strings.Contains(query, "MIDDLE_MARKER") {
+		t.Fatalf("middle of oversized tool output should be elided")
+	}
+	if !strings.Contains(query, "[truncated]") {
+		t.Fatalf("truncation marker missing: %q", query[:200])
+	}
+}
+
+func TestFoldedToolResultBudgetIsDynamic(t *testing.T) {
+	// 单条（或空）：拿到全部总预算，尽量完整保留。
+	if got := foldedToolResultBudget(0); got != FoldedToolResultTotalBudgetRunes {
+		t.Fatalf("no results should yield full budget: got %d", got)
+	}
+	if got := foldedToolResultBudget(1); got != FoldedToolResultTotalBudgetRunes {
+		t.Fatalf("single result should get full budget: got %d", got)
+	}
+	// 多条：公平分摊，且随条数单调递减。
+	few := foldedToolResultBudget(4)
+	many := foldedToolResultBudget(30)
+	if few != FoldedToolResultTotalBudgetRunes/4 {
+		t.Fatalf("budget should split evenly: got %d", few)
+	}
+	if !(few > many) {
+		t.Fatalf("per-result budget must shrink as results grow: few=%d many=%d", few, many)
+	}
+	// 极多条：均分后不足下限时夹到 MinFoldedToolResultRunes，不会被压到不可读。
+	if got := foldedToolResultBudget(100000); got != MinFoldedToolResultRunes {
+		t.Fatalf("budget must clamp at floor: got %d", got)
+	}
+}
+
+func TestFoldedManyToolResultsShareBudget(t *testing.T) {
+	p := New()
+	msgs := []ChatMessage{mustMsg(t, "user", "start")}
+	// 20 条各 2000 runes 的历史工具结果：固定 1000/条时每条能全留（2000>1000 才截），
+	// 动态分摊后 6000/20=300<下限 → 每条夹到 500，明显更小，从而整段落在上游上限内。
+	for i := 0; i < 20; i++ {
+		id := fmt.Sprintf("c%d", i)
+		msgs = append(msgs,
+			ChatMessage{Role: "assistant", ToolCalls: rawJSON(t, fmt.Sprintf(`[{"id":%q,"type":"function","function":{"name":"shell","arguments":"{}"}}]`, id))},
+			ChatMessage{Role: "tool", ToolCallID: id, Content: rawText(t, strings.Repeat("X", 2000))},
+		)
+	}
+	msgs = append(msgs, mustMsg(t, "user", "continue"))
+	body := p.buildBody(&ChatRequest{Messages: msgs}, &Tokens{PostmanSID: "sid", UserID: "u", WorkspaceID: "w", WorkspaceSubdomain: "sub"}, "test", 1)
+	query := body["input"].(map[string]interface{})["query"].(string)
+	if n := len([]rune(query)); n > MaxUpstreamQueryRunes {
+		t.Fatalf("folded query exceeds upstream cap: %d", n)
+	}
+	// 每条 2000 > 分摊配额 500 → 必然发生中段截断。
+	if !strings.Contains(query, "[truncated]") {
+		t.Fatalf("many oversized results should be truncated to share budget: %q", query[:200])
 	}
 }
 

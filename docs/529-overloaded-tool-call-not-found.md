@@ -144,32 +144,52 @@ Postman 第一次空流时已经把这组 pending tool call 消费掉。第二�
 
 ## 4. 修复方向（Fix）
 
-尚未落地。按优先级：
+尚未落地。**关键前提：4.1 / 4.2 / 4.3 必须作为一个整体一起落地。** 任何一个单独上都不够甚至有害：
+
+- 只做 4.1（把空流标可重试）→ 映射还在，`runAttempts` 会用同一 pinnedAcc + 同一 conversationId 再发一次 native `TOOL_RESPONSE`，把「空流→再发→`TOOL_CALL_NOT_FOUND`」的死循环搬进网关内部。
+- 只做 4.2（停 529）→ 会话仍死，客户端从吃 `Repeated 529` 变成持续吃 400。
+- 4.3 若用账号级 `Reset` → 误伤同账号上并发的健康会话（事故里 `2dffa09e` 卡死期间仍在成功续聊）。
+
+按优先级：
 
 ### 4.1 空 SSE 不能算成功
 
 同时满足以下条件时，视为上游不完整结束，**不得** `Success=true`，也**不得**向客户端发 `end_turn`：
 
-- 没有 `[DONE]`
+- 没有 `[DONE]`（需先在 `sse.go` 记 `sawDone`，当前完全没记）
 - 没有 `textChunk` / `toolCallChunk`
 - 没有 `failure`
 
-建议记为瞬时错误（可重试），而不是空回复。若该请求是 `TOOL_RESPONSE`，还须假定 Postman 可能已经消费了 tool call，见 4.3。
+按请求类型区分重试策略：
+
+- **`USER_QUERY` 空流**：可直接按瞬时错误重试。
+- **`TOOL_RESPONSE` 空流**：必须假定 Postman 已消费了 pending tool call。按 `UpstreamFailure` 语义处理（`route_loop.go` 钉住原账号重试、不换号），**但重试前先执行 4.3 的映射失效**——这样 `LookupConversation` 落空，重试时自动降级为 `conversationId=null` 的 `USER_QUERY` 重建，而不是再交一次已消费的 `toolCallId`。
+
+> 顺序陷阱：4.1 的 `TOOL_RESPONSE` 重试与 4.3 的映射失效是强耦合的，必须「先失效映射、再重试」，否则复现内部死循环。
 
 ### 4.2 `TOOL_CALL_NOT_FOUND` 按请求拒绝处理，不要映射 529
 
-- 加入 `requestRejectionMarkers`（或按 `errorType` 识别），走 `RequestRejected`：不内部重试、不换号、不标记账号。
-- Anthropic 侧不要用 529 `overloaded_error`。会话已坏、同一 payload 再发必失败，529 只会让 SDK 反复打。更合适的是 400 `invalid_request_error`（或明确的业务错误文案），让客户端停下来而不是 `Repeated 529`。
-- 这与「暂时不可用才用 529」的协议意图一致，修正的是过度宽泛的映射，不是推翻 2026-08-25 的设计。
+- 识别方式优先用 `errorType`（更稳，不随上游文案变化）：在 `sse.go` 的 `handleFailure` 里对 `errorType == "TOOL_CALL_NOT_FOUND"` 直接置 `RequestRejected=true`（现在只有 `INPUT_VALIDATION_ERROR` 会置）。若走 marker 路线，`Err` 里已拼接 `| No tool call found ...`，把 `"no tool call found"` 加入 `requestRejectionMarkers` 也能命中 `isRequestRejectionMessage`。
+- 走 `RequestRejected`：不内部重试、不换号、不标记账号（`route_loop.go` 已有短路）。
+- Anthropic 侧不要用 529 `overloaded_error`，改 400 `invalid_request_error`。**但这需要先补 `RouteError` 的分类能力（见 4.4），否则 API 层无从区分。**
 
-### 4.3 毒化会话必须失效
+### 4.3 毒化会话必须**定点**失效
 
 空成功或 `TOOL_CALL_NOT_FOUND` 之后：
 
-- 丢掉该 `conversationId` / `toolCallGroupId` 映射；
+- **按 `conversationId` / 指纹定点删除**该会话的映射，同时清 `toolCallGroupId`（`toolGroups`）。**不能用账号级 `Reset(accountID)`**——它会清掉该账号名下全部会话与归属映射，误伤并发的健康会话。
+- 现状 `ConversationStore` 只暴露 `Reset(accountID)`（`convstore.go`），需在接口新增「按 conversationId / 指纹定点删除」方法，并**同时实现 memory 与 redis 两个后端**（`redisstore.go` 也要改）。注意现有 `Reset` 并不清 `toolGroups`，定点失效时务必一并清。
 - 下一轮改为折叠历史开新会话（`conversationId=null` 的 `USER_QUERY`），而不是继续交已消费的 `toolCallId`。
 
 否则指纹会一直命中死会话，4.1 / 4.2 单独修不够。
+
+### 4.4 `RouteError` 需带错误分类（原文档遗漏）
+
+`RouteError` 现在只有 `Message` 和 `GatewayBlocked`（`router.go`），`res.RequestRejected` 分支返回的是 `&RouteError{Message: res.Error}`，**不带任何分类标记**，`anthropic.go` 因此只能一律 529。要实现 4.2 的 400：
+
+- 给 `RouteError` 加分类字段（如 `Rejected bool` 或直接带 HTTP status code）；
+- `route_loop.go` 的 `RequestRejected` 分支返回时置上该字段；
+- `anthropic.go` 非流式与流式（error 事件）两处按该字段选 400 `invalid_request_error` / 529 `overloaded_error`。
 
 ---
 
@@ -188,12 +208,15 @@ Postman 第一次空流时已经把这组 pending tool call 消费掉。第二�
 
 | 文件 | 现状 | 拟改 |
 |------|------|------|
-| `internal/provider/stream.go` | EOF 且无 `reader.Err` → 成功 | 无 `[DONE]` 且无正文/工具/failure → 失败 |
-| `internal/provider/sse.go` | 不跟踪是否见到 `[DONE]` | 记录 `sawDone` |
-| `internal/provider/toolsim.go` | `requestRejectionMarkers` 不含本错误 | 识别 `TOOL_CALL_NOT_FOUND` / `No tool call found` |
-| `internal/provider/conversation.go` | 成功（含空成功）都 `RememberConversation` | 空流 / `TOOL_CALL_NOT_FOUND` 后清除映射 |
-| `internal/api/anthropic.go` | 所有 `Chat` 失败 → 529 `overloaded_error` | 会话损坏类错误改 400，保留 529 给真正的暂时不可用 |
-| `internal/router/route_loop.go` | 未分类错误钉原号重试 | `RequestRejected` 已有短路，识别后自然生效 |
+| `internal/provider/sse.go` | 不跟踪 `[DONE]`；仅 `INPUT_VALIDATION_ERROR` 置 `RequestRejected` | 记录 `sawDone`；`handleFailure` 对 `errorType==TOOL_CALL_NOT_FOUND` 置 `RequestRejected` |
+| `internal/provider/stream.go` | EOF 且无 `reader.Err` → 成功 | 无 `[DONE]` 且无正文/工具/failure → 失败（`TOOL_RESPONSE` 空流按 `UpstreamFailure`，重试前先失效映射） |
+| `internal/provider/toolsim.go` | `requestRejectionMarkers` 不含本错误 | （marker 路线备选）加入 `no tool call found` |
+| `internal/provider/conversation.go` | 成功（含空成功）都 `RememberConversation`，无失效路径 | 空流 / `TOOL_CALL_NOT_FOUND` 后按 conversationId 定点清映射 |
+| `internal/provider/convstore.go` + 接口 | 只有账号级 `Reset(accountID)`，且不清 `toolGroups` | **新增** `InvalidateConversation` 按 conversationId 定点删除，一并清 `toolGroups` |
+| `internal/provider/redisstore.go` | 同上，redis 后端 | **同步实现** `InvalidateConversation`（SCAN 值匹配 + owner/ownset 收缩） |
+| `internal/router/router.go` | `RouteError` 只有 `Message`/`GatewayBlocked` | **新增**分类字段（`Rejected` 或 status code） |
+| `internal/router/route_loop.go` | 未分类错误钉原号重试；`RequestRejected` 已有短路 | `RequestRejected` 分支返回时置 `RouteError` 分类字段 |
+| `internal/api/anthropic.go` | 所有 `Chat` 失败 → 529 `overloaded_error`（非流式+流式两处） | 按 `RouteError` 分类：会话损坏改 400 `invalid_request_error`，保留 529 给真正暂时不可用 |
 
 ---
 

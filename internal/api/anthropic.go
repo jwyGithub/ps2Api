@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"ps2api/internal/provider"
 )
@@ -32,7 +35,23 @@ func (s *Server) anthropic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var ar AnthropicReq
-	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<20)).Decode(&ar); err != nil {
+	// —— 临时：抓取 @ 文件引用的真实 wire 结构 ——
+	// 设 PS2API_DUMP_BODY=<目录> 时，把原始请求体原样落盘一份，再从字节解码。
+	// 排查完删除本段即可（decode 逻辑等价于原来的流式 Decode）。
+	body, err := io.ReadAll(io.LimitReader(r.Body, 16<<20))
+	if err != nil {
+		anthropicError(w, 400, err.Error(), "invalid_request_error")
+		return
+	}
+	if dir := os.Getenv("PS2API_DUMP_BODY"); dir != "" {
+		fname := filepath.Join(dir, fmt.Sprintf("anthropic-body-%s.json", time.Now().Format("20060102-150405.000")))
+		if werr := os.WriteFile(fname, body, 0o644); werr != nil {
+			provider.Trace(r.Context(), "client.body_dump_failed", map[string]interface{}{"error": werr.Error()})
+		} else {
+			provider.Trace(r.Context(), "client.body_dumped", map[string]interface{}{"file": fname, "bytes": len(body)})
+		}
+	}
+	if err := json.Unmarshal(body, &ar); err != nil {
 		anthropicError(w, 400, err.Error(), "invalid_request_error")
 		return
 	}
@@ -67,7 +86,10 @@ func (s *Server) anthropic(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// 529 overloaded_error 是 Anthropic 协议表达「上游暂时不可用」的标准方式；
 		// 503 不在其状态码枚举内(400/401/403/404/413/429/500/529)，客户端只能归为未知 5xx。
-		anthropicError(w, 529, err.Error(), "overloaded_error")
+		// 但会话损坏/请求内容类错误(TOOL_CALL_NOT_FOUND 等)必须返 400——同一 payload 再发一定
+		// 失败，529 只会让 SDK 反复退避重试，复现 "Repeated 529 Overloaded errors"。见 routeErrorStatus。
+		status, typ := routeErrorStatus(err)
+		anthropicError(w, status, err.Error(), typ)
 		return
 	}
 	jsonWrite(w, 200, openAIToAnthropic(res, ar.Model))
@@ -305,7 +327,10 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, req *pr
 		// (end_turn/max_tokens/stop_sequence/tool_use/pause_turn/refusal)，此前发的
 		// "error" 是枚举外的值，会让类型化 SDK 解析失败；而发 end_turn 又会谎报成功完成。
 		// 干脆省掉这一帧——error 事件已经把失败说清楚了。
-		writeEvent("error", map[string]interface{}{"type": "error", "error": map[string]string{"type": "overloaded_error", "message": err.Error()}})
+		// 错误类型按 routeErrorStatus 分类：会话损坏/请求内容类错误发 invalid_request_error
+		// 让 SDK 停止，其余上游失败沿用 overloaded_error。流式已开(200 已提交)，故只切 type。
+		_, errType := routeErrorStatus(err)
+		writeEvent("error", map[string]interface{}{"type": "error", "error": map[string]string{"type": errType, "message": err.Error()}})
 		writeEvent("message_stop", map[string]string{"type": "message_stop"})
 		return
 	}
