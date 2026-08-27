@@ -61,7 +61,86 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 			"success": res.Success, "error": res.Error, "conversation_id": res.ConversationID,
 		})
 	}()
-	body := p.buildBody(req, tokens, postmanModel, acc.ID)
+	body, plan := p.buildBody(req, tokens, postmanModel, acc.ID)
+
+	// 分片续传：仅当 USER_QUERY 的完整 query 超过上游硬上限时启用。把大 query 按 rune 切成多片，
+	// 顺序喂进同一个 conversationId（前置片只求收下并回 ACK，回复丢弃、只取 convID），最后一片
+	// 带真正指令并作为真实流式响应吐给客户端。分片数超过 MaxQueryChunks 则回退到单发 + 中段截断
+	// （capUpstreamQuery），绝不无限膨胀成几十次上游往返。
+	queryLimit := MaxUpstreamQueryRunes - 100
+	if plan.chunkable && len([]rune(plan.fullQuery)) > queryLimit {
+		chunks := splitQueryIntoChunks(plan.fullQuery, queryLimit-QueryChunkWrapperReserve)
+		if len(chunks) >= 2 && len(chunks) <= MaxQueryChunks {
+			return p.streamChunked(ctx, acc, req, tokens, body, plan, chunks, emit, res)
+		}
+		Trace(ctx, "upstream.chunking.skipped", map[string]interface{}{
+			"account_id": acc.ID, "chunks": len(chunks), "max_chunks": MaxQueryChunks,
+			"query_runes": len([]rune(plan.fullQuery)),
+		})
+	}
+	return p.sendOnce(ctx, acc, req, tokens, body, emit, res)
+}
+
+// streamChunked 编排分片续传：前 n-1 片作为「前置片」顺序发出（noop emit，丢弃模型 ACK 回复，
+// 只取回 conversationId 用于续接下一片），最后一片带真实指令、正常 emit 给客户端。任一前置片
+// 失败即中止并把失败信息透传到 res，绝不向客户端 emit 半截内容。res.ConversationID 最终落在
+// 最后一片返回的真实会话 ID 上，外层 RememberConversation 据此把消息指纹映射到它，续聊无缝衔接。
+//
+// 前提假设：上游对 USER_QUERY 也按 conversationId 跨轮保留上下文（与真实客户端续聊行为一致）。
+// 若某前置片没能返回 conversationId，后续片只能各自新开会话、前文丢失——此为已知降级，仍不比
+// 单发中段截断更差；这里记 trace 但不中止，最后一片照常产出答复并为后续轮沉淀一个会话 ID。
+func (p *Provider) streamChunked(ctx context.Context, acc *store.Account, req *ChatRequest, tokens *Tokens, body map[string]interface{}, plan outboundPlan, chunks []string, emit EmitFunc, res *Result) error {
+	n := len(chunks)
+	convID := plan.convID
+	Trace(ctx, "upstream.chunking.begin", map[string]interface{}{
+		"account_id": acc.ID, "chunks": n, "start_conversation_id": convID,
+	})
+	for i := 0; i < n-1; i++ {
+		setChunkInput(plan.input, capUpstreamQuery(wrapPrimingChunk(chunks[i], i+1, n)), convID)
+		primeRes := &Result{}
+		err := p.sendOnce(ctx, acc, req, tokens, body, noopEmit, primeRes)
+		if err != nil || !primeRes.Success {
+			// 前置片失败：把诊断 / 路由相关字段整体透传给外层 res，按普通失败上抛，绝不 emit。
+			*res = *primeRes
+			if err == nil {
+				err = fmt.Errorf("%s", primeRes.Error)
+			}
+			return err
+		}
+		if primeRes.ConversationID != "" {
+			convID = primeRes.ConversationID
+		} else {
+			Trace(ctx, "upstream.chunking.no_conversation_id", map[string]interface{}{
+				"account_id": acc.ID, "chunk": i + 1, "of": n,
+			})
+		}
+		Trace(ctx, "upstream.chunking.primed", map[string]interface{}{
+			"account_id": acc.ID, "chunk": i + 1, "of": n, "conversation_id": convID,
+		})
+	}
+	// 最后一片：带真实指令，正常流式 emit 给客户端。
+	setChunkInput(plan.input, capUpstreamQuery(wrapFinalChunk(chunks[n-1], n)), convID)
+	return p.sendOnce(ctx, acc, req, tokens, body, emit, res)
+}
+
+// setChunkInput 就地改写 body 内 input 的 query 与 conversationId（convID 为空时置 null，
+// 与 buildBody 冷启动保持一致），使同一请求信封可复用于下一片。
+func setChunkInput(input map[string]interface{}, query, convID string) {
+	input["query"] = query
+	if convID != "" {
+		input["conversationId"] = convID
+	} else {
+		input["conversationId"] = nil
+	}
+}
+
+// noopEmit 丢弃前置分片的流式增量（只关心其返回的 conversationId）。
+func noopEmit(Delta) error { return nil }
+
+// sendOnce 执行一次完整的上游往返：marshal body → 发送（含代理出口选择与直连兜底）→ 逐状态码
+// 判定 → 读 SSE 流并把增量经 emit 吐出，同时把会话 ID / 实际模型 / 用量 / 各类错误标记写回 res。
+// 单发路径与分片续传的每一片都复用它。
+func (p *Provider) sendOnce(ctx context.Context, acc *store.Account, req *ChatRequest, tokens *Tokens, body map[string]interface{}, emit EmitFunc, res *Result) error {
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
 		res.Error = err.Error()

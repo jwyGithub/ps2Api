@@ -15,7 +15,7 @@ func TestBuildBodyDesktopLocalModeShape(t *testing.T) {
 		Messages: []ChatMessage{{Role: "user", Content: rawText(t, "hi")}}}
 	tokens := &Tokens{AccessToken: "tok", UserID: "u", WorkspaceID: "ws"}
 
-	body := p.buildBody(req, tokens, "GPT_56_SOL", 1)
+	body, _ := p.buildBody(req, tokens, "GPT_56_SOL", 1)
 
 	if got := body["platform"]; got != "DESKTOP_MACOS" {
 		t.Fatalf("platform = %v, want DESKTOP_MACOS", got)
@@ -42,7 +42,7 @@ func TestBuildBodyWebShape(t *testing.T) {
 		Messages: []ChatMessage{{Role: "user", Content: rawText(t, "hi")}}}
 	tokens := &Tokens{PostmanSID: "sid", UserID: "u", WorkspaceID: "ws", WorkspaceSubdomain: "sub"}
 
-	body := p.buildBody(req, tokens, "GPT_56_SOL", 1)
+	body, _ := p.buildBody(req, tokens, "GPT_56_SOL", 1)
 
 	if got := body["platform"]; got != "WEB" {
 		t.Fatalf("platform = %v, want WEB", got)

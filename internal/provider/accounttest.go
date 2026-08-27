@@ -121,7 +121,7 @@ func (p *Provider) StreamTestAccount(ctx context.Context, acc *store.Account, mo
 		Messages: []ChatMessage{{Role: "user", Content: json.RawMessage(promptJSON)}},
 	}
 
-	body := p.buildBody(req, tokens, postmanModel, acc.ID)
+	body, _ := p.buildBody(req, tokens, postmanModel, acc.ID)
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
 		res.Error = "构造请求体失败: " + err.Error()

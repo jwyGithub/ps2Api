@@ -270,3 +270,55 @@ func capUpstreamQuery(q string) string {
 	tailLen := limit - head - len([]rune(marker))
 	return string(runes[:head]) + marker + string(runes[len(runes)-tailLen:])
 }
+
+// splitQueryIntoChunks 把超长 query 按 rune 切成若干片，每片正文 ≤ budget 个 rune，供
+// 「分片续传」顺序喂进同一个 Postman conversationId。为尽量不把一段结构（一行、一个段落）
+// 从中间切碎，优先在预算窗口尾部的段落分隔 "\n\n" 处断，其次单个换行 "\n" 处断；窗口内找
+// 不到自然边界（如一整片没有换行）才硬切到 budget。budget<=0 或未超长时返回单片原文。
+func splitQueryIntoChunks(q string, budget int) []string {
+	runes := []rune(q)
+	if budget <= 0 || len(runes) <= budget {
+		return []string{q}
+	}
+	// 只在预算的后 40% 窗口里找自然断点，避免为了对齐边界把分片切得过短、白白增加往返轮数。
+	minCut := budget * 6 / 10
+	var chunks []string
+	for len(runes) > budget {
+		window := string(runes[:budget])
+		cut := strings.LastIndex(window, "\n\n")
+		if cut < minCut {
+			cut = strings.LastIndex(window, "\n")
+		}
+		// LastIndex 返回的是字节偏移；窗口全为多字节字符时需换算成 rune 下标。低于窗口下限
+		// （含 -1 未找到）一律硬切到 budget，保证每片都实实在在推进、不会卡死。
+		cutRunes := budget
+		if cut >= 0 {
+			r := len([]rune(window[:cut]))
+			if r >= minCut {
+				cutRunes = r
+			}
+		}
+		chunks = append(chunks, string(runes[:cutRunes]))
+		runes = runes[cutRunes:]
+	}
+	if len(runes) > 0 {
+		chunks = append(chunks, string(runes))
+	}
+	return chunks
+}
+
+// wrapPrimingChunk 包裹「前置分片」（非最后一片）：告知模型这是被切分的大输入的第 k/n 部分，
+// 先只回 ACK 收下、别急着作答或调工具，等待后续分片。模型对该轮的回复会被丢弃，只取回其
+// conversationId 用于续接下一片。
+func wrapPrimingChunk(chunk string, k, n int) string {
+	return fmt.Sprintf("[大输入分片 %d/%d] 这是一段被切分的大型输入的第 %d 部分，共 %d 部分。"+
+		"请先不要作答、也不要调用任何工具，只回复 \"ACK\" 表示已收到本片，并等待后续分片。"+
+		"以下是本片内容：\n\n%s", k, n, k, n, chunk)
+}
+
+// wrapFinalChunk 包裹「最后一片」：提示模型这是最后一段，请结合前面各分片的完整内容正式作答。
+// 该轮是真正吐给客户端的流式响应。
+func wrapFinalChunk(chunk string, n int) string {
+	return fmt.Sprintf("[大输入分片 %d/%d，最后一部分] 以下是最后一段。请结合前面各分片已收到的完整内容，"+
+		"现在正式作答（可正常调用工具）：\n\n%s", n, n, chunk)
+}

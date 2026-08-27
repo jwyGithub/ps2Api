@@ -122,7 +122,7 @@ func rawText(t *testing.T, s string) json.RawMessage {
 func bodyConversationID(t *testing.T, p *Provider, accID int64, msgs []ChatMessage) string {
 	t.Helper()
 	tok := &Tokens{AccessToken: "x", UserID: "u1", WorkspaceID: "w1"}
-	body := p.buildBody(&ChatRequest{Messages: msgs}, tok, "gpt-test", accID)
+	body, _ := p.buildBody(&ChatRequest{Messages: msgs}, tok, "gpt-test", accID)
 	input, _ := body["input"].(map[string]interface{})
 	if input == nil {
 		t.Fatal("body has no input")
@@ -251,7 +251,7 @@ func TestToolResultReplaysCompleteHistoryWithoutPendingConversation(t *testing.T
 		{Role: "assistant", ToolCalls: rawJSON(t, `[{"id":"call_1","type":"function","function":{"name":"shell","arguments":"{\"command\":\"cat file\"}"}}]`)},
 		{Role: "tool", ToolCallID: "call_1", Content: rawText(t, "file contents")},
 	}
-	body := p.buildBody(&ChatRequest{Messages: followup}, &Tokens{AccessToken: "x", UserID: "u", WorkspaceID: "w"}, "test", 1)
+	body, _ := p.buildBody(&ChatRequest{Messages: followup}, &Tokens{AccessToken: "x", UserID: "u", WorkspaceID: "w"}, "test", 1)
 	input := body["input"].(map[string]interface{})
 	if input["conversationId"] != nil {
 		t.Fatalf("tool result must not reuse pending conversation: %#v", input["conversationId"])
@@ -304,7 +304,7 @@ func TestBareUserPrefixDoesNotLeakToNewChat(t *testing.T) {
 
 func TestBuildBodyCapsOversizedQueryToUpstreamLimit(t *testing.T) {
 	p := New()
-	body := p.buildBody(&ChatRequest{Messages: []ChatMessage{
+	body, _ := p.buildBody(&ChatRequest{Messages: []ChatMessage{
 		mustMsg(t, "system", "HEAD"+strings.Repeat("x", 50000)+"TAIL"),
 		mustMsg(t, "user", "hello"),
 	}}, &Tokens{PostmanSID: "sid", UserID: "u", WorkspaceID: "w", WorkspaceSubdomain: "sub"}, "test", 1)
@@ -343,7 +343,7 @@ func TestCapUpstreamQueryKeepsShortQueriesIntact(t *testing.T) {
 
 func TestBuildBodyFoldsHistoricalToolResultsIntoQuery(t *testing.T) {
 	p := New()
-	body := p.buildBody(&ChatRequest{Messages: []ChatMessage{
+	body, _ := p.buildBody(&ChatRequest{Messages: []ChatMessage{
 		mustMsg(t, "user", "start"),
 		{Role: "assistant", ToolCalls: rawJSON(t, `[{"id":"call_1","type":"function","function":{"name":"shell","arguments":"{\"command\":\"cat notes\"}"}}]`)},
 		{Role: "tool", ToolCallID: "call_1", Content: rawText(t, "historical command output")},
@@ -367,7 +367,7 @@ func TestBuildBodyFoldsHistoricalToolResultsIntoQuery(t *testing.T) {
 func TestFoldedToolResultIsTruncated(t *testing.T) {
 	p := New()
 	huge := strings.Repeat("A", 5000) + "MIDDLE_MARKER" + strings.Repeat("B", 5000)
-	body := p.buildBody(&ChatRequest{Messages: []ChatMessage{
+	body, _ := p.buildBody(&ChatRequest{Messages: []ChatMessage{
 		mustMsg(t, "user", "start"),
 		{Role: "assistant", ToolCalls: rawJSON(t, `[{"id":"call_1","type":"function","function":{"name":"shell","arguments":"{}"}}]`)},
 		{Role: "tool", ToolCallID: "call_1", Content: rawText(t, huge)},
@@ -422,7 +422,7 @@ func TestFoldedManyToolResultsShareBudget(t *testing.T) {
 		)
 	}
 	msgs = append(msgs, mustMsg(t, "user", "continue"))
-	body := p.buildBody(&ChatRequest{Messages: msgs}, &Tokens{PostmanSID: "sid", UserID: "u", WorkspaceID: "w", WorkspaceSubdomain: "sub"}, "test", 1)
+	body, _ := p.buildBody(&ChatRequest{Messages: msgs}, &Tokens{PostmanSID: "sid", UserID: "u", WorkspaceID: "w", WorkspaceSubdomain: "sub"}, "test", 1)
 	query := body["input"].(map[string]interface{})["query"].(string)
 	if n := len([]rune(query)); n > MaxUpstreamQueryRunes {
 		t.Fatalf("folded query exceeds upstream cap: %d", n)
@@ -448,7 +448,7 @@ func TestToolResultWithTrailingTokenMetadataReplaysHistory(t *testing.T) {
 		{Role: "user", Content: rawJSON(t, `[{"type":"tool_result","tool_use_id":"toolu_1","content":"file contents"}]`)},
 		{Role: "system", Content: rawText(t, "<total_tokens>14999302 tokens left</total_tokens>")},
 	}
-	body := p.buildBody(&ChatRequest{Messages: followup}, &Tokens{AccessToken: "x", UserID: "u", WorkspaceID: "w"}, "test", 1)
+	body, _ := p.buildBody(&ChatRequest{Messages: followup}, &Tokens{AccessToken: "x", UserID: "u", WorkspaceID: "w"}, "test", 1)
 	input := body["input"].(map[string]interface{})
 	if input["conversationId"] != nil {
 		t.Fatalf("tool result followed by token metadata must not reuse pending conversation: %#v", input["conversationId"])
@@ -461,7 +461,7 @@ func TestToolResultWithTrailingTokenMetadataReplaysHistory(t *testing.T) {
 
 func TestBuildBodyDoesNotInjectTextToolProtocol(t *testing.T) {
 	p := New()
-	body := p.buildBody(&ChatRequest{
+	body, _ := p.buildBody(&ChatRequest{
 		Messages: []ChatMessage{mustMsg(t, "user", "read file")},
 		Tools: []interface{}{map[string]interface{}{
 			"type": "function",
@@ -498,7 +498,7 @@ func TestBuildBodyUsesNativeToolResponse(t *testing.T) {
 		{Role: "assistant", ToolCalls: rawJSON(t, `[{"id":"toolu_1","type":"function","function":{"name":"Read","arguments":"{\"file_path\":\"/tmp/a\"}"}}]`)},
 		{Role: "tool", ToolCallID: "toolu_1", Content: rawText(t, `{"status":"SUCCESS","message":"file contents"}`)},
 	}
-	body := p.buildBody(&ChatRequest{Messages: followup}, &Tokens{AccessToken: "x", UserID: "u", WorkspaceID: "w"}, "test", 1)
+	body, _ := p.buildBody(&ChatRequest{Messages: followup}, &Tokens{AccessToken: "x", UserID: "u", WorkspaceID: "w"}, "test", 1)
 	input := body["input"].(map[string]interface{})
 	if input["chatType"] != "TOOL_RESPONSE" || input["conversationId"] != "conv-native-tool" || input["toolCallGroupId"] != "group_1" {
 		t.Fatalf("native tool response input = %#v", input)
@@ -516,7 +516,7 @@ func TestBuildBodyUsesNativeToolResponse(t *testing.T) {
 	}
 
 	followup[2].Content = rawText(t, `{"status":"FAILED","message":"command rejected"}`)
-	body = p.buildBody(&ChatRequest{Messages: followup}, &Tokens{AccessToken: "x", UserID: "u", WorkspaceID: "w"}, "test", 1)
+	body, _ = p.buildBody(&ChatRequest{Messages: followup}, &Tokens{AccessToken: "x", UserID: "u", WorkspaceID: "w"}, "test", 1)
 	responses = body["input"].(map[string]interface{})["toolResponses"].([]map[string]interface{})
 	if responses[0]["toolResponseStatus"] != "FAILED" || responses[0]["toolResponseFailureType"] != "UNHANDLED_ERROR" {
 		t.Fatalf("native failed tool response = %#v", responses[0])
@@ -541,12 +541,12 @@ func TestNativeToolResponseGatewayRetryDropsOnlyDuplicateRegistry(t *testing.T) 
 		"type":     "function",
 		"function": map[string]interface{}{"name": "Read", "parameters": map[string]interface{}{"type": "object"}},
 	}}
-	initial := p.buildBody(&ChatRequest{Messages: followup, Tools: tools}, &Tokens{PostmanSID: "sid", UserID: "u", WorkspaceID: "w", WorkspaceSubdomain: "sub"}, "test", 1)
+	initial, _ := p.buildBody(&ChatRequest{Messages: followup, Tools: tools}, &Tokens{PostmanSID: "sid", UserID: "u", WorkspaceID: "w", WorkspaceSubdomain: "sub"}, "test", 1)
 	initialTools := initial["clientTools"].(map[string]interface{})["thirdParty"].(map[string]interface{})
 	if len(initialTools) == 0 {
 		t.Fatal("initial Web continuation must retain third-party tool registration")
 	}
-	retry := p.buildBody(&ChatRequest{Messages: followup, Tools: tools, GatewayRetry: true}, &Tokens{PostmanSID: "sid", UserID: "u", WorkspaceID: "w", WorkspaceSubdomain: "sub"}, "test", 1)
+	retry, _ := p.buildBody(&ChatRequest{Messages: followup, Tools: tools, GatewayRetry: true}, &Tokens{PostmanSID: "sid", UserID: "u", WorkspaceID: "w", WorkspaceSubdomain: "sub"}, "test", 1)
 	retryInput := retry["input"].(map[string]interface{})
 	if retryInput["chatType"] != "TOOL_RESPONSE" || retryInput["conversationId"] != "conv-native-retry" || retryInput["toolCallGroupId"] != "group_1" {
 		t.Fatalf("gateway retry changed native continuation: %#v", retryInput)
@@ -590,7 +590,7 @@ func TestBuildBodyUsesNativeAnthropicToolResponseGroup(t *testing.T) {
 		{Role: "user", Content: rawJSON(t, `[{"type":"tool_result","tool_use_id":"toolu_1","content":"one"},{"type":"tool_result","tool_use_id":"toolu_2","content":"two"}]`)},
 		{Role: "system", Content: rawText(t, "<total_tokens>14999302 tokens left</total_tokens>")},
 	}
-	body := p.buildBody(&ChatRequest{Messages: followup}, &Tokens{AccessToken: "x", UserID: "u", WorkspaceID: "w"}, "test", 1)
+	body, _ := p.buildBody(&ChatRequest{Messages: followup}, &Tokens{AccessToken: "x", UserID: "u", WorkspaceID: "w"}, "test", 1)
 	input := body["input"].(map[string]interface{})
 	responses := input["toolResponses"].([]map[string]interface{})
 	if input["chatType"] != "TOOL_RESPONSE" || len(responses) != 2 || responses[0]["toolCallId"] != "toolu_1" || responses[1]["toolCallId"] != "toolu_2" {

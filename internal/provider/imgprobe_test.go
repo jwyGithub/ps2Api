@@ -191,7 +191,7 @@ func runImgProbe(t *testing.T, p *Provider, acc *store.Account, tokens *Tokens, 
 		Model:    postmanModel,
 		Messages: []ChatMessage{{Role: "user", Content: question}},
 	}
-	body := p.buildBody(req, tokens, postmanModel, acc.ID)
+	body, _ := p.buildBody(req, tokens, postmanModel, acc.ID)
 	if v.mutate != nil {
 		input, ok := body["input"].(map[string]interface{})
 		if !ok {

@@ -31,6 +31,19 @@ const (
 	// 9000 个中文字符（26994 字节）可通过，证明按字符数（rune）而非字节数计。
 	MaxUpstreamQueryRunes = 10000
 
+	// MaxQueryChunks 是「分片续传」把一条超过 MaxUpstreamQueryRunes 的 USER_QUERY 拆成多轮
+	// 顺序喂进同一个 conversationId 时，允许的最大分片数。每个分片都是一次独立的上游 HTTP
+	// 往返 + 一次模型 ACK 回复（耗时、耗额度、且每次都过一遍 Cloudflare 风控），故必须设上限：
+	// 分片数一旦超过此值就回退到 capUpstreamQuery 的中段截断，绝不无限膨胀成几十次往返。
+	// 取 8：8 × (≈9600 rune/片) ≈ 7.7 万字符，覆盖绝大多数 @ 大文件引用；再大的输入靠截断兜底。
+	MaxQueryChunks = 8
+
+	// QueryChunkWrapperReserve 是每个分片外层包裹文案（[大输入分片 K/N]… 的提示语）预留的
+	// rune 余量。分片正文预算 = (MaxUpstreamQueryRunes-100) - QueryChunkWrapperReserve，
+	// 保证「包裹语 + 正文」整体仍落在上游 10000 rune 硬上限内。包裹语为固定中文模板（含个位/
+	// 十位的 K、N），实测远小于 256，留足余量。
+	QueryChunkWrapperReserve = 256
+
 	// MaxToolResponseContentLen 是 TOOL_RESPONSE 续期时单条 toolResponses[].content 的上限。
 	// 该字段此前不设限，续期时容易把出站 body 顶过 ~80KB 的 Cloudflare WAF 信封而触发 403
 	// （精确解释了「只有带工具续期才 403、单条新消息不 403」的现象）。原生客户端本身也会裁剪

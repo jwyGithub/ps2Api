@@ -6,7 +6,23 @@ import (
 	"strings"
 )
 
-func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel string, accountID int64) map[string]interface{} {
+// outboundPlan 记录一次出站请求的「可分片」元信息，供 streamInternal 判断是否走分片续传：
+// input 指向 body 里的 input 子对象（改 query/conversationId 后重新 marshal body 即可复用同一
+// 信封发下一片）；fullQuery 是未经 capUpstreamQuery 截断的完整 query；chatType 用于只对
+// USER_QUERY 启用分片（TOOL_RESPONSE 等工具语义路径不分片）；convID 是首片起始会话 ID。
+type outboundPlan struct {
+	input     map[string]interface{}
+	fullQuery string
+	chatType  string
+	convID    string
+	// chunkable 标记本次出站是否允许分片续传。只对「普通 USER_QUERY」（全新/续聊的用户文本，
+	// 典型即 @ 大文件引用）开放；tool-tail（把工具结果作为 USER_QUERY 交回）与原生 TOOL_RESPONSE
+	// 一律不分片——工具结果跨多轮 USER_QUERY 喂送语义可疑，且会与网关 403 钉号重试 / 会话粘性
+	// 机制相互干扰（改变上游往返次数）。这些路径继续走单发 + capUpstreamQuery 中段截断。
+	chunkable bool
+}
+
+func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel string, accountID int64) (map[string]interface{}, outboundPlan) {
 	nativeResponse, useNativeResponse := p.nativeToolResponse(accountID, req.Messages)
 	convID := p.LookupConversation(accountID, req.Messages)
 	// Native tool responses must keep the pending Postman conversation. If the
@@ -38,6 +54,15 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 		"toolResponse": "",
 		"useCase":      nil,
 		"agent":        nil,
+	}
+	// 记录未截断的完整 query，供分片续传按需切分（单发路径仍用上面已 cap 的值）。
+	// chunkable 仅对普通 USER_QUERY 开放：既非原生 TOOL_RESPONSE，也非 tool-tail 交回。
+	plan := outboundPlan{
+		input:     input,
+		fullQuery: split.Query,
+		chatType:  "USER_QUERY",
+		convID:    convID,
+		chunkable: !useNativeResponse && !toolTail(req.Messages),
 	}
 	if convID != "" {
 		input["conversationId"] = convID
@@ -112,9 +137,12 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 		input["toolResponses"] = nativeResponse.responses
 		delete(input, "toolResponse")
 		delete(input, "agent")
+		// TOOL_RESPONSE 走原生工具续期语义，不参与分片续传。
+		plan.chatType = "TOOL_RESPONSE"
+		plan.convID = nativeResponse.conversationID
 	}
 
-	return body
+	return body, plan
 }
 
 func (p *Provider) buildHeaders(tokens *Tokens) http.Header {
