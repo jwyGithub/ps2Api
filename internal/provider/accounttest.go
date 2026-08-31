@@ -183,7 +183,10 @@ func (p *Provider) StreamTestAccount(ctx context.Context, acc *store.Account, mo
 // （baseURL 由调用方按 r.Host 传入，如 http://127.0.0.1:1930），带面板 API Key 鉴权，
 // 走完整的选号 + 出站 + 协议转换。端点按模型选择：claude 系列 → /v1/messages（Anthropic 协议），
 // 其它（gpt 等）→ /v1/responses（OpenAI Responses 协议）。回调语义与 StreamTestAccount 一致。
-func (p *Provider) StreamServiceTest(ctx context.Context, baseURL, apiKey, model, prompt string, onMeta func(*AccountTestResult), onLine func(string)) *AccountTestResult {
+//
+// rawBody 为面板可选的「自定义请求体 JSON」：非空时直接作为出站请求体（要求为合法 JSON），
+// 忽略 model+prompt 自动生成；端点仍按请求体内的 model 字段（缺失时回退 model 参数）选择。
+func (p *Provider) StreamServiceTest(ctx context.Context, baseURL, apiKey, model, prompt, rawBody string, onMeta func(*AccountTestResult), onLine func(string)) *AccountTestResult {
 	started := time.Now()
 	res := &AccountTestResult{
 		Mode:      string(TestModeService),
@@ -204,26 +207,46 @@ func (p *Provider) StreamServiceTest(ctx context.Context, baseURL, apiKey, model
 
 	// 端点与请求体按模型协议选择：claude → Anthropic /v1/messages；其它 → OpenAI /v1/responses。
 	endpoint := "/v1/responses"
-	var payload map[string]interface{}
-	if strings.HasPrefix(strings.ToLower(model), "claude") {
-		endpoint = "/v1/messages"
-		payload = map[string]interface{}{
-			"model":      model,
-			"stream":     true,
-			"max_tokens": 1024,
-			"messages":   []map[string]interface{}{{"role": "user", "content": prompt}},
+	var bodyBytes []byte
+	if rawBody = strings.TrimSpace(rawBody); rawBody != "" {
+		// 自定义请求体：必须是合法 JSON；端点按体内 model 字段选择（缺失回退 model 参数）。
+		var probe map[string]interface{}
+		if err := json.Unmarshal([]byte(rawBody), &probe); err != nil {
+			res.RequestBody = rawBody
+			res.Error = "自定义请求体不是合法 JSON: " + err.Error()
+			return finish()
 		}
+		epModel := model
+		if m, ok := probe["model"].(string); ok && strings.TrimSpace(m) != "" {
+			epModel = strings.TrimSpace(m)
+		}
+		if strings.HasPrefix(strings.ToLower(epModel), "claude") {
+			endpoint = "/v1/messages"
+		}
+		bodyBytes = []byte(rawBody)
 	} else {
-		payload = map[string]interface{}{
-			"model":  model,
-			"stream": true,
-			"input":  prompt,
+		var payload map[string]interface{}
+		if strings.HasPrefix(strings.ToLower(model), "claude") {
+			endpoint = "/v1/messages"
+			payload = map[string]interface{}{
+				"model":      model,
+				"stream":     true,
+				"max_tokens": 1024,
+				"messages":   []map[string]interface{}{{"role": "user", "content": prompt}},
+			}
+		} else {
+			payload = map[string]interface{}{
+				"model":  model,
+				"stream": true,
+				"input":  prompt,
+			}
 		}
-	}
-	bodyBytes, err := json.Marshal(payload)
-	if err != nil {
-		res.Error = "构造请求体失败: " + err.Error()
-		return finish()
+		var err error
+		bodyBytes, err = json.Marshal(payload)
+		if err != nil {
+			res.Error = "构造请求体失败: " + err.Error()
+			return finish()
+		}
 	}
 	res.RequestBody = string(bodyBytes)
 	res.URL = strings.TrimRight(baseURL, "/") + endpoint

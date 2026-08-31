@@ -29,6 +29,17 @@ func routeErrorStatus(err error) (int, string) {
 	return 529, "overloaded_error"
 }
 
+// upstreamErrorStatus 为对话端点的上游失败挑选 HTTP 状态码：网关错误（上游 Cloudflare
+// 风控 403，RouteError.GatewayBlocked）返回 529（表达「上游暂时不可用」，且不再重试）；
+// 其余上游失败沿用 503。
+func upstreamErrorStatus(err error) int {
+	var re *router.RouteError
+	if errors.As(err, &re) && re.GatewayBlocked {
+		return 529
+	}
+	return 503
+}
+
 func jsonWrite(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -90,6 +101,27 @@ func sse(w http.ResponseWriter, fl http.Flusher, v interface{}) error {
 	return e
 }
 func mustJSON(v interface{}) string { b, _ := json.Marshal(v); return string(b) }
+
+// inboundHeadersJSON 把客户端入站请求头序列化为 JSON 原文，供请求日志排查。
+// 单值头拍平为字符串，多值头保留数组；空头返回空串。
+func inboundHeadersJSON(h http.Header) string {
+	if len(h) == 0 {
+		return ""
+	}
+	flat := make(map[string]interface{}, len(h))
+	for k, v := range h {
+		if len(v) == 1 {
+			flat[k] = v[0]
+		} else {
+			flat[k] = v
+		}
+	}
+	b, err := json.Marshal(flat)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
 func newID(prefix string) string {
 	b := make([]byte, 12)
 	_, _ = rand.Read(b)

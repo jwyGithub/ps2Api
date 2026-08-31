@@ -28,8 +28,23 @@ func (r *Router) alertRequestRejected(acc *store.Account, res *provider.Result) 
 
 // logAttempt 把每次上游调用（无论成败）都写入 request_logs，
 // 失败次数、错误率、平均延迟、P95 等指标全部来自真实日志。
-func (r *Router) logAttempt(acc *store.Account, model string, res *provider.Result, started time.Time, endpoint string) {
-	l := &store.RequestLog{AccountID: &acc.ID, Model: model, Endpoint: endpoint, DurationMs: time.Since(started).Milliseconds(), RequestBytes: res.RequestBytes}
+func (r *Router) logAttempt(acc *store.Account, req *provider.ChatRequest, res *provider.Result, started time.Time) {
+	l := &store.RequestLog{
+		AccountID:       &acc.ID,
+		Model:           req.Model,
+		Endpoint:        req.Endpoint,
+		DurationMs:      time.Since(started).Milliseconds(),
+		RequestBytes:    res.RequestBytes,
+		Path:            req.ClientPath,
+		Stream:          req.Stream,
+		ClientBody:      req.ClientBody,
+		ClientHeaders:   req.ClientHeaders,
+		UpstreamBody:    res.UpstreamBody,
+		UpstreamHeaders: res.UpstreamHeaders,
+		UpstreamURL:     res.UpstreamURL,
+		Egress:          res.Egress,
+		ConversationID:  res.ConversationID,
+	}
 	if res.Success {
 		l.Status = "success"
 		l.PromptTokens = res.PromptTokens

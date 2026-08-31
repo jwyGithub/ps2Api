@@ -306,6 +306,14 @@ input:checked + .slider::before { transform: translateX(18px); }
 }
 .drawer.show { transform: translateX(0); }
 
+.reqlog-pre {
+  margin: 0; padding: 12px 14px;
+  background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5;
+  color: var(--fg); white-space: pre-wrap; word-break: break-word;
+  max-height: 340px; overflow: auto;
+}
+
 .tab {
   padding: 8px 16px; border-radius: 8px;
   font-size: 13px; font-weight: 500;

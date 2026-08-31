@@ -2,6 +2,7 @@ package provider
 
 import (
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 )
@@ -25,10 +26,16 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 		}
 	}
 	thirdParty := p.buildThirdPartyTools(tools)
-	// Keep full third-party registration on normal Web requests. Only the bounded
-	// retry after a gateway block uses a name-only schema to preserve custom-tool
-	// dispatch without repeating the large docs envelope.
-	if req.GatewayRetry {
+	// GATEWAY_DISABLE_THIRD_PARTY=1 forces the upstream thirdParty field to an
+	// empty object, dropping all custom-tool registration (this also turns off
+	// autoRun below, which keys off len(thirdParty)).
+	if os.Getenv("GATEWAY_DISABLE_THIRD_PARTY") == "1" {
+		thirdParty = map[string]interface{}{}
+	} else if req.GatewayRetry {
+		// Keep full third-party registration on normal Web requests. Only the
+		// bounded retry after a gateway block uses a name-only schema to
+		// preserve custom-tool dispatch without repeating the large docs
+		// envelope.
 		thirdParty = compactThirdPartyTools(thirdParty)
 	}
 
@@ -94,6 +101,10 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 	if req.ParallelToolCalls != nil {
 		parallel = *req.ParallelToolCalls
 	}
+	thinkingLevel := req.OutputConfig["effort"]
+	if thinkingLevel == nil || thinkingLevel == "" {
+		thinkingLevel = "medium"
+	}
 	devMode := map[string]interface{}{
 		"selectedModel":                  postmanModel,
 		"isParallelToolCallingSupported": parallel,
@@ -101,7 +112,9 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 		"supportsAskUser":                false,
 		"supportsActionRecommendations":  true,
 		"useThinkingModeIfAvailable":     true,
-		"thinkingLevel":                  "medium",
+		"thinkingLevel":                  thinkingLevel,
+		"enableWebAccess":                true,
+		"isLoopApprovalEnabled":          true,
 	}
 	body["devModeOptions"] = devMode
 	if useNativeResponse {

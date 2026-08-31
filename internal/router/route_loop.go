@@ -48,19 +48,13 @@ func (p attemptPlan) trace(m map[string]interface{}, acc *store.Account, withEma
 func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, plan attemptPlan) (*provider.Result, *store.Account, error) {
 	var last string
 	excluded := map[int64]bool{}
-	gatewayBlocks := 0
-	stickyEgressTries := 0                 // 续聊 403 已用掉的「钉账号换出口」次数
-	stickyBudget := r.stickyEgressBudget() // 该级预算，耗尽后降级为跨账号 failover
-	var pinnedAcc *store.Account           // 续聊遇网关拦截时钉住原账号，绝不换号（换号会丢服务端会话上下文）
+	var pinnedAcc *store.Account // 续聊遇「与账号无关」的失败时钉住原账号，绝不换号（换号会丢服务端会话上下文）
 	attempts := r.retryCount()
-	gwBudget := r.gatewayFailoverBudget()
 	if !r.failoverEnabled() {
 		attempts = 1
-		gwBudget = 1
 	}
-	// maxAttempts 是循环硬上限：普通失败重试(超时/5xx/限流/额度/钉账号换出口)占用 attempts 额度；
-	// 每次「网关拦截跨账号 failover」会把上限 +1 作为补偿，使网关换号不吞掉普通重试预算——
-	// 两类预算解耦后，即便 retry_count 很小，被网关拦时仍能遍历大号池逐个兜底(见 gatewayFailoverBudget)。
+	// maxAttempts 是循环硬上限：普通失败重试(超时/5xx/限流/额度)占用 attempts 额度。
+	// 网关(Cloudflare 403)拦截不再重试——遇到即终止并返回 529，既不占用也不扩展该预算。
 	maxAttempts := attempts
 	// egressSeq 是「当前账号」的出口序号，与全局 attempt 解耦：同账号重试时递增以轮换代理
 	// 出口 IP；一旦跨账号 failover 换号就归零，让新账号从自身粘性出口重新走代理池——绝不因
@@ -86,14 +80,9 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 		}
 		// 已因 403 发生过跨账号 failover（gatewayBlocks>0）后，换号优先切到剩余频率额度最满
 		// （理想 30/30）的账号——被 Cloudflare 风控拦截后，最新鲜/余量最满的号更不易再次被拦。
-		acc, poolUsed, err := r.selectAccount(pinnedAcc, excluded, req.Messages, gatewayBlocks > 0)
+		acc, poolUsed, err := r.selectAccount(pinnedAcc, excluded, req.Messages, false)
 		if err != nil {
 			provider.Trace(ctx, "router.error", map[string]interface{}{"attempt": attempt + 1, "error": err.Error()})
-			// 因网关拦截逐个排除账号后耗尽了可用账号：返回明确的网关拦截错误(而非笼统的
-			// "无可用账号")，让调用方知道根因是上游 Cloudflare 风控、且本次未产生任何输出。
-			if gatewayBlocks > 0 {
-				return nil, nil, &RouteError{Message: gatewayBlockedError(gatewayBlocks), GatewayBlocked: true}
-			}
 			return nil, nil, err
 		}
 		provider.Trace(ctx, "router.attempt", plan.trace(map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "model": req.Model}, acc, true))
@@ -118,7 +107,7 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 		// 依据上游 usageState 同步账号健康：BLOCKED 视为账号异常(error)并停用，AVAILABLE 恢复正常(active)并启用。
 		// 与「刷新额度」路径一致。额度是否耗尽是另一回事，只看余量(remaining==0)，见下方 QuotaExhausted 分支。
 		r.applyUsageState(acc, res)
-		r.logAttempt(acc, req.Model, res, started, req.Endpoint)
+		r.logAttempt(acc, req, res, started)
 		if res.Success {
 			provider.Trace(ctx, "router.success", plan.trace(map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID}, acc, true))
 			r.Pool.MarkUsed(acc.ID)
@@ -138,52 +127,18 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 			return nil, nil, &RouteError{Message: last}
 		}
 		if res.GatewayBlocked {
-			// 诱因是有状态的 Cloudflare 风控（WAF/Bot 评分/速率），退避后重试常能成功。
-			// 流式下：延迟开流（首个 delta 前不落 200 / 不发事件）保证网关 403 时 emitted 仍为 false，故可重试；
-			// 若已吐出过内容则不能重试（会重复输出），返回错误、由客户端侧发起「继续」。
+			// 网关错误（上游 Cloudflare 风控：WAF/Bot 评分/速率 → 403）：不重试、不换号、不轮换出口，
+			// 直接终止当前对话并返回网关拦截错误。HTTP 层据 GatewayBlocked 把状态码映射为 529。
+			// 仍记录告警并把账号置入网关冷却窗口（供号池健康调度用，非重试）。
+			// 流式下：延迟开流（首个 delta 前不落 200 / 不发事件）保证网关 403 时 emitted 仍为 false；
+			// 若已吐出过内容则 abort() 走「已开流」终止路径，避免重复输出。
 			provider.Trace(ctx, "router.gateway_blocked", plan.trace(map[string]interface{}{"account_id": acc.ID, "error": res.Error}, acc, true))
 			r.alertRequestRejected(acc, res)
+			r.Pool.MarkGatewayBlocked(acc.ID, r.gatewayCooldownDur())
 			if e, done := abort(); done {
 				return nil, nil, e
 			}
-			if provider.HasReusableHistory(req.Messages) {
-				// 续聊 403 两级升级处理：
-				// 【一级】钉住原账号（保住 Postman 服务端会话：conversationId/TOOL_RESPONSE 不降级），
-				//   但轮换出口 IP——403 是有状态的出口信誉风控，换 IP 大概率通过。此级零上下文损失：
-				//   不改写 req.Messages（保住会话指纹），只在出站边界净化摘要并压缩 third-party schema。
-				if stickyEgressTries < stickyBudget && attempt < maxAttempts-1 {
-					pinnedAcc = acc
-					stickyEgressTries++
-					req.GatewayRetry = true
-					req.GatewayRetryRotateEgress = true
-					provider.Trace(ctx, "router.gateway_sticky_retry", plan.trace(map[string]interface{}{"account_id": acc.ID, "egress_try": stickyEgressTries, "rotate_egress": true}, acc, false))
-					time.Sleep(gatewayBackoff(attempt))
-					continue
-				}
-				// 【二级】同账号轮换出口仍被拦 → 降级为跨账号 failover。会丢服务端会话上下文
-				//   （降级为 USER_QUERY + 历史截断「失忆」），但拿到降级答案好过硬失败 403。
-				gatewayBlocks++
-				excluded[acc.ID] = true
-				pinnedAcc = nil
-				r.Pool.MarkGatewayBlocked(acc.ID, r.gatewayCooldownDur())
-				if gatewayBlocks < gwBudget {
-					maxAttempts++
-					time.Sleep(gatewayBackoff(attempt))
-					continue
-				}
-				return nil, nil, &RouteError{Message: gatewayBlockedError(gatewayBlocks), GatewayBlocked: true}
-			}
-			// 新对话：无服务端会话可丢，换号 failover 安全——排除当前账号并打冷却标记，退避后换其他账号。
-			gatewayBlocks++
-			excluded[acc.ID] = true
-			pinnedAcc = nil
-			r.Pool.MarkGatewayBlocked(acc.ID, r.gatewayCooldownDur())
-			if gatewayBlocks < gwBudget {
-				maxAttempts++
-				time.Sleep(gatewayBackoff(attempt))
-				continue
-			}
-			return nil, nil, &RouteError{Message: gatewayBlockedError(gatewayBlocks), GatewayBlocked: true}
+			return nil, nil, &RouteError{Message: res.Error, GatewayBlocked: true}
 		}
 		if res.RequestRejected {
 			// 请求内容被拒(坏请求、工具名冲突等)——账号本身可用,不标记、不换号重试,直接返回。

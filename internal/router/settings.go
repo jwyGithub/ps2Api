@@ -37,29 +37,6 @@ func (r *Router) stickyEgressBudget() int {
 	return n
 }
 
-// gatewayFailoverBudget 是遇上游网关(Cloudflare)风控 403 时，「跨账号 failover」允许尝试的
-// 不同账号数上限，与普通重试预算(retry_count)相互独立：网关换号不占用普通重试计数，反之亦然。
-// 这样即便 retry_count 很小，被网关拦截时仍能遍历大号池逐个兜底，直到本预算耗尽才返回 403。
-// 默认 5。
-func (r *Router) gatewayFailoverBudget() int {
-	v, _ := r.Store.GetSetting("gateway_failover_budget")
-	n, err := strconv.Atoi(v)
-	if err != nil || n < 1 {
-		return 5
-	}
-	return n
-}
-
-// gatewayBackoff 为网关(Cloudflare)风控拦截的重试提供退避,比普通失败重试更长,
-// 给速率/评分窗口降温时间:0.5s、1s、2s… 上限 5s。
-func gatewayBackoff(attempt int) time.Duration {
-	d := time.Duration(1<<attempt) * 500 * time.Millisecond
-	if d > 5*time.Second {
-		d = 5 * time.Second
-	}
-	return d
-}
-
 // gatewayCooldownDur 读取被网关拦截账号的冷却时长（默认 5 分钟）。冷却期内号池优先跳过该账号。
 func (r *Router) gatewayCooldownDur() time.Duration {
 	v, _ := r.Store.GetSetting("gateway_cooldown_seconds")

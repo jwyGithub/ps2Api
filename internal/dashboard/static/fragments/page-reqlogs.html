@@ -1,0 +1,36 @@
+<section class="page" id="page-reqlogs">
+    <div class="p-8">
+      <div class="flex items-end justify-between mb-8 gap-6 flex-wrap">
+        <div>
+          <div class="text-[11px] font-semibold tracking-wider uppercase mb-2" style="color: var(--muted);">Request Logs</div>
+          <h1 class="hero-title">请求 <em>日志</em></h1>
+          <p class="mt-2 text-[14px]" style="color: var(--fg-2);">记录网关收到的 /v1/chat/completions、/v1/responses、/v1/messages 请求，及其转换后转发给上游的请求体，便于排查。日志按指纹会话分组，同一会话的多轮调用聚在一起并按调用先后（#1、#2…）缩进排列，可清晰看出每组会话的前后调用关系。点击会话表头可展开 / 收起该组调用。</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <span id="reqlogCount" class="text-[12px]" style="color: var(--muted);"></span>
+          <button class="btn btn-ghost" onclick="renderReqLogsReal()">刷新</button>
+        </div>
+      </div>
+
+      <div class="card overflow-hidden">
+        <div class="overflow-x-auto">
+          <table class="data-table">
+            <thead>
+              <tr><th>#</th><th>时间</th><th>入站端点</th><th>模型</th><th>账号</th><th>出口</th><th>状态</th><th>出站体积</th><th>耗时</th><th>操作</th></tr>
+            </thead>
+            <tbody id="reqlogsBody"></tbody>
+          </table>
+        </div>
+        <div class="flex items-center justify-end gap-2 p-4" id="reqlogsPager"></div>
+      </div>
+    </div>
+
+    <div id="reqlogModalBackdrop" class="drawer-backdrop" onclick="closeReqLogModal()"></div>
+    <div id="reqlogModal" class="drawer" style="width: min(920px, 96vw);">
+      <div class="flex items-center justify-between p-5" style="border-bottom: 1px solid var(--border);">
+        <div class="font-semibold text-[15px]">请求日志详情 <span id="reqlogModalTitle" class="text-[12px] font-mono" style="color: var(--muted);"></span></div>
+        <button class="icon-btn" onclick="closeReqLogModal()">✕</button>
+      </div>
+      <div class="flex-1 overflow-y-auto p-5 space-y-5" id="reqlogModalBody"></div>
+    </div>
+  </section>

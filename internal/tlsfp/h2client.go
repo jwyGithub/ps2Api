@@ -371,7 +371,7 @@ func (c *h2Conn) buildResponse(req *http.Request, st *h2Stream, mh *http2.MetaHe
 	}
 	header := make(http.Header, len(mh.RegularFields()))
 	for _, hf := range mh.RegularFields() {
-		header.Add(http.CanonicalHeaderKey(hf.Name), hf.Value)
+		header.Add(hf.Name, hf.Value)
 	}
 	resp := &http.Response{
 		Status:     strconv.Itoa(code) + " " + http.StatusText(code),

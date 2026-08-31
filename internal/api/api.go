@@ -68,6 +68,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	// 管理类端点（/api/*）——运维只读与缓存探针（见 ops.go）
 	mux.HandleFunc("GET /api/stats", s.stats)
 	mux.HandleFunc("GET /api/logs", s.logs)
+	mux.HandleFunc("GET /api/request-logs", s.requestLogs)
 	mux.HandleFunc("GET /api/cache-probe", s.cacheProbe)
 	mux.HandleFunc("DELETE /api/cache-probe", s.cacheProbeReset)
 

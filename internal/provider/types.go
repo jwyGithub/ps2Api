@@ -91,6 +91,13 @@ type ChatRequest struct {
 	// Endpoint 调用来源兼容端点：anthropic(/v1/messages) | openai(/v1/chat/completions)，
 	// 由 HTTP handler 注入，只进日志，不随请求体透传。
 	Endpoint string `json:"-"`
+	// ClientPath 是命中的入站路径原文(/v1/chat/completions | /v1/responses | /v1/messages)，
+	// 由 HTTP handler 注入，只进请求日志。
+	ClientPath string `json:"-"`
+	// ClientBody 是客户端发来的原始请求体(JSON 原文)，由 HTTP handler 注入，只进请求日志。
+	ClientBody string `json:"-"`
+	// ClientHeaders 是客户端发来的入站请求头(JSON 原文)，由 HTTP handler 注入，只进请求日志。
+	ClientHeaders string `json:"-"`
 	// EgressAttempt 是本次出站的出口重试序号（由 router 每次重试递增）。0 用账号粘性出口，
 	// 遇 Cloudflare 403 重试时 +1 切到下一个代理出口 IP；越过所有出口后回退本机直连。
 	EgressAttempt int `json:"-"`
@@ -100,6 +107,8 @@ type ChatRequest struct {
 	// 钉住原账号(保住服务端会话)的同时让出口 IP 随 attempt 轮换——403 是有状态的出口信誉
 	// 风控，换 IP 大概率通过。为真时 EgressAttempt 随 attempt 递增(而非旧式钉成 attempt-1)。
 	GatewayRetryRotateEgress bool `json:"-"`
+	// OutputConfig 是客户端发来的 output_config 字段(JSON 原文)，由 HTTP handler 注入，只进请求日志。
+	OutputConfig map[string]interface{} `json:"output_config"`
 }
 
 type Result struct {
@@ -143,6 +152,14 @@ type Result struct {
 	// RequestBytes 是本次出站请求体(JSON marshal 后)的字节数。写入 request_logs 后
 	// 用于按体积分桶统计 403 发生率,判断 body 大小与 Cloudflare 403 是否相关。
 	RequestBytes int
+	// UpstreamBody 是本次实际转发给上游 Postman 的请求体(JSON 原文)，供请求日志排查。
+	UpstreamBody string
+	// UpstreamHeaders 是本次实际发送给上游 Postman 的请求头(JSON 原文)，供请求日志排查。
+	UpstreamHeaders string
+	// UpstreamURL 是本次出站的上游 URL。
+	UpstreamURL string
+	// Egress 是本次出站选用的出口标识（代理标签或 direct）。
+	Egress string
 }
 
 type ToolCall struct {

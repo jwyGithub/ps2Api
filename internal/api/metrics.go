@@ -28,9 +28,8 @@ type settingDef struct {
 
 // settingDefs 是面板可配置项的白名单。前端按此渲染表单，PUT 只接受这些键。
 var settingDefs = []settingDef{
-	{Key: "retry_count", Label: "请求重试次数", Type: "number", Default: "3", Description: "普通失败（超时/5xx/限流/额度耗尽等）单次请求最多重试几次（在号池内切换账号）。不含网关(403)换号——后者由「网关拦截换号预算」独立控制"},
+	{Key: "retry_count", Label: "请求重试次数", Type: "number", Default: "3", Description: "普通失败（超时/5xx/限流/额度耗尽等）单次请求最多重试几次（在号池内切换账号）。网关(Cloudflare 403)拦截不重试、不换号，直接返回"},
 	{Key: "failover_enabled", Label: "失败自动切换账号", Type: "bool", Default: "true", Description: "关闭后单次请求失败不再换号重试"},
-	{Key: "gateway_failover_budget", Label: "网关拦截换号预算", Type: "number", Default: "5", Description: "遇上游 Cloudflare 风控(403)时，最多尝试多少个不同账号做兜底 failover。独立于「请求重试次数」，换号不占用普通重试预算，故大号池可被真正利用；耗尽仍被拦才返回 403"},
 	{Key: "gateway_cooldown_seconds", Label: "网关拦截冷却(秒)", Type: "number", Default: "300", Description: "账号被上游 Cloudflare 风控拦截(403)后进入冷却，此时长内号池优先跳过该账号、改用健康账号；到期自动恢复"},
 	{Key: "prefer_quota_on_403", Label: "403 换号选号策略", Type: "select", Default: "ratio", Options: []string{"ratio", "absolute", "off"}, Description: "遇网关(403)换号时如何挑下一个账号：ratio=剩余额度比例(RateRemaining/RateLimit)最高优先，各账号额度上限不一致时更公平(默认)；absolute=剩余额度绝对值最高优先；off=关闭额度优先，换号也走普通负载轮询"},
 	{Key: "account_reservation_seconds", Label: "账号占用避让(秒)", Type: "number", Default: "90", Description: "一个客户端用过某账号后，此时长内普通轮询选号会优先避开它，把不同客户端摊到不同账号，避免多客户端挤同一号导致额度被快速烧穿、频繁换号。纯软避让：没有别的空闲号时仍会复用，不影响可用性；也不影响会话粘性(续聊照常回原号)。设为 0 关闭"},

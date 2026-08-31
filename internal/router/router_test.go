@@ -147,24 +147,19 @@ func TestStickyFallsBackWhenAccountDisabled(t *testing.T) {
 	}
 }
 
-// Cloudflare 403(HTML 风控拦截)以前被当成 RequestRejected 直接返回,任务卡死。
-// 现在归类为 GatewayBlocked:排除被拦账号并 failover 到其他账号,第二次即恢复成功——且写入一条告警。
-func TestStreamCloudflare403RetriesAndRecovers(t *testing.T) {
+// Cloudflare 403(HTML 风控拦截)归类为 GatewayBlocked：不再重试/换号，遇到即终止当前对话，
+// 只打一次上游即返回 GatewayBlocked 错误(HTTP 层映射为 529)，不向客户端 emit 任何增量，且写入一条告警。
+func TestStreamCloudflare403ReturnsImmediatelyNoRetry(t *testing.T) {
 	r := newTestRouter(t)
 	var calls int32
 	r.Provider.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if atomic.AddInt32(&calls, 1) == 1 {
-			h := make(http.Header)
-			h.Set("Server", "cloudflare")
-			h.Set("Content-Type", "text/html; charset=UTF-8")
-			h.Set("Cf-Ray", "a2d562e1bc2349d4-LAX")
-			body := "<!doctype html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>"
-			return &http.Response{StatusCode: 403, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
-		}
-		body := "data: {\"eventType\":\"conversation\",\"data\":{\"id\":\"conv-1\"}}\n\n" +
-			"data: {\"eventType\":\"textChunk\",\"data\":{\"textContent\":\"ok\"}}\n\n" +
-			"data: [DONE]\n\n"
-		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+		atomic.AddInt32(&calls, 1)
+		h := make(http.Header)
+		h.Set("Server", "cloudflare")
+		h.Set("Content-Type", "text/html; charset=UTF-8")
+		h.Set("Cf-Ray", "a2d562e1bc2349d4-LAX")
+		body := "<!doctype html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>"
+		return &http.Response{StatusCode: 403, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
 	})}
 
 	var output strings.Builder
@@ -174,49 +169,41 @@ func TestStreamCloudflare403RetriesAndRecovers(t *testing.T) {
 		output.WriteString(delta.Content)
 		return nil
 	})
-	if err != nil || res == nil || !res.Success || account == nil {
-		t.Fatalf("Cloudflare 403 should retry and recover: res=%+v account=%+v err=%v", res, account, err)
+	if err == nil || res != nil || account != nil {
+		t.Fatalf("gateway 403 should return an error with no result: res=%+v account=%+v err=%v", res, account, err)
 	}
-	if got := atomic.LoadInt32(&calls); got != 2 {
-		t.Fatalf("expected exactly 2 upstream calls (403 then success), got %d", got)
+	re, ok := err.(*RouteError)
+	if !ok || !re.GatewayBlocked {
+		t.Fatalf("error should be *RouteError with GatewayBlocked=true, got %T %v", err, err)
 	}
-	if output.String() != "ok" {
-		t.Fatalf("client should see recovered output, got %q", output.String())
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("gateway block must not retry, expected exactly 1 upstream call, got %d", got)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("no output should be emitted to client on gateway block, got %q", output.String())
 	}
 	if alerts, err := r.Store.ListAlerts("", 10); err != nil || len(alerts) == 0 {
 		t.Fatalf("expected a gateway-rejected alert to be recorded: alerts=%v err=%v", alerts, err)
 	}
 }
 
-// 403 集中在被烧账号(token-1)时,应 failover 到健康账号(token-2)成功,且不把被拦账号
-// 标记成 error/exhausted(账号本身健康,仅进入路由层冷却)。验证「换账号」这一核心缓解手段。
-func TestStreamGatewayBlockedFailsOverToHealthyAccount(t *testing.T) {
+// 网关(Cloudflare 403)拦截不再跨账号 failover：遇到即终止,只打一次上游即返回 GatewayBlocked,
+// 绝不切到第二个账号；被拦账号也不应被标记 error/exhausted(它健康,仅进入路由层冷却)。
+func TestStreamGatewayBlockedDoesNotFailOver(t *testing.T) {
 	r := newTestRouter(t)
 	accounts, err := r.Store.ListAccounts()
 	if err != nil || len(accounts) != 2 {
 		t.Fatalf("accounts=%v err=%v", accounts, err)
 	}
-	for i, account := range accounts {
-		tokens, _ := json.Marshal(provider.Tokens{AccessToken: "token-" + string(rune('1'+i)), UserID: "u", WorkspaceID: "w"})
-		if err := r.Store.UpdateTokens(account.ID, string(tokens)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var blocked int32
+	var calls int32
 	r.Provider.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.Header.Get("x-access-token") == "token-1" {
-			atomic.AddInt32(&blocked, 1)
-			h := make(http.Header)
-			h.Set("Server", "cloudflare")
-			h.Set("Content-Type", "text/html; charset=UTF-8")
-			h.Set("Cf-Ray", "a2d562e1bc2349d4-LAX")
-			body := "<!doctype html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>"
-			return &http.Response{StatusCode: 403, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
-		}
-		body := "data: {\"eventType\":\"conversation\",\"data\":{\"id\":\"conv-2\"}}\n\n" +
-			"data: {\"eventType\":\"textChunk\",\"data\":{\"textContent\":\"ok\"}}\n\n" +
-			"data: [DONE]\n\n"
-		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+		atomic.AddInt32(&calls, 1)
+		h := make(http.Header)
+		h.Set("Server", "cloudflare")
+		h.Set("Content-Type", "text/html; charset=UTF-8")
+		h.Set("Cf-Ray", "a2d562e1bc2349d4-LAX")
+		body := "<!doctype html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>"
+		return &http.Response{StatusCode: 403, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
 	})}
 
 	var output strings.Builder
@@ -226,19 +213,29 @@ func TestStreamGatewayBlockedFailsOverToHealthyAccount(t *testing.T) {
 		output.WriteString(delta.Content)
 		return nil
 	})
-	if err != nil || res == nil || !res.Success || account == nil {
-		t.Fatalf("gateway block should fail over and recover: res=%+v account=%+v err=%v", res, account, err)
+	if err == nil || res != nil || account != nil {
+		t.Fatalf("gateway block should return an error, not fail over: res=%+v account=%+v err=%v", res, account, err)
 	}
-	if output.String() != "ok" {
-		t.Fatalf("client should see recovered output, got %q", output.String())
+	re, ok := err.(*RouteError)
+	if !ok || !re.GatewayBlocked {
+		t.Fatalf("error should be *RouteError with GatewayBlocked=true, got %T %v", err, err)
 	}
-	// 被拦账号(token-1)不应被标记为 error/exhausted——它健康,只是被上游风控临时拦截。
-	blockedAcc, err := r.Store.GetAccount(accounts[0].ID)
-	if err != nil {
-		t.Fatal(err)
+	// 关键：只打一次上游即返回,绝不 failover 到第二个账号。
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("gateway block must not fail over to another account, expected 1 upstream call, got %d", got)
 	}
-	if blockedAcc.Status == "error" || blockedAcc.Status == "exhausted" {
-		t.Fatalf("gateway-blocked account must not be marked %q (it is healthy, only cooled down)", blockedAcc.Status)
+	if output.Len() != 0 {
+		t.Fatalf("no output should be emitted to client on gateway block, got %q", output.String())
+	}
+	// 被拦账号不应被标记为 error/exhausted——它健康,只是被上游风控临时拦截。
+	for _, a := range accounts {
+		got, err := r.Store.GetAccount(a.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status == "error" || got.Status == "exhausted" {
+			t.Fatalf("gateway-blocked account must not be marked %q (it is healthy, only cooled down)", got.Status)
+		}
 	}
 }
 
@@ -278,8 +275,9 @@ func TestStreamAllAccountsBlockedReturnsClearError(t *testing.T) {
 		t.Fatalf("error message should clearly mention the 403 gateway block, got %q", re.Message)
 	}
 	// failover 逐个排除被拦账号：2 个账号各被试一次(共 2 次 403)后账号耗尽,不再空转。
-	if got := atomic.LoadInt32(&calls); got != 2 {
-		t.Fatalf("should try each of the 2 accounts once before giving up, got %d upstream calls", got)
+	// 网关拦截不再重试/换号：只打一次上游即返回,不再逐个试其余账号。
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("gateway block must not retry, expected exactly 1 upstream call, got %d", got)
 	}
 }
 
@@ -327,36 +325,26 @@ func TestStreamBlockedAccountSwitchesAndDisablesBeforeOutput(t *testing.T) {
 	}
 }
 
-// 续聊(带 tool_result 历史)遇网关 403 时,诱因是有状态的 Cloudflare 风控而非账号身份;
-// 且换号会丢掉 Postman 服务端会话上下文。故应「原号退避重试」而非换号。
-// 本例只留一个可用账号:若走换号 failover 必然因无其他账号而失败;能恢复即证明是原号重试生效。
-func TestStreamGatewayBlockedRetriesSameAccount(t *testing.T) {
+// 网关拦截(Cloudflare 403)诱因是有状态的 WAF/Bot 风控而非账号身份:重试同号大概率仍被拦、
+// 换号又会丢掉 Postman 服务端会话上下文并把错误传染给一批号。故新契约是「不重试、不换号,
+// 立即返回网关拦截错误」(HTTP 层映射为 529),仅把该号置入网关冷却窗口供健康调度,不判为异常。
+func TestStreamGatewayBlockedReturnsImmediatelyNoRetry(t *testing.T) {
 	r := newTestRouter(t)
 	accounts, err := r.Store.ListAccounts()
 	if err != nil || len(accounts) != 2 {
 		t.Fatalf("accounts=%v err=%v", accounts, err)
 	}
-	// 只保留一个可用账号,断掉换号 failover 这条路。
-	if err := r.Store.SetAccountEnabled(accounts[1].ID, false); err != nil {
-		t.Fatal(err)
-	}
 
 	var calls int32
 	r.Provider.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if atomic.AddInt32(&calls, 1) == 1 {
-			// 首次:请求体带巨型 tool_result → Cloudflare 403(HTML 风控页)。
-			h := make(http.Header)
-			h.Set("Server", "cloudflare")
-			h.Set("Content-Type", "text/html; charset=UTF-8")
-			h.Set("Cf-Ray", "a2d562e1bc2349d4-LAX")
-			body := "<!doctype html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>"
-			return &http.Response{StatusCode: 403, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
-		}
-		// 原号退避重试:正常 SSE 成功。
-		body := "data: {\"eventType\":\"conversation\",\"data\":{\"id\":\"conv-1\"}}\n\n" +
-			"data: {\"eventType\":\"textChunk\",\"data\":{\"textContent\":\"ok\"}}\n\n" +
-			"data: [DONE]\n\n"
-		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+		atomic.AddInt32(&calls, 1)
+		// 请求体带巨型 tool_result → Cloudflare 403(HTML 风控页)。
+		h := make(http.Header)
+		h.Set("Server", "cloudflare")
+		h.Set("Content-Type", "text/html; charset=UTF-8")
+		h.Set("Cf-Ray", "a2d562e1bc2349d4-LAX")
+		body := "<!doctype html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>"
+		return &http.Response{StatusCode: 403, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
 	})}
 
 	big := strings.Repeat("<div>dump</div>", 4000) // ~60KB 类 HTML 的巨型 tool_result
@@ -374,30 +362,31 @@ func TestStreamGatewayBlockedRetriesSameAccount(t *testing.T) {
 		output.WriteString(delta.Content)
 		return nil
 	})
-	if err != nil || res == nil || !res.Success || account == nil {
-		t.Fatalf("gateway block should retry and recover on the same account: res=%+v account=%+v err=%v", res, account, err)
+	if err == nil || res != nil || account != nil {
+		t.Fatalf("gateway block must return an error with no result/account: res=%+v account=%+v err=%v", res, account, err)
 	}
-	if account.ID != accounts[0].ID {
-		t.Fatalf("must recover on the only enabled account %d, got %d", accounts[0].ID, account.ID)
+	re, ok := err.(*RouteError)
+	if !ok || !re.GatewayBlocked {
+		t.Fatalf("error should be *RouteError with GatewayBlocked=true, got %T %v", err, err)
 	}
-	if got := atomic.LoadInt32(&calls); got != 2 {
-		t.Fatalf("expected exactly 2 upstream calls (403 then same-account retry success), got %d", got)
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("gateway block must NOT retry: expected exactly 1 upstream call, got %d", got)
 	}
-	if output.String() != "ok" {
-		t.Fatalf("client should see recovered output, got %q", output.String())
+	if output.Len() != 0 {
+		t.Fatalf("no output should be emitted to client on gateway block, got %q", output.String())
 	}
-	// 诱因是请求体而非账号:被拦账号不应被冷却/标记异常,仍可用。
+	// 诱因是请求体而非账号:被拦账号不应被标记异常/耗尽,仍健康(仅进入网关冷却窗口)。
 	same, err := r.Store.GetAccount(accounts[0].ID)
 	if err != nil || same.Status == "error" || same.Status == "exhausted" {
 		t.Fatalf("blocked account must stay healthy (request-triggered, not account fault): %+v err=%v", same, err)
 	}
 }
 
-// 回归：续聊(有可复用历史)遇网关 403 时，必须钉住原账号退避重试，绝不换号——即使此刻有另一个
-// 健康账号可用。换号会丢失 Postman 服务端会话上下文（请求被降级为 USER_QUERY 且历史被截断），
-// 正是此前「压缩改写 req.Messages → 破坏会话指纹 → 静默换号 → 降级失忆」的根因。
-// 同时断言 req.Messages 未被就地改写（保住指纹 → 维持 TOOL_RESPONSE + conversationId）。
-func TestStreamGatewayBlockedContinuationStaysOnOriginalAccountNoDowngrade(t *testing.T) {
+// 回归：续聊(有可复用历史)遇网关 403 时，绝不换号——换号会丢失 Postman 服务端会话上下文
+// （请求被降级为 USER_QUERY 且历史被截断），并把同一错误传染给其它健康账号。新契约:不重试、
+// 不换号，立即返回网关拦截错误。同时断言 req.Messages 未被就地改写（保住指纹 → 维持
+// TOOL_RESPONSE + conversationId），即从源头杜绝「压缩改写 → 破坏指纹 → 换号 → 降级失忆」。
+func TestStreamGatewayBlockedContinuationNoFailoverNoDowngrade(t *testing.T) {
 	r := newTestRouter(t)
 	accounts, err := r.Store.ListAccounts()
 	if err != nil || len(accounts) != 2 {
@@ -432,18 +421,14 @@ func TestStreamGatewayBlockedContinuationStaysOnOriginalAccountNoDowngrade(t *te
 				"data: [DONE]\n\n"
 			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
 		}
-		if atomic.AddInt32(&token1Calls, 1) == 1 {
-			h := make(http.Header)
-			h.Set("Server", "cloudflare")
-			h.Set("Content-Type", "text/html; charset=UTF-8")
-			h.Set("Cf-Ray", "a2d562e1bc2349d4-LAX")
-			body := "<!doctype html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>"
-			return &http.Response{StatusCode: 403, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
-		}
-		body := "data: {\"eventType\":\"conversation\",\"data\":{\"id\":\"conv-A\"}}\n\n" +
-			"data: {\"eventType\":\"textChunk\",\"data\":{\"textContent\":\"ok\"}}\n\n" +
-			"data: [DONE]\n\n"
-		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+		// 原账号(token-1)始终被 Cloudflare 拦截:新契约下不重试、不换号,立即返回。
+		atomic.AddInt32(&token1Calls, 1)
+		h := make(http.Header)
+		h.Set("Server", "cloudflare")
+		h.Set("Content-Type", "text/html; charset=UTF-8")
+		h.Set("Cf-Ray", "a2d562e1bc2349d4-LAX")
+		body := "<!doctype html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>"
+		return &http.Response{StatusCode: 403, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
 	})}
 
 	req := &provider.ChatRequest{Model: "claude-opus-4-8", Messages: cont}
@@ -452,20 +437,21 @@ func TestStreamGatewayBlockedContinuationStaysOnOriginalAccountNoDowngrade(t *te
 		output.WriteString(delta.Content)
 		return nil
 	})
-	if err != nil || res == nil || !res.Success || account == nil {
-		t.Fatalf("continuation gateway block should retry same account and recover: res=%+v account=%+v err=%v", res, account, err)
+	if err == nil || res != nil || account != nil {
+		t.Fatalf("continuation gateway block must return an error with no result/account: res=%+v account=%+v err=%v", res, account, err)
 	}
-	if account.ID != acc1.ID {
-		t.Fatalf("must recover on the ORIGINAL account %d (no switch), got %d", acc1.ID, account.ID)
+	re, ok := err.(*RouteError)
+	if !ok || !re.GatewayBlocked {
+		t.Fatalf("error should be *RouteError with GatewayBlocked=true, got %T %v", err, err)
 	}
 	if n := atomic.LoadInt32(&token2Calls); n != 0 {
 		t.Fatalf("must NOT fail over to the other account on a continuation (would lose server-side session), but token-2 was called %d time(s)", n)
 	}
-	if n := atomic.LoadInt32(&token1Calls); n != 2 {
-		t.Fatalf("expected exactly 2 calls to the original account (403 then success), got %d", n)
+	if n := atomic.LoadInt32(&token1Calls); n != 1 {
+		t.Fatalf("expected exactly 1 call to the original account (no retry on gateway block), got %d", n)
 	}
-	if output.String() != "ok" {
-		t.Fatalf("client should see recovered output from the original account, got %q", output.String())
+	if output.Len() != 0 {
+		t.Fatalf("no output should be emitted to client on gateway block, got %q", output.String())
 	}
 	// 关键：req.Messages 不得被就地改写——改写会破坏会话指纹并触发降级为 USER_QUERY。
 	if len(req.Messages) != 3 {
@@ -476,26 +462,16 @@ func TestStreamGatewayBlockedContinuationStaysOnOriginalAccountNoDowngrade(t *te
 	}
 }
 
-// 双预算解耦回归：网关(Cloudflare 403)跨账号 failover 由 gateway_failover_budget 独立控制，
-// 不占用普通重试预算(retry_count)。故即便把 retry_count 压到 1，遇网关拦截时仍能遍历多个账号
-// 逐个兜底，直到 gateway_failover_budget 耗尽才返回 403——这正是「大号池能被真正利用」的保证。
-// 本例断言尝试的账号数由 gateway_failover_budget(3) 决定，而非 retry_count(1)。
-func TestStreamGatewayFailoverBudgetDecoupledFromRetryCount(t *testing.T) {
+// 网关拦截(Cloudflare 403)绝不跨账号 failover:换号既大概率同样被 WAF 拦、又会把错误传染给
+// 一批健康账号并丢失会话上下文。新契约下无论号池多大,遇网关拦截都只打一次上游、立即返回 403。
+func TestStreamGatewayBlockedNoFailoverAcrossAccounts(t *testing.T) {
 	r := newTestRouter(t)
-	// 扩充到 5 个账号（> 网关换号预算 3），确保停止原因是预算耗尽而非账号用尽。
+	// 扩充到 5 个账号:即便有大量可用号,网关拦截也不得逐个换号兜底。
 	tok, _ := json.Marshal(provider.Tokens{AccessToken: "tok", UserID: "u", WorkspaceID: "w"})
 	for _, email := range []string{"a3@test.com", "a4@test.com", "a5@test.com"} {
 		if _, err := r.Store.UpsertAccount(email, "", string(tok), "manual"); err != nil {
 			t.Fatal(err)
 		}
-	}
-	// 普通重试预算压到 1：若两类预算未解耦，遇 403 最多只会碰 1 个账号。
-	if err := r.Store.SetSetting("retry_count", "1"); err != nil {
-		t.Fatal(err)
-	}
-	// 网关换号预算 3：期望恰好尝试 3 个不同账号后返回 403。
-	if err := r.Store.SetSetting("gateway_failover_budget", "3"); err != nil {
-		t.Fatal(err)
 	}
 
 	var calls int32
@@ -517,19 +493,18 @@ func TestStreamGatewayFailoverBudgetDecoupledFromRetryCount(t *testing.T) {
 		return nil
 	})
 	if err == nil || res != nil || account != nil {
-		t.Fatalf("all-blocked should return an error with no result: res=%+v account=%+v err=%v", res, account, err)
+		t.Fatalf("gateway block should return an error with no result: res=%+v account=%+v err=%v", res, account, err)
 	}
 	re, ok := err.(*RouteError)
 	if !ok || !re.GatewayBlocked {
 		t.Fatalf("error should be *RouteError with GatewayBlocked=true, got %T %v", err, err)
 	}
-	// 关键断言：换号次数受 gateway_failover_budget(3) 控制，而非 retry_count(1)。
-	// ==3 同时证明：(a) 换号数 > retry_count → 两类预算已解耦；(b) 恰在网关预算耗尽处停止。
-	if got := atomic.LoadInt32(&calls); got != 3 {
-		t.Fatalf("gateway failover should try gateway_failover_budget(3) accounts regardless of retry_count(1), got %d upstream calls", got)
+	// 关键断言:无论号池多大,网关拦截只打一次上游、绝不换号。
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("gateway block must NOT fail over across accounts: expected exactly 1 upstream call, got %d", got)
 	}
 	if output.Len() != 0 {
-		t.Fatalf("no output should be emitted to client on total gateway block, got %q", output.String())
+		t.Fatalf("no output should be emitted to client on gateway block, got %q", output.String())
 	}
 }
 

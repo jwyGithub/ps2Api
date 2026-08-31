@@ -31,3 +31,6 @@ __pycache__/
 
 # 本地测试产物
 /tmp/
+
+# runtime logs
+logs/

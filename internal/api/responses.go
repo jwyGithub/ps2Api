@@ -32,6 +32,10 @@ type ResponsesReq struct {
 	ToolChoice        interface{}              `json:"tool_choice"`
 	ParallelToolCalls *bool                    `json:"parallel_tool_calls"`
 	Stream            bool                     `json:"stream"`
+	// OutputConfig 承载 output_config.effort（思考强度 high/medium/low），透传给 devModeOptions.thinkingLevel。
+	OutputConfig map[string]interface{} `json:"output_config"`
+	// Reasoning 是 OpenAI Responses 标准的思考强度字段（reasoning.effort），output_config 缺省时回退到它。
+	Reasoning map[string]interface{} `json:"reasoning"`
 }
 
 // respInputItem 是 input 数组里的一项(message / function_call / function_call_output / reasoning)。
@@ -50,8 +54,13 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	if !s.auth(w, r) {
 		return
 	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxChatBody))
+	if err != nil {
+		openAIError(w, 400, err.Error(), "invalid_request_error")
+		return
+	}
 	var rr ResponsesReq
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxChatBody)).Decode(&rr); err != nil {
+	if err := json.Unmarshal(raw, &rr); err != nil {
 		openAIError(w, 400, err.Error(), "invalid_request_error")
 		return
 	}
@@ -77,6 +86,9 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	req := responsesToOpenAI(rr)
 	req.Endpoint = "openai"
+	req.ClientPath = r.URL.Path
+	req.ClientBody = string(raw)
+	req.ClientHeaders = inboundHeadersJSON(r.Header)
 	if len(req.Messages) == 0 {
 		openAIError(w, 400, "input is required", "invalid_request_error")
 		return
@@ -94,7 +106,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	res, _, err := s.Router.Chat(r.Context(), &req)
 	if err != nil {
-		openAIError(w, 503, err.Error(), "service_unavailable")
+		openAIError(w, upstreamErrorStatus(err), err.Error(), "service_unavailable")
 		return
 	}
 	jsonWrite(w, 200, responsesObject(res, req.Model, "completed", execMode))
@@ -127,6 +139,11 @@ func responsesToOpenAI(rr ResponsesReq) provider.ChatRequest {
 		Tools:             mapsToInterfaces(rr.Tools),
 		ToolChoice:        rr.ToolChoice,
 		ParallelToolCalls: rr.ParallelToolCalls,
+		OutputConfig:      rr.OutputConfig,
+	}
+	// output_config 缺省时回退到标准的 reasoning.effort。
+	if req.OutputConfig == nil && rr.Reasoning != nil {
+		req.OutputConfig = rr.Reasoning
 	}
 	return req
 }

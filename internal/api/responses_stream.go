@@ -178,7 +178,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *pr
 	if err != nil {
 		// 产出任何输出前就失败：还没开流，回退为干净的 HTTP 错误，调用方可明确停止任务。
 		if !started {
-			openAIError(w, 503, err.Error(), "service_unavailable")
+			openAIError(w, upstreamErrorStatus(err), err.Error(), "service_unavailable")
 			return
 		}
 		// 已开流后失败：发 response.failed 作为终止事件，让流干净收尾。

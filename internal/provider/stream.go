@@ -14,6 +14,27 @@ import (
 	"ps2api/internal/store"
 )
 
+// headersToJSON 把 HTTP 请求头序列化为 JSON 原文，供请求日志排查出站头。
+// 单值头拍平为字符串，多值头保留数组；键按字典序稳定输出，便于对比。
+func headersToJSON(h http.Header) string {
+	if len(h) == 0 {
+		return ""
+	}
+	flat := make(map[string]interface{}, len(h))
+	for k, v := range h {
+		if len(v) == 1 {
+			flat[k] = v[0]
+		} else {
+			flat[k] = v
+		}
+	}
+	b, err := json.Marshal(flat)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
 // collectToolCalls 按 index 升序聚合工具调用，避免上游索引跳号导致调用丢失。
 func collectToolCalls(toolAcc map[int]*ToolCall) []ToolCall {
 	idx := make([]int, 0, len(toolAcc))
@@ -68,6 +89,8 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 		return err
 	}
 	res.RequestBytes = len(bodyBytes) // 记录出站体积，供 403 与请求体大小相关性分析
+	res.UpstreamBody = string(bodyBytes)
+	res.UpstreamURL = p.chatURL(tokens)
 	// 出站 body 体检：超大 payload 是触发 Cloudflare WAF 403 的常见诱因，
 	// 提前告警以便定位（如历史工具原文、超大 schema 未压缩等）。仅告警不阻断。
 	if len(bodyBytes) > MaxRequestBodyWarnBytes {
@@ -101,7 +124,9 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 	if !viaProxy {
 		client, egress = p.Client, "direct"
 	}
+	res.Egress = egress
 	p.applyCookies(acc.ID, httpReq, egress)
+	res.UpstreamHeaders = headersToJSON(httpReq.Header)
 	Trace(ctx, "upstream.request", map[string]interface{}{
 		"method": httpReq.Method, "url": httpReq.URL.String(), "headers": httpReq.Header,
 		"body": json.RawMessage(bodyBytes), "account_id": acc.ID, "egress": egress,
@@ -119,6 +144,8 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 			httpReq = r
 			client, egress, viaProxy = p.Client, "direct", false
 			p.applyCookies(acc.ID, httpReq, egress)
+			res.Egress = egress
+			res.UpstreamHeaders = headersToJSON(httpReq.Header)
 			resp, err = client.Do(httpReq)
 		}
 	}

@@ -15,7 +15,8 @@
     analytics: {}, settings: {}, settingsDefs: [], apiKey: '',
     alerts: [], alertSummary: {}, cacheProbe: {},
     days: 14, page: 'overview', poolQuery: '', poolStatus: 'ALL', alertTab: 'open',
-    poolPage: 1, quotaPage: 1
+    poolPage: 1, quotaPage: 1,
+    reqlogs: [], reqlogsPage: 1, reqlogsTotal: 0, reqlogsCollapsed: {}
   };
   var PAGE_SIZE = 20;
   // 通用分页：切片当前页并生成页码控件 HTML（gotoFn 为全局翻页函数名）
@@ -52,7 +53,7 @@
   }
 
   function bootstrapDashboard() {
-    var names = ['fragments/topnav.html', 'fragments/sidebar.html', 'fragments/page-overview.html', 'fragments/page-stats.html', 'fragments/page-pools.html', 'fragments/page-quota.html', 'fragments/page-routing.html', 'fragments/page-alerts.html', 'fragments/page-settings.html', 'fragments/page-proxies.html', 'fragments/page-vision.html', 'fragments/drawer.html'];
+    var names = ['fragments/topnav.html', 'fragments/sidebar.html', 'fragments/page-overview.html', 'fragments/page-stats.html', 'fragments/page-reqlogs.html', 'fragments/page-pools.html', 'fragments/page-quota.html', 'fragments/page-routing.html', 'fragments/page-alerts.html', 'fragments/page-settings.html', 'fragments/page-proxies.html', 'fragments/page-vision.html', 'fragments/drawer.html'];
     return Promise.all(names.map(loadFragment)).then(function (parts) {
       var app = document.getElementById('dashboard-app');
       if (!app) return;
@@ -146,8 +147,9 @@
     state.page = page;
     document.querySelectorAll('.page').forEach(function (el) { el.classList.toggle('active', el.id === 'page-' + page); });
     document.querySelectorAll('.sidebar-item[data-page]').forEach(function (el) { el.classList.toggle('active', el.dataset.page === page); });
-    var names = { overview:'概览', stats:'统计分析', pools:'号池 & 额度', routing:'路由策略', proxies:'代理出口', vision:'图片识别', alerts:'告警中心', settings:'系统设置' };
+    var names = { overview:'概览', stats:'统计分析', reqlogs:'请求日志', pools:'号池 & 额度', routing:'路由策略', proxies:'代理出口', vision:'图片识别', alerts:'告警中心', settings:'系统设置' };
     setText('#crumb', names[page] || page);
+    if (page === 'reqlogs') renderReqLogsReal();
     if (page === 'pools') { renderPoolsReal(); renderQuotaReal(); }
     if (page === 'alerts') renderAlertsReal();
     if (page === 'routing') renderRoutingReal();
@@ -207,6 +209,7 @@
     var pages = {
       overview: ['stats', 'accounts', 'logs', 'analytics', 'alerts'],
       stats: ['stats', 'analytics', 'cacheProbe'],
+      reqlogs: [],
       pools: ['accounts', 'analytics'],
       quota: ['accounts', 'analytics', 'settings', 'alerts'],
       routing: ['settings'],
@@ -285,6 +288,140 @@
     if (pager) pager.innerHTML = pagerHTML(pg, 'poolGoto');
   }
   window.poolGoto = function (n) { state.poolPage = n; renderPoolsReal(); };
+
+  // ─── 请求日志（服务端分页：入站请求 + 转发给上游的请求全量记录）──────────
+  var REQLOG_PAGE_SIZE = 20;
+  function prettyJSON(text) {
+    if (text == null || text === '') return '';
+    try { return JSON.stringify(JSON.parse(text), null, 2); } catch (_) { return String(text); }
+  }
+  function endpointLabel(l) {
+    var p = l.path || (l.endpoint === 'anthropic' ? '/v1/messages' : '/v1/chat/completions');
+    return p + (l.stream ? ' · stream' : '');
+  }
+  // reqlogSessionKey 计算「指纹会话」分组键：有会话 ID 的按会话聚合，无会话 ID 的各自独立成组
+  //（与后端 sessionKeyExpr 保持一致），避免多条无会话日志被错误合并。
+  function reqlogSessionKey(l) { return (l.conversationId && l.conversationId !== '') ? ('conv:' + l.conversationId) : ('log:' + l.id); }
+  function renderReqLogsReal() {
+    var body = document.getElementById('reqlogsBody'); if (!body) return;
+    body.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:40px;color:var(--muted)">加载中…</td></tr>';
+    api('/api/request-logs?page=' + state.reqlogsPage + '&pageSize=' + REQLOG_PAGE_SIZE).then(function (data) {
+      state.reqlogs = data.data || [];
+      state.reqlogsTotal = Number(data.total || 0);
+      paintReqLogs();
+    }).catch(function (err) {
+      body.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:40px;color:var(--danger)">加载失败：' + esc(err.message) + '</td></tr>';
+    });
+  }
+  // paintReqLogs 仅用 state.reqlogs 渲染表格（不发请求），供翻页拉取后及展开/收起时复用。
+  function paintReqLogs() {
+    var body = document.getElementById('reqlogsBody'); if (!body) return;
+    var pages = Math.max(1, Math.ceil(state.reqlogsTotal / REQLOG_PAGE_SIZE));
+    if (state.reqlogsPage > pages) { state.reqlogsPage = pages; }
+    // 后端已按会话分组、并让同一会话内的记录按调用先后（id 升序）连续排列；
+    // 这里顺序切分成组：每组渲染一行会话表头 + 该会话的多次调用（多轮时标注调用步序 #1/#2…）。
+    var groups = [];
+    state.reqlogs.forEach(function (l) {
+      var key = reqlogSessionKey(l);
+      var g = groups.length ? groups[groups.length - 1] : null;
+      if (!g || g.key !== key) { g = { key: key, conv: l.conversationId || '', items: [] }; groups.push(g); }
+      g.items.push(l);
+    });
+    body.innerHTML = groups.length ? groups.map(function (g) {
+        var errs = g.items.filter(function (x) { return x.status !== 'success'; }).length;
+        var acc = '';
+        for (var i = 0; i < g.items.length && !acc; i++) { acc = g.items[i].accountEmail || (g.items[i].accountId ? 'ID ' + g.items[i].accountId : ''); }
+        var convLabel = g.conv ? ('会话 ' + esc(g.conv)) : '无会话（独立请求）';
+        var statusTag = errs ? '<span class="tag tag-red">' + errs + ' 失败</span>' : '<span class="tag tag-green">全部成功</span>';
+        var collapsed = !!state.reqlogsCollapsed[g.key];
+        var keyAttr = esc(g.key);
+        var caret = '<span class="reqlog-caret" style="display:inline-block;width:14px;transition:transform .15s;transform:rotate(' + (collapsed ? '-90deg' : '0deg') + ')">▾</span>';
+        var header = '<tr class="reqlog-group-row" style="cursor:pointer" onclick="reqlogsToggle(\'' + keyAttr + '\')"><td colspan="10" style="background:var(--bg-2);border-top:2px solid var(--border);padding:10px 16px">' +
+          '<div class="flex items-center gap-3 flex-wrap text-[12px]">' +
+          caret +
+          '<span class="font-mono font-semibold" style="word-break:break-all" title="' + esc(g.conv) + '">' + convLabel + '</span>' +
+          '<span style="color:var(--muted)">·</span>' +
+          '<span style="color:var(--fg-2)">' + esc(acc || '-') + '</span>' +
+          '<span style="color:var(--muted)">·</span>' +
+          '<span style="color:var(--fg-2)">' + g.items.length + ' 次调用</span>' +
+          statusTag +
+          '</div></td></tr>';
+        var rows = g.items.map(function (l, idx) {
+          var s = l.status === 'success' ? { tag: 'tag-green', label: '成功' } : { tag: 'tag-red', label: '失败' };
+          var seq = g.items.length > 1 ? ('<span class="tag tag-blue" style="margin-right:6px">#' + (idx + 1) + '</span>') : '';
+          var hidden = collapsed ? ' style="display:none"' : '';
+          return '<tr class="reqlog-item-row"' + hidden + '>' +
+            '<td class="font-mono" style="padding-left:34px;border-left:2px solid var(--border)">' + seq + '<span style="color:var(--muted)">' + l.id + '</span></td>' +
+            '<td class="text-[12px]" style="color:var(--fg-2)">' + fmtDate(l.createdAt) + '</td>' +
+            '<td class="font-mono text-[12px]">' + esc(endpointLabel(l)) + '</td>' +
+            '<td class="font-mono text-[12px]">' + esc(l.model || '-') + '</td>' +
+            '<td class="font-mono text-[12px]">' + esc(l.accountEmail || (l.accountId ? 'ID ' + l.accountId : '-')) + '</td>' +
+            '<td class="font-mono text-[12px]">' + esc(l.egress || '-') + '</td>' +
+            '<td><span class="tag ' + s.tag + '">' + s.label + '</span></td>' +
+            '<td class="font-mono text-[12px]">' + fmt(l.requestBytes || 0) + ' B</td>' +
+            '<td class="font-mono text-[12px]">' + fmtMs(l.durationMs) + '</td>' +
+            '<td><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px" onclick="event.stopPropagation();showReqLog(' + l.id + ')">查看</button></td>' +
+            '</tr>';
+        }).join('');
+        return header + rows;
+      }).join('') : '<tr><td colspan="10" style="text-align:center;padding:40px;color:var(--muted)">暂无请求日志。向 /v1/chat/completions、/v1/responses 或 /v1/messages 发起请求后这里会出现记录。</td></tr>';
+      var cnt = document.getElementById('reqlogCount');
+      if (cnt) cnt.textContent = '共 ' + fmt(state.reqlogsTotal) + ' 组会话 · 第 ' + state.reqlogsPage + '/' + pages + ' 页';
+      var pager = document.getElementById('reqlogsPager');
+      if (pager) pager.innerHTML = pagerHTML({ page: state.reqlogsPage, pages: pages, total: state.reqlogsTotal }, 'reqlogsGoto');
+  }
+  window.reqlogsGoto = function (n) { state.reqlogsPage = n; renderReqLogsReal(); };
+  // reqlogsToggle 展开/收起某个会话分组：只切换该组的显示状态并就地重绘，不重新拉取数据。
+  window.reqlogsToggle = function (key) {
+    if (state.reqlogsCollapsed[key]) { delete state.reqlogsCollapsed[key]; } else { state.reqlogsCollapsed[key] = true; }
+    paintReqLogs();
+  };
+  window.showReqLog = function (id) {
+    var l = (state.reqlogs || []).filter(function (x) { return x.id === id; })[0];
+    if (!l) return;
+    var meta = [
+      ['ID', l.id], ['时间', fmtDate(l.createdAt)], ['入站端点', endpointLabel(l)],
+      ['模型', l.model || '-'], ['账号', l.accountEmail || (l.accountId ? 'ID ' + l.accountId : '-')],
+      ['出口', l.egress || '-'], ['上游 URL', l.upstreamUrl || '-'], ['会话 ID', l.conversationId || '-'],
+      ['状态', l.status === 'success' ? '成功' : '失败'], ['出站体积', fmt(l.requestBytes || 0) + ' B'],
+      ['耗时', fmtMs(l.durationMs)], ['Tokens', (l.promptTokens || 0) + ' + ' + (l.completionTokens || 0) + ' = ' + (l.totalTokens || 0)]
+    ];
+    var metaHTML = '<div class="grid grid-cols-2 gap-x-6 gap-y-2 text-[12px]">' + meta.map(function (m) {
+      return '<div class="flex justify-between gap-3"><span style="color:var(--muted)">' + esc(m[0]) + '</span><span class="font-mono" style="text-align:right;word-break:break-all">' + esc(m[1]) + '</span></div>';
+    }).join('') + '</div>';
+    var errHTML = l.errorMessage ? '<div><div class="text-[12px] font-semibold mb-1.5" style="color:var(--danger)">错误信息</div><pre class="reqlog-pre" style="border-color:var(--danger)">' + esc(l.errorMessage) + '</pre></div>' : '';
+    var section = function (title, content) {
+      var btn = '<button class="btn btn-ghost reqlog-copy" style="height:24px;padding:2px 8px;font-size:11px" onclick="copyReqLog(this)">复制</button>';
+      return '<div><div class="flex items-center justify-between mb-1.5"><div class="text-[12px] font-semibold">' + title + '</div>' + btn + '</div><pre class="reqlog-pre">' + esc(content || '（空）') + '</pre></div>';
+    };
+    var mbody = document.getElementById('reqlogModalBody');
+    if (mbody) mbody.innerHTML = metaHTML + errHTML +
+      section('入站请求头（客户端发来）', prettyJSON(l.clientHeaders)) +
+      section('入站请求体（客户端发来）', prettyJSON(l.clientBody)) +
+      section('出站请求头（发送给上游 Postman）', prettyJSON(l.upstreamHeaders)) +
+      section('出站请求体（转发给上游 Postman）', prettyJSON(l.upstreamBody));
+    setText('#reqlogModalTitle', endpointLabel(l));
+    var m = document.getElementById('reqlogModal'), b = document.getElementById('reqlogModalBackdrop');
+    if (m) m.classList.add('show'); if (b) b.classList.add('show');
+  };
+  window.closeReqLogModal = function () {
+    var m = document.getElementById('reqlogModal'), b = document.getElementById('reqlogModalBackdrop');
+    if (m) m.classList.remove('show'); if (b) b.classList.remove('show');
+  };
+  window.copyReqLog = function (btn) {
+    var wrap = btn.closest('div'); var pre = wrap && wrap.parentNode ? wrap.parentNode.querySelector('pre.reqlog-pre') : null;
+    var text = pre ? pre.textContent : '';
+    var done = function () { var o = btn.textContent; btn.textContent = '已复制'; setTimeout(function () { btn.textContent = o; }, 1500); };
+    var fallback = function () {
+      var ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); done(); } catch (e) { toast('复制失败'); }
+      document.body.removeChild(ta);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(fallback);
+    } else { fallback(); }
+  };
 
   // ─── 额度管理（真实账号额度 + 配置规则读写）─────────────────
   function quotaObserved(account) {
@@ -948,6 +1085,10 @@
             '<button class="btn btn-ghost" id="acctTestGateway" onclick="runAccountTest(' + id + ',&#39;gateway&#39;)">代理测试</button>' +
             '<button class="btn btn-ghost" id="acctTestService" onclick="runAccountTest(' + id + ',&#39;service&#39;)">网关测试</button>' +
           '</div>' +
+          '<div class="mt-3">' +
+            '<label class="text-[12px] font-semibold block mb-1.5">自定义请求体 JSON<span class="text-[11px]" style="color:var(--muted)">（仅网关测试生效；留空则用上面的模型 + 用户输入自动生成）</span></label>' +
+            '<textarea id="acctTestBody" class="input" rows="6" spellcheck="false" style="font-family:ui-monospace,monospace;font-size:11.5px;line-height:1.5" placeholder="留空则自动生成；或粘贴完整请求体 JSON，例如 {&quot;model&quot;:&quot;claude-opus-4-8&quot;,&quot;stream&quot;:true,&quot;max_tokens&quot;:1024,&quot;messages&quot;:[{&quot;role&quot;:&quot;user&quot;,&quot;content&quot;:&quot;你好&quot;}]}"></textarea>' +
+          '</div>' +
           '<div id="acctTestStatus" class="text-[12px] mt-2" style="color:var(--muted)">选择一种模式发起测试</div>' +
         '</div>' +
         '<div class="flex-1 overflow-y-auto p-5" id="acctTestResult"><div class="text-[13px]" style="color:var(--muted)">直连测试：绕过出口代理，直接请求上游 Postman（针对本账号）。<br>代理测试：走网关真实出站路径（按账号粘性选代理出口；未配置代理即本机直连）。<br>网关测试：回环调用本服务对外端点（claude→/v1/messages，其它→/v1/responses），带面板 API Key 走完整网关链路，端到端验证整条服务。<br>测试会真实消耗极少量额度；完整请求/响应现场会写入服务端测试日志文件，便于排查。</div></div>' +
@@ -973,6 +1114,9 @@
     var prompt = promptEl ? promptEl.value : '';
     var modelEl = document.getElementById('acctTestModel');
     var model = modelEl ? modelEl.value : '';
+    // 自定义请求体仅对网关测试（service）生效；非空时后端会用它覆盖 model+prompt 自动生成的请求体。
+    var bodyEl = document.getElementById('acctTestBody');
+    var rawBody = (mode === 'service' && bodyEl) ? bodyEl.value.trim() : '';
     if (status) status.textContent = label + '测试中…（SSE 实时输出，最长约 60s）';
     // 初始化结果区骨架：meta（请求现场）待填 + 响应体实时区（逐行追加）+ done（响应头/概览）待填。
     if (out) out.innerHTML =
@@ -985,7 +1129,7 @@
     fetch('/api/accounts/' + id + '/test', {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + key(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: mode, model: model, prompt: prompt })
+      body: JSON.stringify({ mode: mode, model: model, prompt: prompt, body: rawBody })
     }).then(function (resp) {
       if (!resp.ok || !resp.body) {
         return resp.text().then(function (t) { throw new Error('HTTP ' + resp.status + ' ' + t); });
@@ -1105,7 +1249,7 @@
     }
   });
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') { closeDrawer(); closeProxyDrawer(); }
+    if (e.key === 'Escape') { closeDrawer(); closeProxyDrawer(); closeReqLogModal(); }
   });
 
   function startDashboard() {

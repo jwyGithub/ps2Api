@@ -7,10 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
-	"time"
 
 	"ps2api/internal/provider"
 )
@@ -24,6 +21,10 @@ type AnthropicReq struct {
 	Temperature float64                  `json:"temperature"`
 	Tools       []map[string]interface{} `json:"tools"`
 	ToolChoice  interface{}              `json:"tool_choice"`
+	// OutputConfig 承载 output_config.effort（思考强度 high/medium/low），透传给 devModeOptions.thinkingLevel。
+	OutputConfig map[string]interface{} `json:"output_config"`
+	// Thinking 是 Anthropic 标准的扩展思考字段（thinking.budget_tokens），output_config 缺省时按预算档位回退。
+	Thinking map[string]interface{} `json:"thinking"`
 }
 type AnthropicMsg struct {
 	Role    string          `json:"role"`
@@ -34,24 +35,13 @@ func (s *Server) anthropic(w http.ResponseWriter, r *http.Request) {
 	if !s.auth(w, r) {
 		return
 	}
-	var ar AnthropicReq
-	// —— 临时：抓取 @ 文件引用的真实 wire 结构 ——
-	// 设 PS2API_DUMP_BODY=<目录> 时，把原始请求体原样落盘一份，再从字节解码。
-	// 排查完删除本段即可（decode 逻辑等价于原来的流式 Decode）。
-	body, err := io.ReadAll(io.LimitReader(r.Body, 16<<20))
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 16<<20))
 	if err != nil {
 		anthropicError(w, 400, err.Error(), "invalid_request_error")
 		return
 	}
-	if dir := os.Getenv("PS2API_DUMP_BODY"); dir != "" {
-		fname := filepath.Join(dir, fmt.Sprintf("anthropic-body-%s.json", time.Now().Format("20060102-150405.000")))
-		if werr := os.WriteFile(fname, body, 0o644); werr != nil {
-			provider.Trace(r.Context(), "client.body_dump_failed", map[string]interface{}{"error": werr.Error()})
-		} else {
-			provider.Trace(r.Context(), "client.body_dumped", map[string]interface{}{"file": fname, "bytes": len(body)})
-		}
-	}
-	if err := json.Unmarshal(body, &ar); err != nil {
+	var ar AnthropicReq
+	if err := json.Unmarshal(raw, &ar); err != nil {
 		anthropicError(w, 400, err.Error(), "invalid_request_error")
 		return
 	}
@@ -61,6 +51,9 @@ func (s *Server) anthropic(w http.ResponseWriter, r *http.Request) {
 	}
 	req := anthropicToOpenAI(ar)
 	req.Endpoint = "anthropic"
+	req.ClientPath = r.URL.Path
+	req.ClientBody = string(raw)
+	req.ClientHeaders = inboundHeadersJSON(r.Header)
 	if err := s.resolveVisionMessages(r.Context(), req.Messages); err != nil {
 		provider.Trace(r.Context(), "client.vision_failed", map[string]interface{}{"error": err.Error()})
 		anthropicError(w, 400, "图片识别失败: "+err.Error(), "invalid_request_error")
@@ -94,6 +87,29 @@ func (s *Server) anthropic(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonWrite(w, 200, openAIToAnthropic(res, ar.Model))
 }
+// thinkingBudgetToEffort 把 Anthropic 的 thinking.budget_tokens 映射成思考档位（high/medium/low）。
+// 仅当 thinking.type == "enabled" 且 budget_tokens 有效时返回；否则返回空串（不设置思考强度）。
+func thinkingBudgetToEffort(thinking map[string]interface{}) string {
+	if thinking == nil {
+		return ""
+	}
+	if t, ok := thinking["type"].(string); ok && t != "enabled" {
+		return ""
+	}
+	budget, ok := thinking["budget_tokens"].(float64)
+	if !ok || budget <= 0 {
+		return ""
+	}
+	switch {
+	case budget <= 4096:
+		return "low"
+	case budget <= 16384:
+		return "medium"
+	default:
+		return "high"
+	}
+}
+
 func anthropicToOpenAI(a AnthropicReq) provider.ChatRequest {
 	msgs := []provider.ChatMessage{}
 	if a.System != nil {
@@ -103,7 +119,13 @@ func anthropicToOpenAI(a AnthropicReq) provider.ChatRequest {
 	for _, m := range a.Messages {
 		msgs = append(msgs, anthropicMessageToOpenAI(m))
 	}
-	req := provider.ChatRequest{Model: normalizeModel(a.Model), Messages: msgs, Tools: mapsToInterfaces(a.Tools), ToolChoice: a.ToolChoice}
+	req := provider.ChatRequest{Model: normalizeModel(a.Model), Messages: msgs, Tools: mapsToInterfaces(a.Tools), ToolChoice: a.ToolChoice, OutputConfig: a.OutputConfig}
+	// output_config 缺省时，把 Anthropic 标准的 thinking.budget_tokens 映射成思考档位。
+	if req.OutputConfig == nil {
+		if effort := thinkingBudgetToEffort(a.Thinking); effort != "" {
+			req.OutputConfig = map[string]interface{}{"effort": effort}
+		}
+	}
 	if choice, ok := a.ToolChoice.(map[string]interface{}); ok {
 		if disabled, ok := choice["disable_parallel_tool_use"].(bool); ok {
 			parallel := !disabled

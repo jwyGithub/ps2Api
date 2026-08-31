@@ -15,11 +15,19 @@ func (s *Server) openAI(w http.ResponseWriter, r *http.Request) {
 	if !s.auth(w, r) {
 		return
 	}
-	var req provider.ChatRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<20)).Decode(&req); err != nil {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 16<<20))
+	if err != nil {
 		openAIError(w, 400, err.Error(), "invalid_request_error")
 		return
 	}
+	var req provider.ChatRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		openAIError(w, 400, err.Error(), "invalid_request_error")
+		return
+	}
+	req.ClientPath = r.URL.Path
+	req.ClientBody = string(raw)
+	req.ClientHeaders = inboundHeadersJSON(r.Header)
 	if req.Model == "" || len(req.Messages) == 0 {
 		openAIError(w, 400, "model and messages are required", "invalid_request_error")
 		return
@@ -46,7 +54,7 @@ func (s *Server) openAI(w http.ResponseWriter, r *http.Request) {
 	}
 	res, _, err := s.Router.Chat(r.Context(), &req)
 	if err != nil {
-		openAIError(w, 503, err.Error(), "service_unavailable")
+		openAIError(w, upstreamErrorStatus(err), err.Error(), "service_unavailable")
 		return
 	}
 	jsonWrite(w, 200, openAIResponse(res, req.Model))
@@ -81,7 +89,7 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, req *provi
 	}
 	_, _, err := s.Router.Stream(r.Context(), req, emit)
 	if err != nil && !started {
-		openAIError(w, 503, err.Error(), "service_unavailable")
+		openAIError(w, upstreamErrorStatus(err), err.Error(), "service_unavailable")
 		return
 	}
 	if err != nil {

@@ -76,18 +76,29 @@ type Alert struct {
 }
 
 type RequestLog struct {
-	ID               int64     `json:"id"`
-	AccountID        *int64    `json:"accountId"`
-	Model            string    `json:"model"`
-	Endpoint         string    `json:"endpoint"` // anthropic | openai：调用来源兼容端点
-	PromptTokens     int       `json:"promptTokens"`
-	CompletionTokens int       `json:"completionTokens"`
-	TotalTokens      int       `json:"totalTokens"`
-	Status           string    `json:"status"` // success | error
-	DurationMs       int64     `json:"durationMs"`
-	ErrorMessage     string    `json:"errorMessage"`
-	RequestBytes     int       `json:"requestBytes"` // 出站请求体字节数，用于 403 与体积相关性分析
-	CreatedAt        time.Time `json:"createdAt"`
+	ID               int64  `json:"id"`
+	AccountID        *int64 `json:"accountId"`
+	Model            string `json:"model"`
+	Endpoint         string `json:"endpoint"` // anthropic | openai：调用来源兼容端点
+	PromptTokens     int    `json:"promptTokens"`
+	CompletionTokens int    `json:"completionTokens"`
+	TotalTokens      int    `json:"totalTokens"`
+	Status           string `json:"status"` // success | error
+	DurationMs       int64  `json:"durationMs"`
+	ErrorMessage     string `json:"errorMessage"`
+	RequestBytes     int    `json:"requestBytes"` // 出站请求体字节数，用于 403 与体积相关性分析
+	// 以下字段用于「请求日志」排查：完整记录网关收到的入站请求与转发给上游的出站请求。
+	Path            string    `json:"path"`            // 入站命中的兼容端点路径：/v1/chat/completions | /v1/responses | /v1/messages
+	Stream          bool      `json:"stream"`          // 是否流式请求
+	ClientBody      string    `json:"clientBody"`      // 客户端发来的原始请求体（JSON 原文）
+	ClientHeaders   string    `json:"clientHeaders"`   // 客户端发来的入站请求头（JSON 原文）
+	UpstreamBody    string    `json:"upstreamBody"`    // 转发给上游 Postman 的请求体（JSON 原文）
+	UpstreamHeaders string    `json:"upstreamHeaders"` // 发送给上游 Postman 的请求头（JSON 原文）
+	UpstreamURL     string    `json:"upstreamUrl"`     // 上游请求 URL
+	Egress          string    `json:"egress"`          // 出口（代理标识或 direct）
+	ConversationID  string    `json:"conversationId"`  // 命中/新建的 Postman 会话 ID
+	AccountEmail    string    `json:"accountEmail"`    // 出站所用账号邮箱（连表得到，便于排查）
+	CreatedAt       time.Time `json:"createdAt"`
 }
 
 type Store struct {
@@ -207,7 +218,27 @@ CREATE TABLE IF NOT EXISTS cache_probe (
 		return err
 	}
 	// 兼容旧库：补齐 request_logs.request_bytes（出站请求体大小，供 403 体积相关性分析）
-	return s.ensureColumn("request_logs", "request_bytes", "INTEGER NOT NULL DEFAULT 0")
+	if err := s.ensureColumn("request_logs", "request_bytes", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	// 兼容旧库：补齐「请求日志」排查字段（入站/出站完整请求体与元数据）。
+	reqLogColumns := []struct{ name, decl string }{
+		{"path", "TEXT NOT NULL DEFAULT ''"},
+		{"stream", "INTEGER NOT NULL DEFAULT 0"},
+		{"client_body", "TEXT NOT NULL DEFAULT ''"},
+		{"client_headers", "TEXT NOT NULL DEFAULT ''"},
+		{"upstream_body", "TEXT NOT NULL DEFAULT ''"},
+		{"upstream_headers", "TEXT NOT NULL DEFAULT ''"},
+		{"upstream_url", "TEXT NOT NULL DEFAULT ''"},
+		{"egress", "TEXT NOT NULL DEFAULT ''"},
+		{"conversation_id", "TEXT NOT NULL DEFAULT ''"},
+	}
+	for _, column := range reqLogColumns {
+		if err := s.ensureColumn("request_logs", column.name, column.decl); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ensureColumn 检查表是否已有指定列，没有则 ALTER TABLE 补齐（SQLite 无 IF NOT EXISTS）。
@@ -416,10 +447,123 @@ func (s *Store) UpdateTokens(id int64, tokens string) error {
 }
 
 func (s *Store) LogRequest(l *RequestLog) error {
-	_, err := s.db.Exec(`INSERT INTO request_logs (account_id,model,endpoint,prompt_tokens,completion_tokens,total_tokens,status,duration_ms,error_message,request_bytes,created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		l.AccountID, l.Model, l.Endpoint, l.PromptTokens, l.CompletionTokens, l.TotalTokens, l.Status, l.DurationMs, l.ErrorMessage, l.RequestBytes, time.Now())
+	stream := 0
+	if l.Stream {
+		stream = 1
+	}
+	_, err := s.db.Exec(`INSERT INTO request_logs (account_id,model,endpoint,prompt_tokens,completion_tokens,total_tokens,status,duration_ms,error_message,request_bytes,path,stream,client_body,client_headers,upstream_body,upstream_headers,upstream_url,egress,conversation_id,created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		l.AccountID, l.Model, l.Endpoint, l.PromptTokens, l.CompletionTokens, l.TotalTokens, l.Status, l.DurationMs, l.ErrorMessage, l.RequestBytes,
+		l.Path, stream, l.ClientBody, l.ClientHeaders, l.UpstreamBody, l.UpstreamHeaders, l.UpstreamURL, l.Egress, l.ConversationID, time.Now())
 	return err
+}
+
+// CountRequestLogs 返回 request_logs 总行数，供请求日志页分页计算总页数。
+func (s *Store) CountRequestLogs() (int64, error) {
+	var n int64
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM request_logs`).Scan(&n)
+	return n, err
+}
+
+// requestLogColumns 是「完整请求日志」连表 accounts 的固定列集，PageRequestLogs 与
+// PageRequestLogsGrouped 共用同一列顺序，扫描逻辑收敛到 scanRequestLogs。
+const requestLogColumns = `rl.id,rl.account_id,rl.model,rl.endpoint,rl.prompt_tokens,rl.completion_tokens,rl.total_tokens,
+	rl.status,rl.duration_ms,rl.error_message,rl.request_bytes,rl.path,rl.stream,rl.client_body,rl.client_headers,rl.upstream_body,rl.upstream_headers,
+	rl.upstream_url,rl.egress,rl.conversation_id,rl.created_at,COALESCE(a.email,'')`
+
+// scanRequestLogs 把 requestLogColumns 列集的结果集扫描为 []*RequestLog，供多个分页查询复用。
+func scanRequestLogs(rows *sql.Rows) ([]*RequestLog, error) {
+	var out []*RequestLog
+	for rows.Next() {
+		l := &RequestLog{}
+		var accID sql.NullInt64
+		var stream int
+		var model, endpoint, errmsg, path, clientBody, clientHeaders, upstreamBody, upstreamHeaders, upstreamURL, egress, convID, email sql.NullString
+		if err := rows.Scan(&l.ID, &accID, &model, &endpoint, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens,
+			&l.Status, &l.DurationMs, &errmsg, &l.RequestBytes, &path, &stream, &clientBody, &clientHeaders, &upstreamBody, &upstreamHeaders,
+			&upstreamURL, &egress, &convID, &l.CreatedAt, &email); err != nil {
+			return nil, err
+		}
+		if accID.Valid {
+			l.AccountID = &accID.Int64
+		}
+		l.Model = model.String
+		l.Endpoint = endpoint.String
+		l.ErrorMessage = errmsg.String
+		l.Path = path.String
+		l.Stream = stream != 0
+		l.ClientBody = clientBody.String
+		l.ClientHeaders = clientHeaders.String
+		l.UpstreamBody = upstreamBody.String
+		l.UpstreamHeaders = upstreamHeaders.String
+		l.UpstreamURL = upstreamURL.String
+		l.Egress = egress.String
+		l.ConversationID = convID.String
+		l.AccountEmail = email.String
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+// PageRequestLogs 按 id 倒序分页返回完整请求日志（含入站/出站请求体与元数据），
+// 连表带出账号邮箱便于排查。offset/limit 由调用方按页码换算。
+func (s *Store) PageRequestLogs(offset, limit int) ([]*RequestLog, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.Query(`SELECT `+requestLogColumns+`
+		FROM request_logs rl LEFT JOIN accounts a ON a.id = rl.account_id
+		ORDER BY rl.id DESC LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRequestLogs(rows)
+}
+
+// sessionKeyExpr 计算「指纹会话」分组键：命中/新建的 Postman 会话 ID（由消息指纹映射而来）；
+// 会话 ID 为空的日志（如尚未建会话即失败、非会话请求）各自成为独立会话，避免被错误合并。
+const sessionKeyExpr = `COALESCE(NULLIF(%s.conversation_id,''),'log:'||%s.id)`
+
+// CountRequestLogSessions 返回「指纹会话」组数（去重后的会话键数量），供按会话分页计算总页数。
+func (s *Store) CountRequestLogSessions() (int64, error) {
+	var n int64
+	q := `SELECT COUNT(*) FROM (SELECT 1 FROM request_logs rl GROUP BY ` + fmt.Sprintf(sessionKeyExpr, "rl", "rl") + `)`
+	err := s.db.QueryRow(q).Scan(&n)
+	return n, err
+}
+
+// PageRequestLogsGrouped 按「指纹会话」分页：先以会话最近一次调用（MAX(id)）倒序挑出本页的
+// 若干会话，再返回这些会话的全部日志，并让同一会话内的记录按 id 升序（即真实调用先后）连续排列。
+// 这样面板能把同一会话的多轮调用聚在一起，清晰呈现前后调用关系。offset/limit 以「会话」为单位。
+func (s *Store) PageRequestLogsGrouped(offset, limit int) ([]*RequestLog, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rlKey := fmt.Sprintf(sessionKeyExpr, "rl", "rl")
+	rows, err := s.db.Query(`WITH sess AS (
+			SELECT `+rlKey+` AS sk, MAX(rl.id) AS last_id
+			FROM request_logs rl
+			GROUP BY sk
+			ORDER BY last_id DESC
+			LIMIT ? OFFSET ?
+		)
+		SELECT `+requestLogColumns+`
+		FROM request_logs rl
+		LEFT JOIN accounts a ON a.id = rl.account_id
+		JOIN sess ON sess.sk = `+rlKey+`
+		ORDER BY sess.last_id DESC, rl.id ASC`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRequestLogs(rows)
 }
 
 // Cloudflare403BodySizeSummary 统计最近 window 内 Cloudflare 网关拒绝(403)错误日志，

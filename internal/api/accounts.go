@@ -215,6 +215,7 @@ func (s *Server) testAccount(w http.ResponseWriter, r *http.Request) {
 		Mode   string `json:"mode"`
 		Model  string `json:"model"`
 		Prompt string `json:"prompt"`
+		Body   string `json:"body"` // 网关测试可选：自定义请求体 JSON（非空时覆盖 model+prompt 自动生成）
 	}
 	_ = json.NewDecoder(r.Body).Decode(&q)
 	modeStr := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mode")))
@@ -258,7 +259,7 @@ func (s *Server) testAccount(w http.ResponseWriter, r *http.Request) {
 			scheme = "https"
 		}
 		baseURL := scheme + "://" + r.Host
-		result := s.Router.Provider.StreamServiceTest(ctx, baseURL, s.apiKey(), q.Model, q.Prompt, onMeta, onLine)
+		result := s.Router.Provider.StreamServiceTest(ctx, baseURL, s.apiKey(), q.Model, q.Prompt, q.Body, onMeta, onLine)
 		emit(map[string]interface{}{"type": "done", "result": result})
 		return
 	}

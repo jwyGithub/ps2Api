@@ -53,6 +53,35 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonWrite(w, 200, map[string]interface{}{"data": v})
 }
+// requestLogs 按「指纹会话」分页返回完整请求日志（入站请求体 + 转发给上游的请求体 + 元数据），
+// 供面板「请求日志」页排查网关的请求转换。同一会话的多轮调用会聚在一起并按调用先后排列，
+// 便于看清会话内的前后调用关系。page 从 1 起，pageSize 以「会话」为单位，默认 20、上限 100；
+// total 返回会话总组数。
+func (s *Server) requestLogs(w http.ResponseWriter, r *http.Request) {
+	if !s.auth(w, r) {
+		return
+	}
+	page := 1
+	if v, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && v > 0 {
+		page = v
+	}
+	pageSize := 20
+	if v, err := strconv.Atoi(r.URL.Query().Get("pageSize")); err == nil && v > 0 && v <= 100 {
+		pageSize = v
+	}
+	total, err := s.Store.CountRequestLogSessions()
+	if err != nil {
+		jsonError(w, 500, err.Error(), "internal_error")
+		return
+	}
+	logs, err := s.Store.PageRequestLogsGrouped((page-1)*pageSize, pageSize)
+	if err != nil {
+		jsonError(w, 500, err.Error(), "internal_error")
+		return
+	}
+	jsonWrite(w, 200, map[string]interface{}{"data": logs, "total": total, "page": page, "pageSize": pageSize, "grouped": true})
+}
+
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" && r.URL.Path != "/index.html" {
 		http.NotFound(w, r)
