@@ -156,11 +156,31 @@ func (r *Router) applyUsageState(acc *store.Account, res *provider.Result) {
 			_ = r.Store.SetAccountEnabled(acc.ID, false)
 		}
 	case "AVAILABLE":
-		if acc.Status != "active" {
+		// 状态同步：usageState 报 AVAILABLE 但真实余量已耗尽（remaining<=0）时，不能恢复成 active——
+		// 那样会让「余量为 0 但 status=active」的空号被会话粘性/号池当成健康号反复交付。把余量烧到 0
+		// 的那次响应，上游往往仍报 AVAILABLE（EXCEEDED 信号滞后），此处据真实余量把 status 翻成
+		// exhausted，让「额度耗尽」这一事实对粘性判据(usableForSticky)与号池(quotaExhausted)一致可见。
+		// 额度耗尽不停用（enabled 保持），待额度周期重置后经探测报 AVAILABLE 且余量恢复时再转回 active。
+		if resQuotaExhausted(res) {
+			if acc.Status != "exhausted" {
+				_ = r.Store.SetAccountStatus(acc.ID, "exhausted", "Postman AI quota exhausted (remaining=0)")
+			}
+		} else if acc.Status != "active" {
 			_ = r.Store.SetAccountStatus(acc.ID, "active", "")
 		}
 		if !acc.Enabled {
 			_ = r.Store.SetAccountEnabled(acc.ID, true)
 		}
 	}
+}
+
+// resQuotaExhausted 依据上游 usage 判断该响应是否表明账号 AI 额度已耗尽：额度上限已知(Limit>0)
+// 且算出的余量<=0，或上游已明确置 QuotaExhausted。与 persistQuota / probeAccountQuota 里
+// 「remaining<0 || QuotaExhausted 时归 0」的口径一致，也与 pool.quotaExhausted 的余量规则对齐。
+func resQuotaExhausted(res *provider.Result) bool {
+	if res == nil || res.Usage == nil || res.Usage.Limit <= 0 {
+		return false
+	}
+	remaining := res.Usage.Limit - res.Usage.Usage - res.Usage.Overage
+	return remaining <= 0 || res.QuotaExhausted
 }
