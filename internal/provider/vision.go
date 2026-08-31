@@ -36,10 +36,6 @@ import (
 //   - 识别结果按「图片指纹 + 模型」缓存（配置 Redis 则跨实例共享，否则进程内），同一张图在
 //     多轮对话里只识别一次。
 
-// defaultOCRAPIBase 是随 ps2api 镜像内置的 OCR 服务地址：容器内 uvicorn 监听 127.0.0.1:8000，
-// 接口为 /ocr。ocr_api_base 留空时默认用它——ocr / ocr_then_vision 模式开箱即用，无需再单独配置地址。
-const defaultOCRAPIBase = "http://127.0.0.1:8000/ocr"
-
 // imageBlockTypes 是三种入站协议里的图片内容块类型（与 unsupportedMediaKinds 中 image 类对齐）。
 var imageBlockTypes = map[string]bool{
 	"image":       true, // Anthropic /v1/messages
@@ -76,13 +72,6 @@ type visionConfig struct {
 	maxResultChars int
 	timeout        time.Duration
 	proxyURL       string // 出口代理，复用上游同一份 proxy_urls 设置；空表示直连
-
-	// 识别引擎选择：vision（仅视觉模型，默认）| ocr（仅外部 OCR 服务）| ocr_then_vision（OCR 优先，回退视觉）。
-	mode       string
-	ocrAPIBase string // 外部 OCR HTTP 服务完整接口 URL；空表示未配置
-	ocrAPIKey  string
-	ocrLang    string
-	ocrTimeout time.Duration
 }
 
 // getSetting 读单个设置项，缺失或出错时回退 def。
@@ -102,12 +91,7 @@ func (m *MediaResolver) Enabled() bool {
 	if m.getSetting("vision_enabled", "false") != "true" {
 		return false
 	}
-	// 纯 OCR 模式不需要视觉模型 Key，也不需要单独配置 OCR 地址：ps2api 镜像已内置 OCR 服务
-	// （ocr_api_base 留空即用 defaultOCRAPIBase）。其余模式（含 ocr_then_vision，视觉模型作兜底）
-	// 仍以已配置 vision_api_key 为启用前提。
-	if m.getSetting("vision_recognize_mode", "vision") == "ocr" {
-		return true
-	}
+	// 已配置视觉模型 Key 才视为启用。
 	return m.getSetting("vision_api_key", "") != ""
 }
 
@@ -119,21 +103,16 @@ func (m *MediaResolver) config() visionConfig {
 		return def
 	}
 	cfg := visionConfig{
-		apiBase:        strings.TrimRight(m.getSetting("vision_api_base", "http://125.122.23.233:9080/v1"), "/"),
+		apiBase:        strings.TrimRight(m.getSetting("vision_api_base", "http://192.168.10.103:8080/v1"), "/"),
 		apiKey:         m.getSetting("vision_api_key", ""),
 		model:          m.getSetting("vision_model", "grok-4.6"),
-		prompt:         m.getSetting("vision_prompt", "请把这张图片的内容尽量完整、结构化地转述成文字，包含其中所有可读文本（OCR）、图表与关键视觉信息。只输出转述内容本身，不要加任何前后缀说明。"),
+		prompt:         m.getSetting("vision_prompt", "Transcribe the contents of this image into text as completely and in as structured a way as possible, including all readable text, charts, and key visual information. Output only the transcription itself, without any prefix or suffix explanation."),
 		maxImages:      atoiDef("vision_max_images", 4),
 		maxResultChars: atoiDef("vision_max_result_chars", 2000),
 		timeout:        time.Duration(atoiDef("vision_timeout_seconds", 60)) * time.Second,
 	}
 	cfg.maxImageBytes = int64(atoiDef("vision_max_image_mb", 20)) * 1024 * 1024
 	cfg.proxyURL = m.proxySetting()
-	cfg.mode = m.getSetting("vision_recognize_mode", "vision")
-	cfg.ocrAPIBase = strings.TrimRight(m.getSetting("ocr_api_base", defaultOCRAPIBase), "/")
-	cfg.ocrAPIKey = m.getSetting("ocr_api_key", "")
-	cfg.ocrLang = m.getSetting("ocr_lang", "chi_sim+eng")
-	cfg.ocrTimeout = time.Duration(atoiDef("ocr_timeout_seconds", 30)) * time.Second
 	return cfg
 }
 
@@ -345,12 +324,12 @@ func checkDataURLSize(u string, maxBytes int64) error {
 
 // recognize 调用视觉模型识别单张图，带缓存。
 func (m *MediaResolver) recognize(ctx context.Context, cfg visionConfig, imageURL string) (string, error) {
-	// 缓存键纳入 mode 与 OCR 服务/语言：切换识别引擎后不复用另一引擎的旧结果。
-	cacheKey := fingerprint("vision", cfg.mode, cfg.model, cfg.ocrAPIBase, cfg.ocrLang, imageURL)
+	// 缓存键纳入模型：切换视觉模型后不复用旧结果。
+	cacheKey := fingerprint("vision", cfg.model, imageURL)
 	if cached, ok := m.cache.Get(ctx, cacheKey); ok {
 		return cached, nil
 	}
-	text, err := m.doRecognize(ctx, cfg, imageURL)
+	text, err := m.callVision(ctx, cfg, imageURL)
 	if err != nil {
 		return "", err
 	}
@@ -363,142 +342,6 @@ func (m *MediaResolver) recognize(ctx context.Context, cfg visionConfig, imageUR
 	}
 	m.cache.Set(ctx, cacheKey, text)
 	return text, nil
-}
-
-// doRecognize 按 cfg.mode 选择识别引擎：
-//   - "ocr"             仅外部 OCR 服务；
-//   - "ocr_then_vision" OCR 优先，OCR 失败或返回空文本时回退视觉模型；
-//   - 其它（默认 "vision"）视觉模型。
-func (m *MediaResolver) doRecognize(ctx context.Context, cfg visionConfig, imageURL string) (string, error) {
-	switch cfg.mode {
-	case "ocr":
-		return m.callOCR(ctx, cfg, imageURL)
-	case "ocr_then_vision":
-		text, err := m.callOCR(ctx, cfg, imageURL)
-		if err == nil && strings.TrimSpace(text) != "" {
-			return text, nil
-		}
-		reason := "OCR 返回空文本"
-		if err != nil {
-			reason = err.Error()
-		}
-		Trace(ctx, "ocr.fallback", map[string]interface{}{"reason": reason})
-		return m.callVision(ctx, cfg, imageURL)
-	default:
-		return m.callVision(ctx, cfg, imageURL)
-	}
-}
-
-// callOCR 调外部 OCR HTTP 服务识别单张图。契约（与设置项说明一致）：
-//   - 请求：POST 到 cfg.ocrAPIBase（完整 URL），JSON 体 {"image":"<data URL 或 http(s) 直链>","lang":"..."}，
-//     配置了 ocrAPIKey 时带 Authorization: Bearer。
-//   - 响应：2xx，从 text/result/transcription/stdout 等字段（含数组/嵌套结构）收集识别文本。
-//
-// 与 callVision 同构：复用出口代理、缓存（在 recognize 层）与 trace（ocr.request/response/error）。
-func (m *MediaResolver) callOCR(ctx context.Context, cfg visionConfig, imageURL string) (string, error) {
-	if cfg.ocrAPIBase == "" {
-		return "", fmt.Errorf("未配置 OCR 服务地址(ocr_api_base)")
-	}
-	payload, err := json.Marshal(map[string]interface{}{"image": imageURL, "lang": cfg.ocrLang})
-	if err != nil {
-		return "", err
-	}
-
-	callCtx := ctx
-	timeout := cfg.ocrTimeout
-	if timeout <= 0 {
-		timeout = cfg.timeout
-	}
-	if timeout > 0 {
-		var cancel context.CancelFunc
-		callCtx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
-	endpoint := cfg.ocrAPIBase
-	req, err := http.NewRequestWithContext(callCtx, http.MethodPost, endpoint, bytes.NewReader(payload))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if cfg.ocrAPIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+cfg.ocrAPIKey)
-	}
-
-	// 完整记录发往 OCR 服务的调用：控制台只显示 body 字节数，jsonl 文件落全量请求体。
-	Trace(ctx, "ocr.request", map[string]interface{}{
-		"url": endpoint, "lang": cfg.ocrLang,
-		"proxy": cfg.proxyURL != "", "body": json.RawMessage(payload),
-	})
-
-	start := time.Now()
-	resp, err := m.httpClientFor(cfg.proxyURL).Do(req)
-	if err != nil {
-		Trace(ctx, "ocr.error", map[string]interface{}{"url": endpoint, "error": err.Error()})
-		return "", fmt.Errorf("调用 OCR 服务失败: %w", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	var logBody interface{} = string(body)
-	if json.Valid(body) {
-		logBody = json.RawMessage(body)
-	}
-	Trace(ctx, "ocr.response", map[string]interface{}{
-		"url": endpoint, "status": resp.StatusCode,
-		"latency_ms": time.Since(start).Milliseconds(), "body": logBody,
-	})
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("OCR 服务返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-
-	text := extractOCRText(body)
-	if strings.TrimSpace(text) == "" {
-		return "", fmt.Errorf("OCR 服务未返回可识别文本")
-	}
-	return text, nil
-}
-
-// extractOCRText 从各家 OCR 服务响应里尽量鲁棒地提取识别文本：先取顶层 text/result 字符串，
-// 否则递归收集所有名为 text/transcription/stdout 的字符串字段（覆盖 Paddle/Umi/Tesseract 等分行结构），按行拼接。
-func extractOCRText(body []byte) string {
-	var shaped struct {
-		Text   string `json:"text"`
-		Result string `json:"result"`
-	}
-	if err := json.Unmarshal(body, &shaped); err == nil {
-		if t := strings.TrimSpace(shaped.Text); t != "" {
-			return t
-		}
-		if t := strings.TrimSpace(shaped.Result); t != "" {
-			return t
-		}
-	}
-	var v interface{}
-	if err := json.Unmarshal(body, &v); err != nil {
-		return ""
-	}
-	var parts []string
-	collectOCRText(v, &parts)
-	return strings.TrimSpace(strings.Join(parts, "\n"))
-}
-
-var ocrTextKeys = map[string]bool{"text": true, "transcription": true, "stdout": true}
-
-func collectOCRText(v interface{}, out *[]string) {
-	switch node := v.(type) {
-	case map[string]interface{}:
-		for key := range ocrTextKeys {
-			if s, ok := node[key].(string); ok && strings.TrimSpace(s) != "" {
-				*out = append(*out, s)
-			}
-		}
-		for _, child := range node {
-			collectOCRText(child, out)
-		}
-	case []interface{}:
-		for _, child := range node {
-			collectOCRText(child, out)
-		}
-	}
 }
 
 func (m *MediaResolver) callVision(ctx context.Context, cfg visionConfig, imageURL string) (string, error) {

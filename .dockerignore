@@ -9,12 +9,6 @@ data/
 build/
 wails.json
 
-# 内置 OCR：虚拟环境/字节码/锁文件不进构建上下文（镜像内会重新 uv sync）
-ocr/.venv/
-ocr/**/__pycache__/
-ocr/*.pyc
-ocr/uv.lock
-
 # 依赖与编辑器状态
 node_modules/
 .git/

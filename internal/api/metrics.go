@@ -51,16 +51,7 @@ var settingDefs = []settingDef{
 	{Key: "vision_max_image_mb", Label: "单图最大体积(MB)", Type: "number", Default: "20", Group: "vision", Description: "单张图片解码后字节数上限（MB），超过则回退 400。xAI 上限为 20MiB"},
 	{Key: "vision_max_result_chars", Label: "单图识别文本上限(字符)", Type: "number", Default: "2000", Group: "vision", Description: "每张图识别结果最多保留多少字符，超出截断。防止多图识别文本顶爆上游 10000 字符 query 上限"},
 	{Key: "vision_timeout_seconds", Label: "识别超时(秒)", Type: "number", Default: "60", Group: "vision", Description: "单次视觉模型调用的超时时间（秒）"},
-	{Key: "vision_prompt", Label: "识别提示词", Type: "text", Default: "请把这张图片的内容尽量完整、结构化地转述成文字，包含其中所有可读文本（OCR）、图表与关键视觉信息。只输出转述内容本身，不要加任何前后缀说明。", Group: "vision", Description: "发给视觉模型的指令，决定识别输出的风格与详略"},
-	// OCR：除视觉模型外的第二种识别引擎。vision_recognize_mode 决定用哪种：
-	//   vision（默认，仅视觉模型）| ocr（仅外部 OCR HTTP 服务）| ocr_then_vision（OCR 优先，空结果或失败回退视觉模型）。
-	// OCR 只抽可读文本、更快更省，但丢失图表/排版/视觉语义；视觉模型能整体转述。三者共用同一段图片提取、
-	// 体积/数量限制、结果截断、缓存与替换逻辑，只是识别这一步不同。
-	{Key: "vision_recognize_mode", Label: "识别引擎", Type: "select", Default: "vision", Options: []string{"vision", "ocr", "ocr_then_vision"}, Group: "vision", Description: "vision=仅视觉模型(默认)；ocr=仅外部 OCR 服务；ocr_then_vision=OCR 优先，空结果或失败时回退视觉模型"},
-	{Key: "ocr_api_base", Label: "OCR 服务地址（可选）", Type: "text", Default: "", Group: "vision", Description: "留空即用 ps2api 镜像内置的 OCR 服务（容器内 http://127.0.0.1:8000/ocr），选 ocr / ocr_then_vision 引擎开箱即用、无需配置。仅当要接外部 OCR 服务时才填：完整接口 URL，请求体 JSON{\"image\":\"<data URL 或 http(s) 直链>\",\"lang\":\"...\"}；响应会从 text/result/transcription/stdout 等字段提取识别文本"},
-	{Key: "ocr_api_key", Label: "OCR 服务 Key（可选）", Type: "text", Default: "", Group: "vision", Description: "调用 OCR 服务的 Bearer Key，存入本地 SQLite。使用内置 OCR 服务时留空即可；仅当外部 OCR 服务需要鉴权时才填"},
-	{Key: "ocr_lang", Label: "OCR 识别语言", Type: "text", Default: "chi_sim+eng", Group: "vision", Description: "随请求发给 OCR 服务的 lang 字段，如 chi_sim+eng / eng。具体取值取决于你的 OCR 服务"},
-	{Key: "ocr_timeout_seconds", Label: "OCR 超时(秒)", Type: "number", Default: "30", Group: "vision", Description: "单次 OCR 服务调用的超时时间（秒）"},
+	{Key: "vision_prompt", Label: "识别提示词", Type: "text", Default: "Transcribe the contents of this image into text as completely and in as structured a way as possible, including all readable text, charts, and key visual information. Output only the transcription itself, without any prefix or suffix explanation.", Group: "vision", Description: "发给视觉模型的指令，决定识别输出的风格与详略"},
 }
 
 func defaultSettings() map[string]string {
