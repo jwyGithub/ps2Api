@@ -266,14 +266,24 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 	res.ActualModel = reader.ActualModel
 	res.Usage = reader.Usage
 
-	// 上游干净结束(EOF)但既没有 [DONE] 收尾、也没有吐出任何正文/工具调用(failure/quota 已在
-	// 上面各自返回)：这是一次不完整的空流——典型为 Postman 已收下 TOOL_RESPONSE 但 Bedrock
-	// 生成被掐断。绝不能当成功：那会向客户端发 end_turn(空回复)，并把已被服务端消费的 tool call
-	// 会话固化成映射，导致后续续聊必然 TOOL_CALL_NOT_FOUND。标记为可重试的上游失败(账号健康,
-	// 不 MarkError)，并置 SessionCorrupt 让上层失效该会话映射——续聊重试时降级为 USER_QUERY
-	// 重建，而不是再交一次已消费的 toolCallId。对照：真正成功的空回复一定带 [DONE]。
-	if !reader.sawDone && !reader.hadOutput() {
-		res.Error = "Upstream returned an empty stream (no content and no completion marker)"
+	// 上游没有吐出任何正文/工具调用(failure/quota 已在上面各自返回)：这是一次空回复，绝不能当成功。
+	// 曾经只在「没有 [DONE] 收尾」时拦截，误以为「真正成功的空回复一定带 [DONE]」；但实测续聊(携带
+	// TOOL_RESPONSE、上下文很大)时，上游会只发一个 usage/loopApproval 等元数据事件、随即干净地发
+	// [DONE] 收尾，却没有生成任何 assistant 内容——sawDone=true 让旧守卫漏判，于是向客户端发出
+	// end_turn(空回复)。agent 终端(Claude Code 等)收到空轮既非 403 也非错误，直接静默中断/停止本轮——
+	// 这正是「重试中断」的根因。因此只要没有可交付输出就一律拦截，无论是否见到 [DONE]：
+	//   - 无 [DONE]：流被掐断的不完整结束(典型为 Postman 收下 TOOL_RESPONSE 但 Bedrock 生成中断)。
+	//   - 有 [DONE]：上游只发元数据事件就干净收尾，未产出任何内容(上游模型瞬时抖动/被掐断)。
+	// 二者都标记为可重试的上游失败(账号健康，不 MarkError)，并置 SessionCorrupt 让上层失效该会话映射——
+	// 续聊重试时降级为 conversationId=null 的 USER_QUERY 重建，而不是再交一次已被服务端消费的 toolCallId
+	// (否则必然 TOOL_CALL_NOT_FOUND)。此处 emitted 必为 false(正文/工具调用一个都没发过)，故重试绝不
+	// 重复输出；重试全部耗尽时，上层返回明确错误(而非空成功)，终端据此干净停止或退避。
+	if !reader.hadOutput() {
+		if reader.sawDone {
+			res.Error = "Upstream returned an empty completion (only metadata events, no content or tool calls)"
+		} else {
+			res.Error = "Upstream returned an empty stream (no content and no completion marker)"
+		}
 		res.UpstreamFailure = true
 		res.SessionCorrupt = true
 		return fmt.Errorf("%s", res.Error)
