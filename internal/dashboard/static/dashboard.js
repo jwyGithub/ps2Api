@@ -16,7 +16,8 @@
     alerts: [], alertSummary: {}, cacheProbe: {},
     days: 14, page: 'overview', poolQuery: '', poolStatus: 'ALL', alertTab: 'open',
     poolPage: 1, quotaPage: 1,
-    reqlogs: [], reqlogsPage: 1, reqlogsTotal: 0, reqlogsCollapsed: {}
+    reqlogs: [], reqlogsPage: 1, reqlogsTotal: 0, reqlogsCollapsed: {},
+    sqlLast: null
   };
   var PAGE_SIZE = 20;
   // 通用分页：切片当前页并生成页码控件 HTML（gotoFn 为全局翻页函数名）
@@ -606,8 +607,11 @@
     if (!sql) { toast('请输入 SQL 查询'); return; }
     var meta = document.getElementById('sqlMeta');
     if (meta) meta.textContent = '执行中…';
+    var copyBtn = document.getElementById('sqlCopyBtn');
+    if (copyBtn) copyBtn.style.display = 'none';
     api('/api/sql-query', { method: 'POST', body: JSON.stringify({ sql: sql }) }).then(function (data) {
-      var cols = data.columns || [], rows = data.rows || [];
+      state.sqlLast = { sql: sql, columns: data.columns || [], rows: data.rows || [], truncated: !!data.truncated };
+      var cols = state.sqlLast.columns, rows = state.sqlLast.rows;
       var head = document.getElementById('sqlHead');
       var body = document.getElementById('sqlBody');
       var empty = document.getElementById('sqlEmpty');
@@ -620,13 +624,46 @@
       }).join('');
       if (empty) empty.style.display = rows.length ? 'none' : '';
       if (meta) meta.textContent = rows.length + ' 行 · ' + (data.elapsedMs || 0) + 'ms' + (data.truncated ? ' · 已截断(上限 200 行)' : '');
+      if (copyBtn) copyBtn.style.display = rows.length ? '' : 'none';
     }).catch(function (e) {
+      state.sqlLast = null;
+      var copyBtn = document.getElementById('sqlCopyBtn');
+      if (copyBtn) copyBtn.style.display = 'none';
       var head = document.getElementById('sqlHead'), body = document.getElementById('sqlBody');
       if (head) head.innerHTML = ''; if (body) body.innerHTML = '';
       var empty = document.getElementById('sqlEmpty');
       if (empty) { empty.style.display = ''; empty.textContent = '查询失败：' + e.message; }
     });
   };
+  // sqlCopy 把最近一次查询结果格式化为 Markdown 表格（含 SQL 原文与行数）复制到剪贴板，
+  // 便于直接粘贴给 AI/issue 做分析。单元格里的 | 与换行转义，避免破坏表格结构。
+  window.sqlCopy = function () {
+    var last = state.sqlLast;
+    if (!last || !last.rows.length) { toast('没有可复制的结果'); return; }
+    var cell = function (v) {
+      return String(v == null ? '' : v).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+    };
+    var md = '```sql\n' + last.sql + '\n```\n\n' + last.rows.length + ' 行' + (last.truncated ? '（已达 200 行上限，已截断）' : '') + '\n\n';
+    md += '| ' + last.columns.map(cell).join(' | ') + ' |\n';
+    md += '|' + last.columns.map(function () { return ' --- '; }).join('|') + '|\n';
+    md += last.rows.map(function (row) {
+      return '| ' + last.columns.map(function (c) { return cell(row[c]); }).join(' | ') + ' |';
+    }).join('\n');
+    var done = function () { toast('已复制 ' + last.rows.length + ' 行结果（Markdown 表格）'); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(md).then(done, function () { fallbackCopy(md, done); });
+    } else {
+      fallbackCopy(md, done);
+    }
+  };
+  // clipboard API 在非安全上下文（http + 非 localhost）不可用，退回 execCommand。
+  function fallbackCopy(text, done) {
+    var ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); done(); } catch (_) { toast('复制失败，请手动选择结果复制'); }
+    ta.remove();
+  }
 
   // ─── 路由策略（真实配置读写）────────────────────────────────
   function renderRoutingReal() {

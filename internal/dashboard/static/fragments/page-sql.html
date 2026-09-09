@@ -24,7 +24,10 @@
       <div class="card p-6">
         <div class="flex items-center justify-between mb-4">
           <h3 class="font-display text-[18px] font-medium">查询结果</h3>
-          <div class="text-[12px] font-mono" id="sqlMeta" style="color: var(--muted);">尚未执行查询</div>
+          <div class="flex items-center gap-3">
+            <div class="text-[12px] font-mono" id="sqlMeta" style="color: var(--muted);">尚未执行查询</div>
+            <button class="btn btn-ghost" id="sqlCopyBtn" onclick="sqlCopy()" style="display:none;">复制结果</button>
+          </div>
         </div>
         <div class="overflow-x-auto">
           <table class="data-table">
