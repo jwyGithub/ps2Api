@@ -31,12 +31,6 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 	// autoRun below, which keys off len(thirdParty)).
 	if os.Getenv("GATEWAY_DISABLE_THIRD_PARTY") == "1" {
 		thirdParty = map[string]interface{}{}
-	} else if req.GatewayRetry {
-		// Keep full third-party registration on normal Web requests. Only the
-		// bounded retry after a gateway block uses a name-only schema to
-		// preserve custom-tool dispatch without repeating the large docs
-		// envelope.
-		thirdParty = compactThirdPartyTools(thirdParty)
 	}
 
 	// 出站 query 统一过 WAF 中和（覆盖 tool-tail/折叠历史/普通 query 三条路径）：

@@ -523,52 +523,6 @@ func TestBuildBodyUsesNativeToolResponse(t *testing.T) {
 	}
 }
 
-func TestNativeToolResponseGatewayRetryDropsOnlyDuplicateRegistry(t *testing.T) {
-	p := New()
-	first := []ChatMessage{mustMsg(t, "user", "read file")}
-	calls := []ToolCall{{ID: "toolu_1", Type: "function", GroupID: "group_1", Function: struct {
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-	}{Name: "Read", Arguments: `{"file_path":"/tmp/a"}`}}}
-	p.rememberToolGroups(1, calls)
-	p.RememberConversation(1, first, &Result{ConversationID: "conv-native-retry", ToolCalls: calls})
-	followup := []ChatMessage{
-		first[0],
-		{Role: "assistant", ToolCalls: rawJSON(t, `[{"id":"toolu_1","type":"function","function":{"name":"Read","arguments":"{\"file_path\":\"/tmp/a\"}"}}]`)},
-		{Role: "tool", ToolCallID: "toolu_1", Content: rawText(t, `{"status":"SUCCESS","message":"file contents"}`)},
-	}
-	tools := []interface{}{map[string]interface{}{
-		"type":     "function",
-		"function": map[string]interface{}{"name": "Read", "parameters": map[string]interface{}{"type": "object"}},
-	}}
-	initial := p.buildBody(&ChatRequest{Messages: followup, Tools: tools}, &Tokens{PostmanSID: "sid", UserID: "u", WorkspaceID: "w", WorkspaceSubdomain: "sub"}, "test", 1)
-	initialTools := initial["clientTools"].(map[string]interface{})["thirdParty"].(map[string]interface{})
-	if len(initialTools) == 0 {
-		t.Fatal("initial Web continuation must retain third-party tool registration")
-	}
-	retry := p.buildBody(&ChatRequest{Messages: followup, Tools: tools, GatewayRetry: true}, &Tokens{PostmanSID: "sid", UserID: "u", WorkspaceID: "w", WorkspaceSubdomain: "sub"}, "test", 1)
-	retryInput := retry["input"].(map[string]interface{})
-	if retryInput["chatType"] != "TOOL_RESPONSE" || retryInput["conversationId"] != "conv-native-retry" || retryInput["toolCallGroupId"] != "group_1" {
-		t.Fatalf("gateway retry changed native continuation: %#v", retryInput)
-	}
-	retryTools := retry["clientTools"].(map[string]interface{})["thirdParty"].(map[string]interface{})
-	proxy, ok := retryTools["proxy-tools"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("gateway retry must retain compact third-party registry: %#v", retryTools)
-	}
-	compactTools := proxy["tools"].([]map[string]interface{})
-	if len(compactTools) != 1 || compactTools[0]["name"] != "Read" {
-		t.Fatalf("gateway retry lost tool name: %#v", compactTools)
-	}
-	if got := retry["devModeOptions"].(map[string]interface{})["autoRun"]; got != true {
-		t.Fatalf("gateway retry autoRun = %v, want true", got)
-	}
-	responses := retryInput["toolResponses"].([]map[string]interface{})
-	if responses[0]["toolResponseSummary"] != "Tool result: SUCCESS, 46 bytes" {
-		t.Fatalf("gateway retry summary leaked content: %#v", responses[0]["toolResponseSummary"])
-	}
-}
-
 func TestBuildBodyUsesNativeAnthropicToolResponseGroup(t *testing.T) {
 	p := New()
 	first := []ChatMessage{mustMsg(t, "user", "inspect files")}

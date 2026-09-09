@@ -31,38 +31,6 @@ func (p *Provider) buildThirdPartyTools(tools []interface{}) map[string]interfac
 	return map[string]interface{}{"proxy-tools": map[string]interface{}{"tools": mcpTools}}
 }
 
-// compactThirdPartyTools keeps the callable tool names while dropping the large
-// schema/docs envelope for a single gateway retry. The client still owns the
-// real schemas and executes the returned tool calls, so names remain necessary.
-func compactThirdPartyTools(value map[string]interface{}) map[string]interface{} {
-	proxy, ok := value["proxy-tools"].(map[string]interface{})
-	if !ok {
-		return map[string]interface{}{}
-	}
-	tools, ok := proxy["tools"].([]map[string]interface{})
-	if !ok {
-		return map[string]interface{}{}
-	}
-	compact := make([]map[string]interface{}, 0, len(tools))
-	for _, tool := range tools {
-		name, _ := tool["name"].(string)
-		if name == "" {
-			continue
-		}
-		compact = append(compact, map[string]interface{}{
-			"name": name,
-			"parameters": map[string]interface{}{
-				"type":                 "object",
-				"additionalProperties": true,
-			},
-		})
-	}
-	if len(compact) == 0 {
-		return map[string]interface{}{}
-	}
-	return map[string]interface{}{"proxy-tools": map[string]interface{}{"tools": compact}}
-}
-
 func compactToolSchema(value interface{}) interface{} {
 	switch v := value.(type) {
 	case map[string]interface{}:

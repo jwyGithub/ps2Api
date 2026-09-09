@@ -25,18 +25,6 @@ func (r *Router) retryCount() int {
 	return n
 }
 
-// stickyEgressBudget 是续聊(有可复用历史)遇网关 403 时，「钉住原账号、轮换出口 IP」这一级
-// 允许尝试的最大次数。预算内保住 Postman 服务端会话(零上下文损失)只换出口；预算耗尽仍被拦，
-// 才降级为跨账号 failover(接受会话降级)。默认 2。此级消耗普通重试预算(retry_count)。
-func (r *Router) stickyEgressBudget() int {
-	v, _ := r.Store.GetSetting("sticky_egress_retries")
-	n, err := strconv.Atoi(v)
-	if err != nil || n < 1 {
-		return 2
-	}
-	return n
-}
-
 // gatewayCooldownDur 读取被网关拦截账号的冷却时长（默认 5 分钟）。冷却期内号池优先跳过该账号。
 func (r *Router) gatewayCooldownDur() time.Duration {
 	v, _ := r.Store.GetSetting("gateway_cooldown_seconds")

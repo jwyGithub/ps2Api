@@ -78,8 +78,6 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 		if attempt > 0 {
 			time.Sleep(time.Duration(100*(1<<attempt)) * time.Millisecond)
 		}
-		// 已因 403 发生过跨账号 failover（gatewayBlocks>0）后，换号优先切到剩余频率额度最满
-		// （理想 30/30）的账号——被 Cloudflare 风控拦截后，最新鲜/余量最满的号更不易再次被拦。
 		acc, poolUsed, err := r.selectAccount(pinnedAcc, excluded, req.Messages, false)
 		if err != nil {
 			provider.Trace(ctx, "router.error", map[string]interface{}{"attempt": attempt + 1, "error": err.Error()})
@@ -88,18 +86,10 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 		provider.Trace(ctx, "router.attempt", plan.trace(map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "model": req.Model}, acc, true))
 		egressSeq = nextEgressSeq(egressSeq, prevAcc, acc.ID, attempt == 0)
 		prevAcc = acc.ID
-		if req.GatewayRetry && !req.GatewayRetryRotateEgress {
-			// 旧式降级重试：保持同一出口，让新签发的 Cloudflare cookie 绑定同一客户端路径。
-			req.EgressAttempt = egressSeq - 1
-		} else {
-			// 常规请求 / 续聊「钉账号换出口」重试：出口序号按账号内序列递增，
-			// 经 (stickyBase+EgressAttempt)%N 切到下一个出口 IP。
-			req.EgressAttempt = egressSeq
-		}
+		// 出口序号按账号内序列递增，经 (stickyBase+EgressAttempt)%N 切到下一个出口 IP。
+		req.EgressAttempt = egressSeq
 		started := time.Now()
 		res := plan.invoke(acc)
-		req.GatewayRetry = false
-		req.GatewayRetryRotateEgress = false
 		if poolUsed {
 			r.Pool.Done(acc.ID)
 		}
