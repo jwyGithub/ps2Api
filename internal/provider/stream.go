@@ -91,6 +91,13 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 	res.RequestBytes = len(bodyBytes) // 记录出站体积，供 403 与请求体大小相关性分析
 	res.UpstreamBody = string(bodyBytes)
 	res.UpstreamURL = p.chatURL(tokens)
+	// WAF 中和漏网兜底：出站体应已零特征（wafNeutralize 在 query/toolResponses 出口
+	// 处理）。此处仍命中说明有未覆盖的文本出口（如自定义工具 schema），告警定位，不改行为。
+	if n := WafSignatureHitCount(res.UpstreamBody); n > 0 {
+		Trace(ctx, "upstream.request.waf_signature_leak", map[string]interface{}{
+			"account_id": acc.ID, "hits": n, "body_bytes": len(bodyBytes),
+		})
+	}
 	// 出站 body 体检：超大 payload 是触发 Cloudflare WAF 403 的常见诱因，
 	// 提前告警以便定位（如历史工具原文、超大 schema 未压缩等）。仅告警不阻断。
 	if len(bodyBytes) > MaxRequestBodyWarnBytes {

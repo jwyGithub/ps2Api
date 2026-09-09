@@ -203,6 +203,9 @@ func TestStreamGatewayBlockedContentSignatureSkipsCooldown(t *testing.T) {
 	}
 
 	// 内容型：用户消息携带 <script> 标记 → 出站体特征计数 >0 → 不冷却任何账号。
+	// 默认出站 query 会被 WAF 中和（provider/waf.go），此处关掉开关模拟「特征漏网」
+	// （中和未覆盖的出口/kill-switch 场景）——判别逻辑正是为这种漏网兜底的。
+	t.Setenv("GATEWAY_DISABLE_WAF_NEUTRALIZE", "1")
 	r := new403Router()
 	_, _, err := r.Stream(context.Background(), &provider.ChatRequest{
 		Model: "claude-opus-4-8", Messages: []provider.ChatMessage{mustMsg(t, "user", "fix <script>alert(1)</script> in my page")},
