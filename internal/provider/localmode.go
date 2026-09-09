@@ -72,8 +72,13 @@ func (p *Provider) nativeToolResponse(accountID int64, messages []ChatMessage) (
 			status = "FAILED"
 		}
 		payload := strings.TrimSpace(content)
+		// 中和必须在 wrap 的 json.Marshal 之前：marshal 会把 < 转成 "<" 字面量
+		// 转义序列，裸文本正则对此失明（实测 tool result 的 403 泄漏根因）。
+		if wafNeutralizeEnabled() {
+			payload = wafNeutralize(payload)
+		}
 		if !json.Valid([]byte(payload)) {
-			encoded, _ := json.Marshal(map[string]string{"status": status, "message": content})
+			encoded, _ := json.Marshal(map[string]string{"status": status, "message": payload})
 			payload = string(encoded)
 		}
 		// 给 content 上限，避免续期时把出站 body 顶过 Cloudflare WAF 信封（触发 403）。
@@ -84,11 +89,6 @@ func (p *Provider) nativeToolResponse(accountID int64, messages []ChatMessage) (
 			payload = strings.ToValidUTF8(payload[:head], "") +
 				"\n...[tool result truncated]...\n" +
 				strings.ToValidUTF8(payload[len(payload)-tail:], "")
-		}
-		// 截断后做 WAF 中和：前端源码 tool result 是 403 的主要触发面（实测内容型
-		// 403 的出站体全部命中特征），在特征内插空格破坏形态，模型仍可读。
-		if wafNeutralizeEnabled() {
-			payload = wafNeutralize(payload)
 		}
 		entry := map[string]interface{}{
 			"toolCallId":          toolCallID,

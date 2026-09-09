@@ -17,6 +17,8 @@ func TestWafNeutralize(t *testing.T) {
 		"v-on:click=fn":             "v-on :click=fn",
 		"@click=fn":                 "@ click=fn",
 		"<!doctype html>":           "< !doctype html>",
+		// 转义形：wrap 的 json.Marshal / 客户端双重编码产生的 "<" 字面量转义序列。
+		`\\u003cscript\\u003ex\\u003c/script\\u003e`: `\\u003c script\\u003ex\\u003c /script\\u003e`,
 	}
 	for in, want := range cases {
 		if got := wafNeutralize(in); got != want {
@@ -71,5 +73,31 @@ func TestBuildBodyNeutralizesOutboundQuery(t *testing.T) {
 	// req.Messages 原文必须保持未被中和（指纹层铁律）。
 	if strings.Contains(string(req.Messages[0].Content), "< script") {
 		t.Fatal("req.Messages must never be mutated by outbound neutralization")
+	}
+}
+
+// TestNativeToolResponseNeutralizesWrappedPayload 钉住 wrap 路径的中和顺序：非 JSON 的
+// tool result（前端源码）会被 json.Marshal 包一层 message，marshal 的 HTML 转义曾让
+// "<" 字面量转义序列逃过裸文本正则（实测 tool result 的 403 泄漏根因），中和必须在
+// wrap 之前完成。种入会话映射 + 工具组映射，驱动完整 nativeToolResponse 路径。
+func TestNativeToolResponseNeutralizesWrappedPayload(t *testing.T) {
+	p := New()
+	messages := []ChatMessage{
+		{Role: "user", Content: rawText(t, "修复这个组件")},
+		{Role: "assistant", Content: rawText(t, ""), ToolCalls: rawText(t,
+			`[{"id":"call_1","type":"function","function":{"name":"readFile","arguments":"{}"}}]`)},
+		{Role: "tool", ToolCallID: "call_1", Content: rawText(t,
+			"1\t<template><script setup lang=\"ts\">const x = 1</script></template>")},
+	}
+	p.convStore.PutConversation(1, conversationFingerprint(messages[:1]), "conv_1")
+	p.convStore.PutToolGroup(1, "call_1", "group_1")
+
+	resp, ok := p.nativeToolResponse(1, messages)
+	if !ok {
+		t.Fatal("nativeToolResponse should build with seeded conversation + tool group")
+	}
+	payload, _ := resp.responses[0]["content"].(string)
+	if n := WafSignatureHitCount(payload); n != 0 {
+		t.Fatalf("wrapped payload must be neutralized before marshal, got %d hits: %s", n, payload)
 	}
 }

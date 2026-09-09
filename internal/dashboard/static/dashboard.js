@@ -586,8 +586,8 @@
 
   // ─── 数据查询（只读 SQL 控制台）─────────────────────────────
   var SQL_PRESETS = [
-    { name: '403 时间线判别', sql: "SELECT datetime(created_at,'localtime') AS t, status, egress, account_id,\n  CASE WHEN upstream_body LIKE '%u003cscript%' OR upstream_body LIKE '%<script%'\n         OR upstream_body LIKE '%u003csvg%' OR upstream_body LIKE '%<svg%'\n         OR upstream_body LIKE '%onerror=%' OR upstream_body LIKE '%onload=%'\n       THEN '有特征' ELSE '零特征' END AS sig,\n  length(upstream_body) AS bytes\nFROM request_logs\nWHERE created_at >= datetime('now','-3 hours')\n  AND (status='success' OR error_message LIKE '%Cloudflare%')\nORDER BY created_at" },
-    { name: '最近错误请求', sql: "SELECT datetime(created_at,'localtime') AS t, account_id, model, error_message\nFROM request_logs WHERE status='error'\nORDER BY created_at DESC LIMIT 50" },
+    { name: '403 时间线判别', sql: "SELECT datetime(substr(created_at,1,19)) AS t, status, egress, account_id,\n  CASE WHEN upstream_body LIKE '%u003cscript%' OR upstream_body LIKE '%<script%'\n         OR upstream_body LIKE '%u003csvg%' OR upstream_body LIKE '%<svg%'\n         OR upstream_body LIKE '%onerror=%' OR upstream_body LIKE '%onload=%'\n       THEN '有特征' ELSE '零特征' END AS sig,\n  length(upstream_body) AS bytes\nFROM request_logs\nWHERE created_at >= datetime('now','-3 hours')\n  AND (status='success' OR error_message LIKE '%Cloudflare%')\nORDER BY created_at" },
+    { name: '最近错误请求', sql: "SELECT datetime(substr(created_at,1,19)) AS t, account_id, model, error_message\nFROM request_logs WHERE status='error'\nORDER BY created_at DESC LIMIT 50" },
     { name: '表清单', sql: "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name" },
     { name: '各表行数', sql: "SELECT 'accounts' t, COUNT(*) n FROM accounts\nUNION ALL SELECT 'request_logs', COUNT(*) FROM request_logs\nUNION ALL SELECT 'alerts', COUNT(*) FROM alerts\nUNION ALL SELECT 'settings', COUNT(*) FROM settings" }
   ];

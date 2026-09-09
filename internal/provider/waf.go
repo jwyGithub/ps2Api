@@ -5,27 +5,24 @@ import (
 	"regexp"
 )
 
-// wafNeutralizeRules 把 wafSignatureProbes 里的每个特征映射为「插入一个空格」的破坏点：
-// Cloudflare WAF 托管内容规则按解码后的子串形态匹配（实测出站体含 <script/onerror= 等
-// HTML/JS 标记的前端源码 100% 被 403，纯后端源码从不被拦），在特征内部插一个空格即可
-// 破坏形态，模型读 "< script src=x onerror =alert(1)>" 仍完全理解语义。
-// 分四类：标签（< 后插）、事件处理器（= 前插）、URI/指令（: 前插）、Vue 简写（@ 后插）。
+// wafNeutralizeRules 按特征类别（而非逐个特征）破坏形态：Cloudflare WAF 托管内容
+// 规则按解码后的子串形态匹配（实测出站体含 <script/onerror= 等 HTML/JS 标记的
+// 前端源码 100% 被 403，纯后端源码从不被拦），在特征内部插一个空格即可破坏形态，
+// 模型读 "< script src=x onerror =alert(1)>" 仍完全理解语义。
+// 每条规则用两个捕获组夹住破坏点，replace 模板 "${1} ${2}" 在组间插空格——
+// 扩特征只需往交替组里加词，不再逐条枚举。分四类：
+//   1. 危险标签开头（含 json.Marshal HTML 转义产生的 u003c 字面量形）
+//   2. 行内事件处理器 on任意=
+//   3. 危险 URI 指令
+//   4. Vue 指令（v-on: 与 @ 简写；@ 后只认 click/冒号，不误伤邮箱）
 var wafNeutralizeRules = []struct {
 	pattern *regexp.Regexp
-	insert  int // 在匹配串的第 insert 字节处插入空格
+	replace string
 }{
-	{regexp.MustCompile(`(?i)</?script`), 1},
-	{regexp.MustCompile(`(?i)</?iframe`), 1},
-	{regexp.MustCompile(`(?i)</?svg`), 1},
-	{regexp.MustCompile(`(?i)</?template`), 1},
-	{regexp.MustCompile(`(?i)<!doctype`), 1},
-	{regexp.MustCompile(`(?i)onerror=`), len("onerror")},
-	{regexp.MustCompile(`(?i)onload=`), len("onload")},
-	{regexp.MustCompile(`(?i)onclick=`), len("onclick")},
-	{regexp.MustCompile(`(?i)onchange=`), len("onchange")},
-	{regexp.MustCompile(`(?i)javascript:`), len("javascript")},
-	{regexp.MustCompile(`(?i)v-on:`), len("v-on")},
-	{regexp.MustCompile(`(?i)@click`), 1},
+	{regexp.MustCompile(`(?i)(<|\\u003c)([!/?]?(?:script|iframe|svg|template|object|embed|form|style|link|meta|base|img|input|body|html|doctype)\b)`), "${1} ${2}"},
+	{regexp.MustCompile(`(?i)(\bon[a-z]+)(\s*=)`), "${1} ${2}"},
+	{regexp.MustCompile(`(?i)(javascript|vbscript)(:)`), "${1} ${2}"},
+	{regexp.MustCompile(`(?i)(v-on|@)(:|click)`), "${1} ${2}"},
 }
 
 // wafNeutralizeEnabled 是中和的 kill-switch：GATEWAY_DISABLE_WAF_NEUTRALIZE=1 时关闭
@@ -43,9 +40,7 @@ func wafNeutralize(s string) string {
 		return s
 	}
 	for _, rule := range wafNeutralizeRules {
-		s = rule.pattern.ReplaceAllStringFunc(s, func(m string) string {
-			return m[:rule.insert] + " " + m[rule.insert:]
-		})
+		s = rule.pattern.ReplaceAllString(s, rule.replace)
 	}
 	return s
 }

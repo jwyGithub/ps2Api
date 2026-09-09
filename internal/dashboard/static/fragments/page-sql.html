@@ -17,7 +17,7 @@
           </div>
         </div>
         <textarea id="sqlInput" class="input font-mono w-full" rows="8" spellcheck="false"
-          placeholder="SELECT datetime(created_at,'localtime') t, status, egress, error_message FROM request_logs ORDER BY created_at DESC LIMIT 50"
+          placeholder="SELECT datetime(substr(created_at,1,19)) AS t, status, egress, error_message FROM request_logs ORDER BY created_at DESC LIMIT 50"
           onkeydown="if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){event.preventDefault();sqlRun();}"></textarea>
       </div>
 
