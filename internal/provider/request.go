@@ -40,8 +40,8 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 	}
 
 	// 出站 query 统一过 WAF 中和（覆盖 tool-tail/折叠历史/普通 query 三条路径）：
-	// 前端源码里的 HTML/JS 标记确定性触发 Cloudflare 403，在特征内插空格破坏形态。
-	// 先中和再 cap，保证插空格后的长度仍受 10000 rune 上限约束。
+	// 前端源码里的 HTML/JS 标记确定性触发 Cloudflare 403，在特征内插零宽空格破坏形态。
+	// 先中和再 cap，保证中和后的长度仍受 10000 rune 上限约束。
 	upstreamQuery := split.Query
 	if wafNeutralizeEnabled() {
 		upstreamQuery = wafNeutralize(upstreamQuery)

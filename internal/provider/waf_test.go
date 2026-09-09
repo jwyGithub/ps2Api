@@ -6,23 +6,31 @@ import (
 	"testing"
 )
 
+// zwsp 是零宽空格 U+200B，用 rune 构造保持源码纯 ASCII（字面零宽字符会被
+// 编辑器/评审/JSON 传输悄悄吞掉或污染）。wafNeutralize 的破坏点全部插这个字符。
+var zwsp = string(rune(0x200b))
+
 // TestWafNeutralize 钉住中和语义：四类特征（标签/事件处理器/URI/Vue 简写）各自在
-// 破坏点插入空格、大小写不敏感、无特征字符串零拷贝原样返回、中和后签名计数归零。
+// 破坏点插入零宽空格、大小写不敏感、无特征字符串零拷贝原样返回、中和后签名计数归零。
 func TestWafNeutralize(t *testing.T) {
-	cases := map[string]string{
-		"<script>alert(1)</script>": "< script>alert(1)< /script>",
-		"<SCRIPT SRC=x>":            "< SCRIPT SRC=x>",
-		"OnLoad=go()":               "OnLoad =go()",
-		"javascript:void(0)":        "javascript :void(0)",
-		"v-on:click=fn":             "v-on :click=fn",
-		"@click=fn":                 "@ click=fn",
-		"<!doctype html>":           "< !doctype html>",
+	cases := []struct{ in, want string }{
+		{"<script>alert(1)</script>", "<" + zwsp + "script>alert(1)<" + zwsp + "/script>"},
+		{"<SCRIPT SRC=x>", "<" + zwsp + "SCRIPT SRC=x>"},
+		{"OnLoad=go()", "OnLoad" + zwsp + "=go()"},
+		{"javascript:void(0)", "javascript" + zwsp + ":void(0)"},
+		{"v-on:click=fn", "v-on" + zwsp + ":click=fn"},
+		{"@click=fn", "@" + zwsp + "click=fn"},
+		{"<!doctype html>", "<" + zwsp + "!doctype html>"},
+		// 只有闭合标签的载荷：签名探测表认不出（"<script" 不匹配 "</script"），
+		// 中和不得依赖探测门（实测 CF 对 "</script>" 单独在场即 403）。
+		{"</script>", "<" + zwsp + "/script>"},
 		// 转义形：wrap 的 json.Marshal / 客户端双重编码产生的 "<" 字面量转义序列。
-		`\\u003cscript\\u003ex\\u003c/script\\u003e`: `\\u003c script\\u003ex\\u003c /script\\u003e`,
+		{"\\u003cscript\\u003ex\\u003c/script\\u003e",
+			"\\u003c" + zwsp + "script\\u003ex\\u003c" + zwsp + "/script\\u003e"},
 	}
-	for in, want := range cases {
-		if got := wafNeutralize(in); got != want {
-			t.Fatalf("wafNeutralize(%q) = %q, want %q", in, got, want)
+	for _, c := range cases {
+		if got := wafNeutralize(c.in); got != c.want {
+			t.Fatalf("wafNeutralize(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 	// 无特征字符串必须原样返回（同一内容，避免白付一次拷贝）。
@@ -49,8 +57,9 @@ func TestWafNeutralizeKillSwitch(t *testing.T) {
 }
 
 // TestBuildBodyNeutralizesOutboundQuery 端到端钉住：带前端源码的消息经 buildBody 序列化后，
-// 出站体签名计数必须为 0（覆盖冷启动折叠路径），且中和形态对模型可读（< script）。
-// 指纹不受影响由结构保证：中和只作用于出站副本，req.Messages 原文不被改写。
+// 出站体签名计数必须为 0（覆盖冷启动折叠路径），且中和形态对模型可读（零宽空格对
+// tokenizer 基本不可见）。指纹不受影响由结构保证：中和只作用于出站副本，req.Messages
+// 原文不被改写。
 func TestBuildBodyNeutralizesOutboundQuery(t *testing.T) {
 	p := New()
 	req := &ChatRequest{Model: "gpt-5.6-sol", Endpoint: "openai", Messages: []ChatMessage{
@@ -67,11 +76,11 @@ func TestBuildBodyNeutralizesOutboundQuery(t *testing.T) {
 		t.Fatalf("outbound body should be WAF-neutralized, got %d signature hits", n)
 	}
 	query := body["input"].(map[string]interface{})["query"].(string)
-	if !strings.Contains(query, "< script src=x onerror =alert(1)") {
-		t.Fatalf("neutralized form should keep model-readable spacing, got: %s", query)
+	if !strings.Contains(query, "<"+zwsp+"script src=x onerror"+zwsp+"=alert(1)") {
+		t.Fatalf("neutralized form should insert ZWSP at signature boundaries, got: %q", query)
 	}
 	// req.Messages 原文必须保持未被中和（指纹层铁律）。
-	if strings.Contains(string(req.Messages[0].Content), "< script") {
+	if strings.Contains(string(req.Messages[0].Content), "<"+zwsp+"script") {
 		t.Fatal("req.Messages must never be mutated by outbound neutralization")
 	}
 }
@@ -99,5 +108,9 @@ func TestNativeToolResponseNeutralizesWrappedPayload(t *testing.T) {
 	payload, _ := resp.responses[0]["content"].(string)
 	if n := WafSignatureHitCount(payload); n != 0 {
 		t.Fatalf("wrapped payload must be neutralized before marshal, got %d hits: %s", n, payload)
+	}
+	// wrap 会把 < 转成 "<" 字面量转义序列；破坏点应落在转义序列与 "script" 之间。
+	if !strings.Contains(payload, "\\u003c"+zwsp+"script") {
+		t.Fatalf("wrapped payload should contain ZWSP-broken script tag, got: %s", payload)
 	}
 }
