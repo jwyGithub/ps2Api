@@ -53,7 +53,7 @@
   }
 
   function bootstrapDashboard() {
-    var names = ['fragments/topnav.html', 'fragments/sidebar.html', 'fragments/page-overview.html', 'fragments/page-stats.html', 'fragments/page-reqlogs.html', 'fragments/page-pools.html', 'fragments/page-quota.html', 'fragments/page-routing.html', 'fragments/page-alerts.html', 'fragments/page-settings.html', 'fragments/page-proxies.html', 'fragments/page-vision.html', 'fragments/drawer.html'];
+    var names = ['fragments/topnav.html', 'fragments/sidebar.html', 'fragments/page-overview.html', 'fragments/page-stats.html', 'fragments/page-reqlogs.html', 'fragments/page-sql.html', 'fragments/page-pools.html', 'fragments/page-quota.html', 'fragments/page-routing.html', 'fragments/page-alerts.html', 'fragments/page-settings.html', 'fragments/page-proxies.html', 'fragments/page-vision.html', 'fragments/drawer.html'];
     return Promise.all(names.map(loadFragment)).then(function (parts) {
       var app = document.getElementById('dashboard-app');
       if (!app) return;
@@ -147,9 +147,10 @@
     state.page = page;
     document.querySelectorAll('.page').forEach(function (el) { el.classList.toggle('active', el.id === 'page-' + page); });
     document.querySelectorAll('.sidebar-item[data-page]').forEach(function (el) { el.classList.toggle('active', el.dataset.page === page); });
-    var names = { overview:'概览', stats:'统计分析', reqlogs:'请求日志', pools:'号池 & 额度', routing:'路由策略', proxies:'代理出口', vision:'图片识别', alerts:'告警中心', settings:'系统设置' };
+    var names = { overview:'概览', stats:'统计分析', reqlogs:'请求日志', sql:'数据查询', pools:'号池 & 额度', routing:'路由策略', proxies:'代理出口', vision:'图片识别', alerts:'告警中心', settings:'系统设置' };
     setText('#crumb', names[page] || page);
     if (page === 'reqlogs') renderReqLogsReal();
+    if (page === 'sql') renderSqlPresets();
     if (page === 'pools') { renderPoolsReal(); renderQuotaReal(); }
     if (page === 'alerts') renderAlertsReal();
     if (page === 'routing') renderRoutingReal();
@@ -216,7 +217,8 @@
       proxies: ['settings'],
       vision: ['settings'],
       alerts: ['alerts'],
-      settings: ['settings']
+      settings: ['settings'],
+      sql: []
     };
     var resources = pages[state.page] || ['stats'];
     return resources.length ? loadResources(resources) : Promise.resolve();
@@ -580,6 +582,51 @@
     var resolveAllBtn = document.getElementById('resolveAllBtn');
     if (resolveAllBtn) resolveAllBtn.style.display = (sum.open || 0) > 0 ? '' : 'none';
   }
+
+  // ─── 数据查询（只读 SQL 控制台）─────────────────────────────
+  var SQL_PRESETS = [
+    { name: '403 时间线判别', sql: "SELECT datetime(created_at,'localtime') AS t, status, egress, account_id,\n  CASE WHEN upstream_body LIKE '%u003cscript%' OR upstream_body LIKE '%<script%'\n         OR upstream_body LIKE '%u003csvg%' OR upstream_body LIKE '%<svg%'\n         OR upstream_body LIKE '%onerror=%' OR upstream_body LIKE '%onload=%'\n       THEN '有特征' ELSE '零特征' END AS sig,\n  length(upstream_body) AS bytes\nFROM request_logs\nWHERE created_at >= datetime('now','-3 hours')\n  AND (status='success' OR error_message LIKE '%Cloudflare%')\nORDER BY created_at" },
+    { name: '最近错误请求', sql: "SELECT datetime(created_at,'localtime') AS t, account_id, model, error_message\nFROM request_logs WHERE status='error'\nORDER BY created_at DESC LIMIT 50" },
+    { name: '表清单', sql: "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name" },
+    { name: '各表行数', sql: "SELECT 'accounts' t, COUNT(*) n FROM accounts\nUNION ALL SELECT 'request_logs', COUNT(*) FROM request_logs\nUNION ALL SELECT 'alerts', COUNT(*) FROM alerts\nUNION ALL SELECT 'settings', COUNT(*) FROM settings" }
+  ];
+  function renderSqlPresets() {
+    var box = document.getElementById('sqlPresets'); if (!box) return;
+    box.innerHTML = SQL_PRESETS.map(function (p, i) {
+      return '<button class="btn btn-ghost text-[12px]" onclick="sqlPreset(' + i + ')">' + esc(p.name) + '</button>';
+    }).join('');
+  }
+  window.sqlPreset = function (i) {
+    var input = document.getElementById('sqlInput');
+    if (input && SQL_PRESETS[i]) { input.value = SQL_PRESETS[i].sql; input.focus(); }
+  };
+  window.sqlRun = function () {
+    var input = document.getElementById('sqlInput'); if (!input) return;
+    var sql = input.value.trim();
+    if (!sql) { toast('请输入 SQL 查询'); return; }
+    var meta = document.getElementById('sqlMeta');
+    if (meta) meta.textContent = '执行中…';
+    api('/api/sql-query', { method: 'POST', body: JSON.stringify({ sql: sql }) }).then(function (data) {
+      var cols = data.columns || [], rows = data.rows || [];
+      var head = document.getElementById('sqlHead');
+      var body = document.getElementById('sqlBody');
+      var empty = document.getElementById('sqlEmpty');
+      if (head) head.innerHTML = '<tr>' + cols.map(function (c) { return '<th>' + esc(c) + '</th>'; }).join('') + '</tr>';
+      if (body) body.innerHTML = rows.map(function (row) {
+        return '<tr>' + cols.map(function (c) {
+          var v = row[c] == null ? '' : String(row[c]);
+          return '<td class="font-mono" style="max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(v) + '">' + esc(v) + '</td>';
+        }).join('') + '</tr>';
+      }).join('');
+      if (empty) empty.style.display = rows.length ? 'none' : '';
+      if (meta) meta.textContent = rows.length + ' 行 · ' + (data.elapsedMs || 0) + 'ms' + (data.truncated ? ' · 已截断(上限 200 行)' : '');
+    }).catch(function (e) {
+      var head = document.getElementById('sqlHead'), body = document.getElementById('sqlBody');
+      if (head) head.innerHTML = ''; if (body) body.innerHTML = '';
+      var empty = document.getElementById('sqlEmpty');
+      if (empty) { empty.style.display = ''; empty.textContent = '查询失败：' + e.message; }
+    });
+  };
 
   // ─── 路由策略（真实配置读写）────────────────────────────────
   function renderRoutingReal() {

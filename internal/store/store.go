@@ -3,9 +3,12 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -608,6 +611,48 @@ func (s *Store) Cloudflare403BodySizeSummary(window time.Duration) (string, erro
 	return out, nil
 }
 
+// Cloudflare403SignatureSummary 用 request_logs 里留存的出站请求体，统计最近 window 内
+// 「Cloudflare 拒绝(403)」与「成功」两类请求各自含 HTML/JS 注入类签名的比例。403 组几乎
+// 全含签名而成功组几乎不含，即证实拦截由出站内容形状（前端源码标记文本）触发，而非
+// 体积/账号/IP。无匹配样本时返回空串（调用方据此不追加）。
+func (s *Store) Cloudflare403SignatureSummary(window time.Duration) (string, error) {
+	minutes := int(window.Minutes())
+	if minutes < 1 {
+		minutes = 1
+	}
+	// LIKE 对 ASCII 大小写不敏感；原文匹配 <script，转义形态匹配子串 u003cscript
+	// （Go json.Marshal 把 < 转成 < 反斜杠 u003c，该子串实际只会出现在转义形态里），
+	// 不写反斜杠字面量以避免多层转义歧义。
+	const sig = `(upstream_body LIKE '%<script%' OR upstream_body LIKE '%u003cscript%'
+		OR upstream_body LIKE '%onerror=%' OR upstream_body LIKE '%onload=%' OR upstream_body LIKE '%javascript:%')`
+	var blockedTotal, blockedHit, okTotal, okHit int
+	err := s.db.QueryRow(`SELECT
+		COALESCE(SUM(CASE WHEN status='error' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN status='error' AND `+sig+` THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN status='success' AND `+sig+` THEN 1 ELSE 0 END),0)
+		FROM request_logs
+		WHERE created_at >= datetime('now', ?)
+		  AND (status='success' OR (status='error' AND error_message LIKE '%Cloudflare%'))`,
+		fmt.Sprintf("-%d minutes", minutes)).Scan(&blockedTotal, &blockedHit, &okTotal, &okHit)
+	if err != nil {
+		return "", err
+	}
+	if blockedTotal == 0 && okTotal == 0 {
+		return "", nil
+	}
+	pct := func(hit, total int) string {
+		if total == 0 {
+			return "无样本"
+		}
+		return fmt.Sprintf("%d/%d (%.0f%%)", hit, total, float64(hit)*100/float64(total))
+	}
+	out := fmt.Sprintf("出站体签名对比（最近 %d 分钟，HTML/JS 注入类签名出现率）:", minutes)
+	out += fmt.Sprintf("\n  Cloudflare 403 请求含签名: %s", pct(blockedHit, blockedTotal))
+	out += fmt.Sprintf("\n  成功请求含签名: %s", pct(okHit, okTotal))
+	return out, nil
+}
+
 func (s *Store) RecentLogs(limit int) ([]*RequestLog, error) {
 	if limit <= 0 {
 		limit = 100
@@ -806,6 +851,96 @@ func (s *Store) ListSettings() (map[string]string, error) {
 // QueryRowScan 单行查询便捷方法（供评估器等内部逻辑使用）。
 func (s *Store) QueryRowScan(query string, dest ...interface{}) error {
 	return s.db.QueryRow(query).Scan(dest...)
+}
+
+// stripSQLComments 去掉 SQL 里的 -- 行注释与 /* */ 块注释，供只读前缀判定，
+// 防止用注释伪装首词（如 "/* x */ DROP TABLE ..."）。
+func stripSQLComments(q string) string {
+	var b strings.Builder
+	for i := 0; i < len(q); {
+		switch {
+		case strings.HasPrefix(q[i:], "--"):
+			if j := strings.IndexByte(q[i:], '\n'); j >= 0 {
+				i += j + 1
+			} else {
+				i = len(q)
+			}
+		case strings.HasPrefix(q[i:], "/*"):
+			if j := strings.Index(q[i+2:], "*/"); j >= 0 {
+				i += j + 4
+			} else {
+				i = len(q)
+			}
+			b.WriteByte(' ')
+		default:
+			b.WriteByte(q[i])
+			i++
+		}
+	}
+	return b.String()
+}
+
+// truncateSQLCell 截断超长单元格（upstream_body 等大字段会撑爆面板响应）。
+func truncateSQLCell(s string) string {
+	if len(s) <= 2000 {
+		return s
+	}
+	return s[:2000] + "…(截断,共 " + strconv.Itoa(len(s)) + " 字节)"
+}
+
+// RunReadOnlyQuery 面板「数据查询」页的执行入口：只接受 SELECT/WITH/EXPLAIN 开头的
+// 只读语句（PRAGMA 可改库状态，也拒绝），最多返回 maxRows 行，单元格按字节截断。
+// ponytail: 同名列在 map 里会互相覆盖——面板排查场景够用，需要精确对照时用列别名。
+func (s *Store) RunReadOnlyQuery(query string, maxRows int) (cols []string, rows []map[string]interface{}, truncated bool, err error) {
+	cleaned := stripSQLComments(query)
+	first := strings.ToLower(strings.TrimSpace(cleaned))
+	if !strings.HasPrefix(first, "select") && !strings.HasPrefix(first, "with") && !strings.HasPrefix(first, "explain") {
+		return nil, nil, false, errors.New("只允许 SELECT / WITH / EXPLAIN 开头的只读查询")
+	}
+	// 多语句防护：驱动可能一次执行多个语句（"SELECT 1; DROP TABLE ..."），只放行单条。
+	// 字符串字面量里的分号会被误判为多段——诊断控制台里直接报错重来即可，不值得写 SQL 词法。
+	segments := 0
+	for _, seg := range strings.Split(cleaned, ";") {
+		if strings.TrimSpace(seg) != "" {
+			segments++
+		}
+	}
+	if segments > 1 {
+		return nil, nil, false, errors.New("一次只允许执行一条查询语句")
+	}
+	rs, err := s.db.Query(cleaned)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	defer rs.Close()
+	cols, err = rs.Columns()
+	if err != nil {
+		return nil, nil, false, err
+	}
+	for rs.Next() {
+		if len(rows) >= maxRows {
+			truncated = true
+			break
+		}
+		vals := make([]interface{}, len(cols))
+		ptrs := make([]interface{}, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rs.Scan(ptrs...); err != nil {
+			return nil, nil, false, err
+		}
+		row := make(map[string]interface{}, len(cols))
+		for i, c := range cols {
+			if b, ok := vals[i].([]byte); ok {
+				row[c] = truncateSQLCell(string(b))
+			} else {
+				row[c] = vals[i]
+			}
+		}
+		rows = append(rows, row)
+	}
+	return cols, rows, truncated, rs.Err()
 }
 
 // RecordCacheProbe 记录一次可缓存请求的指纹：首见插入 hits=0，重复则 hits+1。

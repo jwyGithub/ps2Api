@@ -1,0 +1,38 @@
+<section class="page" id="page-sql">
+    <div class="p-8">
+      <div class="flex items-end justify-between mb-8 gap-6 flex-wrap">
+        <div>
+          <div class="text-[11px] font-semibold tracking-wider uppercase mb-2" style="color: var(--muted);">SQL Console</div>
+          <h1 class="hero-title">数据 <em>查询</em></h1>
+          <p class="mt-2 text-[14px]" style="color: var(--fg-2);">直接对 SQLite 执行只读 SELECT 查询（request_logs / accounts / alerts / settings 等表），最多返回 200 行。</p>
+        </div>
+      </div>
+
+      <div class="card p-6 mb-4">
+        <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+          <div class="flex items-center gap-2 flex-wrap" id="sqlPresets"></div>
+          <div class="flex items-center gap-2">
+            <span class="text-[11px]" style="color: var(--muted);">Ctrl/⌘+Enter 执行</span>
+            <button class="btn btn-primary" onclick="sqlRun()">执行查询</button>
+          </div>
+        </div>
+        <textarea id="sqlInput" class="input font-mono w-full" rows="8" spellcheck="false"
+          placeholder="SELECT datetime(created_at,'localtime') t, status, egress, error_message FROM request_logs ORDER BY created_at DESC LIMIT 50"
+          onkeydown="if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){event.preventDefault();sqlRun();}"></textarea>
+      </div>
+
+      <div class="card p-6">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="font-display text-[18px] font-medium">查询结果</h3>
+          <div class="text-[12px] font-mono" id="sqlMeta" style="color: var(--muted);">尚未执行查询</div>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="data-table">
+            <thead id="sqlHead"></thead>
+            <tbody id="sqlBody"></tbody>
+          </table>
+        </div>
+        <div id="sqlEmpty" class="text-[13px] py-8 text-center" style="color: var(--muted); display: none;">无结果行</div>
+      </div>
+    </div>
+  </section>

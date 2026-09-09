@@ -116,16 +116,44 @@ func TestCloudflareRejectionDetail(t *testing.T) {
 	h := http.Header{"Server": {"cloudflare"}, "Content-Type": {"text/html"}}
 	h.Set("Cf-Ray", "8b2c1d3e4f5a6b7c-SJC")
 	body := "<!doctype html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>"
-	detail := cloudflareRejectionDetail(http.StatusForbidden, h, body, 90*1024)
+	// 出站体超软阈值以触发体积提示行；纯后端代码 → 签名计数给出「未检出」结论。
+	outbound := strings.Repeat("func main() { fmt.Println(`hi`) } ", 3000)
+	detail := cloudflareRejectionDetail(http.StatusForbidden, h, body, outbound)
 
-	for _, want := range []string{"HTTP 状态: 403", "8b2c1d3e4f5a6b7c-SJC", "Attention Required", "触发 Cloudflare WAF"} {
+	for _, want := range []string{"HTTP 状态: 403", "8b2c1d3e4f5a6b7c-SJC", "Attention Required", "触发 Cloudflare WAF", "未检出 HTML/JS 注入类特征"} {
 		if !strings.Contains(detail, want) {
 			t.Fatalf("rejection detail missing %q\ngot: %s", want, detail)
 		}
 	}
 
-	// body 片段应优先取 <title> 而非整段 HTML
+	// body 片段应优先取 <title> 而非整段 HTML（签名计数针对出站体，不含响应体）。
 	if strings.Contains(detail, "doctype") {
 		t.Fatalf("snippet should prefer <title>, not raw HTML: %s", detail)
+	}
+}
+
+func TestWafSignatureSummaryCountsEscapedAndRaw(t *testing.T) {
+	// Go json.Marshal 把 < > & 转成六字符转义序列，原文与转义两种形态都应被计数。
+	raw := `{"query":"<script>alert(1)</script>"}`
+	esc := strings.ReplaceAll(raw, "<", "\\u003c")
+	for _, body := range []string{raw, esc} {
+		if got := wafSignatureSummary(body); !strings.Contains(got, "<script ×1") {
+			t.Fatalf("expected <script hit in %q, got: %s", body, got)
+		}
+	}
+	// 事件处理器与 javascript: URI（前端 JSX/Vue 常见形态）。
+	frontend := `{"q":"<img src=x onerror=alert(1)> <div onClick={go}> javascript:void(0)"}` + "<svg"
+	got := wafSignatureSummary(frontend)
+	for _, want := range []string{"onerror= ×1", "onclick= ×1", "javascript: ×1", "<svg ×1"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("signature summary missing %q, got: %s", want, got)
+		}
+	}
+	// 纯后端代码无签名 → 明确「未检出」结论，提示排查其他维度。
+	if got := wafSignatureSummary(`func main() { println("hi") }`); !strings.Contains(got, "未检出") {
+		t.Fatalf("expected no-signature verdict, got: %s", got)
+	}
+	if wafSignatureSummary("") != "" {
+		t.Fatal("empty body should return empty summary")
 	}
 }

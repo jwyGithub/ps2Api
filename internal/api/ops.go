@@ -3,10 +3,12 @@
 package api
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"ps2api/internal/dashboard"
 )
@@ -80,6 +82,31 @@ func (s *Server) requestLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonWrite(w, 200, map[string]interface{}{"data": logs, "total": total, "page": page, "pageSize": pageSize, "grouped": true})
+}
+
+// sqlQuery 面板「数据查询」页：对 SQLite 执行只读查询（SELECT/WITH/EXPLAIN），
+// 最多 200 行、单元格超长截断；写操作与 PRAGMA 一律拒绝（见 store.RunReadOnlyQuery）。
+func (s *Server) sqlQuery(w http.ResponseWriter, r *http.Request) {
+	if !s.auth(w, r) {
+		return
+	}
+	var body struct {
+		SQL string `json:"sql"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil || strings.TrimSpace(body.SQL) == "" {
+		jsonError(w, 400, `请求体需为 {"sql":"SELECT ..."}`, "invalid_request_error")
+		return
+	}
+	started := time.Now()
+	cols, rows, truncated, err := s.Store.RunReadOnlyQuery(body.SQL, 200)
+	if err != nil {
+		jsonError(w, 400, err.Error(), "invalid_request_error")
+		return
+	}
+	jsonWrite(w, 200, map[string]interface{}{
+		"columns": cols, "rows": rows, "count": len(rows),
+		"truncated": truncated, "elapsedMs": time.Since(started).Milliseconds(),
+	})
 }
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {

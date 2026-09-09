@@ -22,6 +22,11 @@ func (r *Router) alertRequestRejected(acc *store.Account, res *provider.Result) 
 		if dist, err := r.Store.Cloudflare403BodySizeSummary(60 * time.Minute); err == nil && dist != "" {
 			msg += "\n\n" + dist
 		}
+		// 签名对比：验证 403 与出站体内容形状（HTML/JS 标记，典型为前端源码）的
+		// 相关性，区分「内容规则命中」与「体积/IP/账号」诱因。
+		if sig, err := r.Store.Cloudflare403SignatureSummary(60 * time.Minute); err == nil && sig != "" {
+			msg += "\n\n" + sig
+		}
 	}
 	_ = r.Store.CreateAlert("warning", title, msg, "account", &acc.ID, "gateway_rejected")
 }

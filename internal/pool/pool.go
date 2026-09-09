@@ -222,6 +222,13 @@ func (p *Pool) MarkGatewayBlocked(id int64, d time.Duration) {
 	p.gatewayCooldown[id] = time.Now().Add(d)
 }
 
+// GatewayCooled 报告账号当前是否处于网关冷却窗口内（诊断/测试用）。
+func (p *Pool) GatewayCooled(id int64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return time.Now().Before(p.gatewayCooldown[id])
+}
+
 func (p *Pool) Done(id int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

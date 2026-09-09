@@ -179,7 +179,7 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 		res.GatewayBlocked = true
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2000))
 		Trace(ctx, "upstream.response.body", map[string]interface{}{"body": string(body), "account_id": acc.ID})
-		res.RejectionDetail = cloudflareRejectionDetail(resp.StatusCode, resp.Header, string(body), len(bodyBytes)) + "\n出口: " + egress
+		res.RejectionDetail = cloudflareRejectionDetail(resp.StatusCode, resp.Header, string(body), string(bodyBytes)) + "\n出口: " + egress
 		return fmt.Errorf("%s", res.Error)
 	}
 
@@ -220,7 +220,7 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 			if looksLikeHTML(line) {
 				res.Error = "Postman gateway rejected request (Cloudflare HTML in stream)"
 				res.RequestRejected = true
-				res.RejectionDetail = cloudflareRejectionDetail(resp.StatusCode, resp.Header, line, len(bodyBytes)) + "\n出口: " + egress
+				res.RejectionDetail = cloudflareRejectionDetail(resp.StatusCode, resp.Header, line, string(bodyBytes)) + "\n出口: " + egress
 				return fmt.Errorf("%s", res.Error)
 			}
 		}

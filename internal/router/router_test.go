@@ -187,6 +187,62 @@ func TestStreamCloudflare403ReturnsImmediatelyNoRetry(t *testing.T) {
 	}
 }
 
+// 403 冷却判别：出站体命中 WAF 特征 = 内容型拦截（同一内容换号必然复现）→ 不冷却账号；
+// 零特征 = 疑似风控型 → 保留冷却让号池降级让路。
+func TestStreamGatewayBlockedContentSignatureSkipsCooldown(t *testing.T) {
+	new403Router := func() *Router {
+		r := newTestRouter(t)
+		r.Provider.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			h := make(http.Header)
+			h.Set("Server", "cloudflare")
+			h.Set("Content-Type", "text/html; charset=UTF-8")
+			body := "<!doctype html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>"
+			return &http.Response{StatusCode: 403, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+		})}
+		return r
+	}
+
+	// 内容型：用户消息携带 <script> 标记 → 出站体特征计数 >0 → 不冷却任何账号。
+	r := new403Router()
+	_, _, err := r.Stream(context.Background(), &provider.ChatRequest{
+		Model: "claude-opus-4-8", Messages: []provider.ChatMessage{mustMsg(t, "user", "fix <script>alert(1)</script> in my page")},
+	}, func(delta provider.Delta) error { return nil })
+	if _, ok := err.(*RouteError); !ok {
+		t.Fatalf("expected *RouteError, got %T %v", err, err)
+	}
+	accounts, aerr := r.Store.ListAccounts()
+	if aerr != nil || len(accounts) != 2 {
+		t.Fatalf("accounts=%v err=%v", accounts, aerr)
+	}
+	for _, acc := range accounts {
+		if r.Pool.GatewayCooled(acc.ID) {
+			t.Fatalf("content-signature 403 must not cool account %s: content repeats on any account", acc.Email)
+		}
+	}
+
+	// 风控型：普通消息零特征 → 冷却被拦账号（恰好 1 个）。
+	r = new403Router()
+	_, _, err = r.Stream(context.Background(), &provider.ChatRequest{
+		Model: "claude-opus-4-8", Messages: []provider.ChatMessage{mustMsg(t, "user", "hello")},
+	}, func(delta provider.Delta) error { return nil })
+	if _, ok := err.(*RouteError); !ok {
+		t.Fatalf("expected *RouteError, got %T %v", err, err)
+	}
+	accounts, aerr = r.Store.ListAccounts()
+	if aerr != nil || len(accounts) != 2 {
+		t.Fatalf("accounts=%v err=%v", accounts, aerr)
+	}
+	cooled := 0
+	for _, acc := range accounts {
+		if r.Pool.GatewayCooled(acc.ID) {
+			cooled++
+		}
+	}
+	if cooled != 1 {
+		t.Fatalf("risk-control 403 should cool exactly 1 account, got %d", cooled)
+	}
+}
+
 // 网关(Cloudflare 403)拦截不再跨账号 failover：遇到即终止,只打一次上游即返回 GatewayBlocked,
 // 绝不切到第二个账号；被拦账号也不应被标记 error/exhausted(它健康,仅进入路由层冷却)。
 func TestStreamGatewayBlockedDoesNotFailOver(t *testing.T) {

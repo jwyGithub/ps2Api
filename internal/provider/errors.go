@@ -83,15 +83,77 @@ func parseRateLimit(headers http.Header, now time.Time) *RateLimit {
 	return rate
 }
 
-// cloudflareRejectionDetail 汇总一条可读的 403 排查上下文：出站请求体大小、
-// Cloudflare Ray ID、命中的 WAF 规则头，以及拦截页正文里的关键行。用于写入告警，
-// 让排查者不必翻日志就能判断诱因（如超大 body 触发 WAF、账号被封、规则误伤等）。
-func cloudflareRejectionDetail(status int, headers http.Header, body string, reqBodyBytes int) string {
+// wafSignatureProbes 是出站请求体中可能命中 Cloudflare WAF 托管内容规则（XSS/HTML 注入
+// 规则族）的子串特征，全小写、大小写不敏感计数。用于 403 取证：验证「前端源码里的
+// HTML/JS 标记文本触发拦截」假设（前端项目 100% 被拦、Java/Rust/Go 项目从不被拦，
+// 唯一稳定变量就是 tool_result 回传的文件内容形状）。
+var wafSignatureProbes = []string{
+	"<script", "<iframe", "<svg", "<template", "<!doctype",
+	"onerror=", "onload=", "onclick=", "onchange=", "javascript:", "v-on:", "@click",
+}
+
+// normalizeWafBody 做小写化并还原 Go json.Marshal 对 < > & 的六字符 unicode 转义，
+// 供出站体签名计数使用。
+func normalizeWafBody(outboundBody string) string {
+	normalized := strings.ToLower(outboundBody)
+	normalized = strings.ReplaceAll(normalized, "\\u003c", "<")
+	normalized = strings.ReplaceAll(normalized, "\\u003e", ">")
+	return strings.ReplaceAll(normalized, "\\u0026", "&")
+}
+
+// WafSignatureHitCount 统计出站请求体里 WAF 可疑特征的出现总数（0 = 出站体不含
+// HTML/JS 注入类特征）。router 在网关 403 时据此区分两类拦截：>0 为内容型（内容
+// 确定性命中 Cloudflare 托管规则，重试/换号/换 IP 必然复现，冷却账号只是白烧号池
+// 容量）；0 为疑似风控型（评分/速率，账号维度的冷却仍有意义）。与 wafSignatureSummary
+// 用同一特征表、同一归一化。
+func WafSignatureHitCount(outboundBody string) int {
+	if outboundBody == "" {
+		return 0
+	}
+	normalized := normalizeWafBody(outboundBody)
+	total := 0
+	for _, probe := range wafSignatureProbes {
+		total += strings.Count(normalized, probe)
+	}
+	return total
+}
+
+// wafSignatureSummary 统计出站请求体里各 WAF 可疑特征的出现次数，返回一行取证文本。
+// 若 Cloudflare 是解码后匹配，被拦请求应大量出现特征；若零特征仍被拦，则说明拦截
+// 另有诱因（IP/账号/速率），这正是取证要区分的问题。
+func wafSignatureSummary(outboundBody string) string {
+	if outboundBody == "" {
+		return ""
+	}
+	normalized := normalizeWafBody(outboundBody)
+	var hits []string
+	total := 0
+	for _, probe := range wafSignatureProbes {
+		if n := strings.Count(normalized, probe); n > 0 {
+			hits = append(hits, fmt.Sprintf("%s ×%d", probe, n))
+			total += n
+		}
+	}
+	if total == 0 {
+		return "出站体特征: 未检出 HTML/JS 注入类特征——拦截诱因可能不是内容形状，建议排查 IP/账号/速率维度"
+	}
+	return "出站体特征(HTML/JS 注入类特征计数, 合计 " + strconv.Itoa(total) + "): " + strings.Join(hits, ", ")
+}
+
+// cloudflareRejectionDetail 汇总一条可读的 403 排查上下文：出站请求体大小、出站体里的
+// HTML/JS 注入特征计数、Cloudflare Ray ID、命中的 WAF 规则头，以及拦截页正文里的关键行。
+// 用于写入告警，让排查者不必翻日志就能判断诱因（前端源码标记触发内容规则、超大 body、
+// 账号被封、规则误伤等）。outboundBody 是本次出站请求体（JSON 原文）。
+func cloudflareRejectionDetail(status int, headers http.Header, respBody, outboundBody string) string {
+	reqBodyBytes := len(outboundBody)
 	var lines []string
 	lines = append(lines, fmt.Sprintf("HTTP 状态: %d", status))
 	lines = append(lines, fmt.Sprintf("出站请求体: %d 字节 (软告警阈值 %d 字节)", reqBodyBytes, MaxRequestBodyWarnBytes))
 	if reqBodyBytes > MaxRequestBodyWarnBytes {
 		lines = append(lines, "提示: 请求体超过软告警阈值，超大 payload 可能是触发 Cloudflare WAF 403 的加重因素之一（并非唯一诱因，需结合下方体积分布判断相关性）")
+	}
+	if sig := wafSignatureSummary(outboundBody); sig != "" {
+		lines = append(lines, sig)
 	}
 	if ray := strings.TrimSpace(headers.Get("Cf-Ray")); ray != "" {
 		lines = append(lines, "Cf-Ray: "+ray)
@@ -99,7 +161,7 @@ func cloudflareRejectionDetail(status int, headers http.Header, body string, req
 	if mitigated := strings.TrimSpace(headers.Get("Cf-Mitigated")); mitigated != "" {
 		lines = append(lines, "Cf-Mitigated: "+mitigated)
 	}
-	if snippet := cloudflareBodySnippet(body); snippet != "" {
+	if snippet := cloudflareBodySnippet(respBody); snippet != "" {
 		lines = append(lines, "响应体片段: "+snippet)
 	}
 	return strings.Join(lines, "\n")

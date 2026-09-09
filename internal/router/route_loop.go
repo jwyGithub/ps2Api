@@ -134,7 +134,13 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 			// 若已吐出过内容则 abort() 走「已开流」终止路径，避免重复输出。
 			provider.Trace(ctx, "router.gateway_blocked", plan.trace(map[string]interface{}{"account_id": acc.ID, "error": res.Error}, acc, true))
 			r.alertRequestRejected(acc, res)
-			r.Pool.MarkGatewayBlocked(acc.ID, r.gatewayCooldownDur())
+			// 出站体含 HTML/JS 注入特征 = 内容型 403：请求内容确定性命中 Cloudflare 托管
+			// 内容规则，同一内容换号/换 IP/重试必然复现（实测前端项目 100% 被拦、后端项目
+			// 从不被拦，换三个号全部 403）。冷却账号只是把无辜的号逐个烧掉——跳过冷却。
+			// 零特征 = 疑似风控型（评分/速率/账号维度），保留冷却让号池降级让路。
+			if provider.WafSignatureHitCount(res.UpstreamBody) == 0 {
+				r.Pool.MarkGatewayBlocked(acc.ID, r.gatewayCooldownDur())
+			}
 			if e, done := abort(); done {
 				return nil, nil, e
 			}

@@ -71,6 +71,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/request-logs", s.requestLogs)
 	mux.HandleFunc("GET /api/cache-probe", s.cacheProbe)
 	mux.HandleFunc("DELETE /api/cache-probe", s.cacheProbeReset)
+	mux.HandleFunc("POST /api/sql-query", s.sqlQuery)
 
 	// 面板静态资源（见 ops.go）
 	mux.HandleFunc("GET /dashboard.js", s.dashboardAsset)
