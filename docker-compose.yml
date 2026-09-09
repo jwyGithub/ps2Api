@@ -17,6 +17,11 @@ services:
       # 用独立 DB 索引 /1 + 键前缀 ps2api，与 sub2api 隔离，避免键冲突。
       - REDIS_URL=redis://sub2api-redis:6379/1
       - REDIS_KEY_PREFIX=ps2api
+      # 面板登录：ADMIN_PASSWORD 不设则关闭登录（保持无密码引导态）。
+      # 多副本或希望重启后会话不掉线时，再设一个固定的 GATEWAY_SESSION_SECRET。
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=change-me
+      # - GATEWAY_SESSION_SECRET=<openssl rand -hex 32>
       # - REDIS_CONV_TTL=72h      # 会话映射存活时长，0/off/none/never 表示永不过期
     networks:
       - default

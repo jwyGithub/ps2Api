@@ -1117,6 +1117,10 @@
   };
 
   window.loadDashboard = loadAll;
+  // 退出面板登录：清会话 Cookie 后回登录页（401 说明会话已失效，也照样跳）。
+  window.logout = function () {
+    fetch('/api/logout', {method:'POST'}).catch(function(){}).finally(function(){ window.location.href = '/login'; });
+  };
   window.toggleNotif = function () { toast((state.alertSummary.open || 0) ? '有 ' + state.alertSummary.open + ' 条未处理告警' : '暂无未处理告警'); };
   window.toggleCacheProbe = function () {
     var next = state.cacheProbe && state.cacheProbe.enabled ? 'false' : 'true';

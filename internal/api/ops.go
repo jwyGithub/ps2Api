@@ -34,6 +34,9 @@ func (s *Server) cacheProbeReset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
+	if !s.auth(w, r) {
+		return
+	}
 	v, e := s.Store.GetStats()
 	if e != nil {
 		jsonError(w, 500, e.Error(), "internal_error")
@@ -42,6 +45,9 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 	jsonWrite(w, 200, v)
 }
 func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
+	if !s.auth(w, r) {
+		return
+	}
 	limit := 100
 	if v, _ := s.Store.GetSetting("log_retention"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 5000 {
@@ -109,9 +115,30 @@ func (s *Server) sqlQuery(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// loginPage 提供面板登录页（static/login.html）。登录未开启或已持有效会话时
+// 直接回面板首页。
+func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
+	if !loginEnabled() || validSession(r) {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	data, err := dashboard.Files.ReadFile("static/login.html")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(data)
+}
+
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" && r.URL.Path != "/index.html" {
 		http.NotFound(w, r)
+		return
+	}
+	// 登录开启且无有效会话：跳登录页（/v1/* 与 /health 不受影响）。
+	if loginEnabled() && !validSession(r) {
+		http.Redirect(w, r, "/login", http.StatusFound)
 		return
 	}
 	data, err := dashboard.Files.ReadFile("static/index.html")

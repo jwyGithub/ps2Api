@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>登录 · Postman2API</title>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,500;0,9..144,700&family=Manrope:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #F5F2EC;
+      --card: #FFFFFF;
+      --fg: #0E1116;
+      --fg-2: #4A5159;
+      --muted: #8A8F96;
+      --border: #E5E1D7;
+      --border-strong: #D8D3C5;
+      --accent: #0B3D2E;
+      --accent-2: #15624A;
+      --gold: #C2410C;
+      --gold-2: #EA580C;
+      --danger: #B91C1C;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      font-family: 'Manrope', -apple-system, sans-serif;
+      background: var(--bg);
+      background-image:
+        radial-gradient(ellipse 900px 500px at 15% 0%, rgba(11,61,46,0.06), transparent 60%),
+        radial-gradient(ellipse 700px 400px at 85% 100%, rgba(194,65,12,0.035), transparent 60%);
+      color: var(--fg);
+      -webkit-font-smoothing: antialiased;
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh; padding: 24px;
+    }
+    .font-display { font-family: 'Fraunces', serif; }
+    .font-mono { font-family: 'JetBrains Mono', monospace; }
+
+    .shell { width: 100%; max-width: 400px; animation: rise .5s cubic-bezier(.4,0,.2,1) both; }
+    @keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+
+    .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; }
+    .brand-mark {
+      width: 44px; height: 44px; border-radius: 13px; flex: none;
+      display: flex; align-items: center; justify-content: center;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      box-shadow: 0 8px 20px -6px rgba(11,61,46,.45);
+    }
+    .brand-name { font-family: 'Fraunces', serif; font-weight: 700; font-size: 21px; line-height: 1.1; }
+    .brand-sub { font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: var(--muted); margin-top: 3px; }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: 0 20px 40px -10px rgba(14,17,22,.08), 0 8px 16px -4px rgba(14,17,22,.04);
+      padding: 30px 28px 26px;
+    }
+    .card-title { font-family: 'Fraunces', serif; font-weight: 700; font-size: 22px; }
+    .card-sub { font-size: 13px; color: var(--fg-2); margin: 6px 0 22px; }
+
+    .field { margin-bottom: 14px; }
+    .field label { display: block; font-size: 12px; font-weight: 600; color: var(--fg-2); margin-bottom: 6px; }
+    .field input {
+      width: 100%; height: 42px; padding: 0 13px;
+      font-family: 'Manrope', sans-serif; font-size: 14px; color: var(--fg);
+      background: var(--bg); border: 1px solid var(--border-strong); border-radius: 10px;
+      outline: none; transition: border-color .18s, box-shadow .18s;
+    }
+    .field input::placeholder { color: var(--muted); }
+    .field input:focus {
+      border-color: var(--accent-2);
+      box-shadow: 0 0 0 3px rgba(21,98,74,.12);
+      background: #fff;
+    }
+
+    .submit {
+      width: 100%; height: 44px; margin-top: 8px;
+      font-family: 'Manrope', sans-serif; font-size: 14px; font-weight: 700; letter-spacing: .02em;
+      color: #fff; background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      border: none; border-radius: 10px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      box-shadow: 0 8px 18px -6px rgba(11,61,46,.5);
+      transition: transform .15s, box-shadow .15s, opacity .15s;
+    }
+    .submit:hover { transform: translateY(-1px); box-shadow: 0 12px 24px -6px rgba(11,61,46,.55); }
+    .submit:active { transform: none; }
+    .submit:disabled { opacity: .65; cursor: wait; transform: none; }
+
+    .error {
+      display: none; align-items: center; gap: 8px;
+      font-size: 12.5px; color: var(--danger);
+      background: rgba(185,28,28,.06); border: 1px solid rgba(185,28,28,.18);
+      border-radius: 9px; padding: 9px 12px; margin-bottom: 14px;
+    }
+    .error.show { display: flex; animation: shake .35s; }
+    @keyframes shake {
+      20% { transform: translateX(-5px); } 40% { transform: translateX(4px); }
+      60% { transform: translateX(-3px); } 80% { transform: translateX(2px); }
+    }
+
+    .foot {
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+      font-size: 11.5px; color: var(--muted); margin-top: 18px;
+    }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: #15803D; animation: pulse 2.2s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="brand">
+      <div class="brand-mark">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+      </div>
+      <div>
+        <div class="brand-name">Postman2API</div>
+        <div class="brand-sub">Control Plane</div>
+      </div>
+    </div>
+
+    <form class="card" id="loginForm" method="post" action="/api/login">
+      <div class="card-title">欢迎回来</div>
+      <div class="card-sub">请登录以进入管理控制台</div>
+
+      <div class="error" id="error">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+        <span id="errorText">账号或密码错误</span>
+      </div>
+
+      <div class="field">
+        <label for="username">账号</label>
+        <input id="username" name="username" type="text" autocomplete="username" autofocus placeholder="admin" required>
+      </div>
+      <div class="field">
+        <label for="password">密码</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" placeholder="••••••••" required>
+      </div>
+
+      <button class="submit" type="submit" id="submitBtn">
+        登 录
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+      </button>
+    </form>
+
+    <div class="foot"><span class="dot"></span> 服务运行正常 · 受保护区域</div>
+  </div>
+
+  <script>
+    (function () {
+      var form = document.getElementById('loginForm');
+      var err = document.getElementById('error');
+      var errText = document.getElementById('errorText');
+      var btn = document.getElementById('submitBtn');
+      form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        err.classList.remove('show');
+        btn.disabled = true;
+        fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: document.getElementById('username').value,
+            password: document.getElementById('password').value
+          })
+        }).then(function (r) {
+          return r.json().then(function (data) { return { ok: r.ok, data: data }; });
+        }).then(function (res) {
+          if (res.ok) { window.location.href = '/'; return; }
+          errText.textContent = (res.data && res.data.error && res.data.error.message) || '账号或密码错误';
+          err.classList.remove('show'); void err.offsetWidth; err.classList.add('show');
+          btn.disabled = false;
+        }).catch(function () {
+          errText.textContent = '网络错误，请重试';
+          err.classList.add('show');
+          btn.disabled = false;
+        });
+      });
+    }());
+  </script>
+</body>
+</html>

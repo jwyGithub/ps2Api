@@ -73,6 +73,11 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/cache-probe", s.cacheProbeReset)
 	mux.HandleFunc("POST /api/sql-query", s.sqlQuery)
 
+	// 面板登录（见 login.go）：ADMIN_PASSWORD 设置后生效
+	mux.HandleFunc("GET /login", s.loginPage)
+	mux.HandleFunc("POST /api/login", s.login)
+	mux.HandleFunc("POST /api/logout", s.logout)
+
 	// 面板静态资源（见 ops.go）
 	mux.HandleFunc("GET /dashboard.js", s.dashboardAsset)
 	mux.HandleFunc("GET /dashboard/", s.dashboardStatic)
@@ -83,6 +88,11 @@ func (s *Server) auth(w http.ResponseWriter, r *http.Request) bool {
 	key := s.apiKey()
 	// 未设置 API Key 时不鉴权（首次进面板设置前的引导态）。
 	if key == "" {
+		return true
+	}
+	// 面板登录会话（/login 签发的 Cookie）只对面板端点 /api/* 生效：
+	// /v1/* 是对外模型协议，鉴权语义必须只有 Bearer/x-api-key，不认浏览器会话。
+	if strings.HasPrefix(r.URL.Path, "/api/") && validSession(r) {
 		return true
 	}
 	// 同时接受两种鉴权头：OpenAI 风格 Authorization: Bearer <key>，
