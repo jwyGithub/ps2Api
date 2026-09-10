@@ -54,13 +54,18 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 		attempts = 1
 	}
 	// maxAttempts 是循环硬上限：普通失败重试(超时/5xx/限流/额度)占用 attempts 额度。
-	// 网关(Cloudflare 403)拦截不再重试——遇到即终止并返回 529，既不占用也不扩展该预算。
+	// 网关(Cloudflare 403)拦截按特征二分（见下方 GatewayBlocked 分支）：出站体带 HTML/JS
+	// 特征 = 内容型，确定性复现，不重试即终止；零特征 = 概率型边缘拦截（实测 2026-09-10：
+	// 同账号+同出口+同 body 秒级重发即成功），允许一次重试（gwRetried 控制，经 maxAttempts++
+	// 扩一档预算，不挤占普通重试额度）。
 	maxAttempts := attempts
 	// egressSeq 是「当前账号」的出口序号，与全局 attempt 解耦：同账号重试时递增以轮换代理
 	// 出口 IP；一旦跨账号 failover 换号就归零，让新账号从自身粘性出口重新走代理池——绝不因
 	// 全局重试数堆高而越过所有出口(egressAttempt>=N)回退本机直连(换号往往因 403，直连必再被拦)。
 	egressSeq := 0
 	var prevAcc int64
+	// gwRetried 标记本次请求已用过「零特征 403」的那一次重试额度（见下方 GatewayBlocked 分支）。
+	gwRetried := false
 
 	// abort returns a hard-fail result once stream output has begun: retrying
 	// would duplicate already-flushed deltas. It is a no-op for Chat, whose
@@ -117,19 +122,28 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 			return nil, nil, &RouteError{Message: last}
 		}
 		if res.GatewayBlocked {
-			// 网关错误（上游 Cloudflare 风控：WAF/Bot 评分/速率 → 403）：不重试、不换号、不轮换出口，
-			// 直接终止当前对话并返回网关拦截错误。HTTP 层据 GatewayBlocked 把状态码映射为 529。
-			// 仍记录告警并把账号置入网关冷却窗口（供号池健康调度用，非重试）。
+			// 网关错误（上游 Cloudflare 风控 → 403）按出站体特征二分：
+			//   - 含 HTML/JS 注入特征 = 内容型：同一内容换号/换 IP/重试必然复现（实测前端项目
+			//     100% 被拦、后端项目从不被拦），不重试、不冷却，直接终止并返回 529。
+			//   - 零特征 = 概率型边缘拦截（Bot 评分/随机挑战；实测 2026-09-10 同账号+同出口+
+			//     同 body 秒级重发即成功，单发拦截率 ~8%）：冷却账号让号池降级，并允许一次
+			//     重试——续聊经会话粘性回原号（egressSeq 递增换出口 IP），新对话回号池会
+			//     跳过刚冷却的号（等效换号重试）。重试一次仍 403 才终止（连续拦截 ≈0.6%），
+			//     剩余尾巴由客户端 SDK 对 529 的退避重试兜底。
 			// 流式下：延迟开流（首个 delta 前不落 200 / 不发事件）保证网关 403 时 emitted 仍为 false；
 			// 若已吐出过内容则 abort() 走「已开流」终止路径，避免重复输出。
 			provider.Trace(ctx, "router.gateway_blocked", plan.trace(map[string]interface{}{"account_id": acc.ID, "error": res.Error}, acc, true))
 			r.alertRequestRejected(acc, res)
-			// 出站体含 HTML/JS 注入特征 = 内容型 403：请求内容确定性命中 Cloudflare 托管
-			// 内容规则，同一内容换号/换 IP/重试必然复现（实测前端项目 100% 被拦、后端项目
-			// 从不被拦，换三个号全部 403）。冷却账号只是把无辜的号逐个烧掉——跳过冷却。
-			// 零特征 = 疑似风控型（评分/速率/账号维度），保留冷却让号池降级让路。
 			if provider.WafSignatureHitCount(res.UpstreamBody) == 0 {
 				r.Pool.MarkGatewayBlocked(acc.ID, r.gatewayCooldownDur())
+				if !gwRetried {
+					if e, done := abort(); done {
+						return nil, nil, e
+					}
+					gwRetried = true
+					maxAttempts++
+					continue
+				}
 			}
 			if e, done := abort(); done {
 				return nil, nil, e

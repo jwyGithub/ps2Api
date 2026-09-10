@@ -147,9 +147,10 @@ func TestStickyFallsBackWhenAccountDisabled(t *testing.T) {
 	}
 }
 
-// Cloudflare 403(HTML 风控拦截)归类为 GatewayBlocked：不再重试/换号，遇到即终止当前对话，
-// 只打一次上游即返回 GatewayBlocked 错误(HTTP 层映射为 529)，不向客户端 emit 任何增量，且写入一条告警。
-func TestStreamCloudflare403ReturnsImmediatelyNoRetry(t *testing.T) {
+// Cloudflare 403(HTML 风控拦截)归类为 GatewayBlocked：零特征（概率型边缘拦截）时允许一次
+// 重试后终止——共打两次上游即返回 GatewayBlocked 错误(HTTP 层映射为 529)，不向客户端 emit
+// 任何增量，且写入一条告警。
+func TestStreamCloudflare403RetriesOnceThenStops(t *testing.T) {
 	r := newTestRouter(t)
 	var calls int32
 	r.Provider.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -176,8 +177,8 @@ func TestStreamCloudflare403ReturnsImmediatelyNoRetry(t *testing.T) {
 	if !ok || !re.GatewayBlocked {
 		t.Fatalf("error should be *RouteError with GatewayBlocked=true, got %T %v", err, err)
 	}
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Fatalf("gateway block must not retry, expected exactly 1 upstream call, got %d", got)
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("zero-signature gateway block should retry exactly once: expected 2 upstream calls, got %d", got)
 	}
 	if output.Len() != 0 {
 		t.Fatalf("no output should be emitted to client on gateway block, got %q", output.String())
@@ -223,7 +224,7 @@ func TestStreamGatewayBlockedContentSignatureSkipsCooldown(t *testing.T) {
 		}
 	}
 
-	// 风控型：普通消息零特征 → 冷却被拦账号（恰好 1 个）。
+	// 风控型：普通消息零特征 → 一次重试(新对话换号)共 2 次 403，两个被拦账号都进入冷却。
 	r = new403Router()
 	_, _, err = r.Stream(context.Background(), &provider.ChatRequest{
 		Model: "claude-opus-4-8", Messages: []provider.ChatMessage{mustMsg(t, "user", "hello")},
@@ -241,13 +242,13 @@ func TestStreamGatewayBlockedContentSignatureSkipsCooldown(t *testing.T) {
 			cooled++
 		}
 	}
-	if cooled != 1 {
-		t.Fatalf("risk-control 403 should cool exactly 1 account, got %d", cooled)
+	if cooled != 2 {
+		t.Fatalf("risk-control 403 should cool both attempted accounts (1 retry), got %d", cooled)
 	}
 }
 
-// 网关(Cloudflare 403)拦截不再跨账号 failover：遇到即终止,只打一次上游即返回 GatewayBlocked,
-// 绝不切到第二个账号；被拦账号也不应被标记 error/exhausted(它健康,仅进入路由层冷却)。
+// 网关(Cloudflare 403)零特征拦截只允许一次重试：重试(新对话换号)仍 403 即终止,共两次上游,
+// 绝不切到第三个账号；被拦账号也不应被标记 error/exhausted(它健康,仅进入路由层冷却)。
 func TestStreamGatewayBlockedDoesNotFailOver(t *testing.T) {
 	r := newTestRouter(t)
 	accounts, err := r.Store.ListAccounts()
@@ -279,9 +280,9 @@ func TestStreamGatewayBlockedDoesNotFailOver(t *testing.T) {
 	if !ok || !re.GatewayBlocked {
 		t.Fatalf("error should be *RouteError with GatewayBlocked=true, got %T %v", err, err)
 	}
-	// 关键：只打一次上游即返回,绝不 failover 到第二个账号。
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Fatalf("gateway block must not fail over to another account, expected 1 upstream call, got %d", got)
+	// 关键：零特征 403 只允许一次重试(共 2 次上游)，重试仍 403 即终止,绝不逐账号空转。
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("gateway block must stop after one retry: expected 2 upstream calls, got %d", got)
 	}
 	if output.Len() != 0 {
 		t.Fatalf("no output should be emitted to client on gateway block, got %q", output.String())
@@ -333,10 +334,9 @@ func TestStreamAllAccountsBlockedReturnsClearError(t *testing.T) {
 	if !strings.Contains(re.Message, "403") {
 		t.Fatalf("error message should clearly mention the 403 gateway block, got %q", re.Message)
 	}
-	// failover 逐个排除被拦账号：2 个账号各被试一次(共 2 次 403)后账号耗尽,不再空转。
-	// 网关拦截不再重试/换号：只打一次上游即返回,不再逐个试其余账号。
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Fatalf("gateway block must not retry, expected exactly 1 upstream call, got %d", got)
+	// 零特征 403：允许一次重试（新对话换号），2 次均被拦后终止，不再空转。
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("zero-signature gateway block should retry exactly once: expected 2 upstream calls, got %d", got)
 	}
 }
 
@@ -384,9 +384,8 @@ func TestStreamBlockedAccountSwitchesAndDisablesBeforeOutput(t *testing.T) {
 	}
 }
 
-// 网关拦截(Cloudflare 403)诱因是有状态的 WAF/Bot 风控而非账号身份:重试同号大概率仍被拦、
-// 换号又会丢掉 Postman 服务端会话上下文并把错误传染给一批号。故新契约是「不重试、不换号,
-// 立即返回网关拦截错误」(HTTP 层映射为 529),仅把该号置入网关冷却窗口供健康调度,不判为异常。
+// 网关拦截(Cloudflare 403)诱因是有状态的 WAF/Bot 风控而非账号身份。契约:零特征拦截允许
+// 一次重试后终止(共两次上游),不逐号空转;被拦账号仅进入网关冷却窗口,不判为异常。
 func TestStreamGatewayBlockedReturnsImmediatelyNoRetry(t *testing.T) {
 	r := newTestRouter(t)
 	accounts, err := r.Store.ListAccounts()
@@ -428,8 +427,8 @@ func TestStreamGatewayBlockedReturnsImmediatelyNoRetry(t *testing.T) {
 	if !ok || !re.GatewayBlocked {
 		t.Fatalf("error should be *RouteError with GatewayBlocked=true, got %T %v", err, err)
 	}
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Fatalf("gateway block must NOT retry: expected exactly 1 upstream call, got %d", got)
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("gateway block must stop after one retry: expected 2 upstream calls, got %d", got)
 	}
 	if output.Len() != 0 {
 		t.Fatalf("no output should be emitted to client on gateway block, got %q", output.String())
@@ -442,8 +441,8 @@ func TestStreamGatewayBlockedReturnsImmediatelyNoRetry(t *testing.T) {
 }
 
 // 回归：续聊(有可复用历史)遇网关 403 时，绝不换号——换号会丢失 Postman 服务端会话上下文
-// （请求被降级为 USER_QUERY 且历史被截断），并把同一错误传染给其它健康账号。新契约:不重试、
-// 不换号，立即返回网关拦截错误。同时断言 req.Messages 未被就地改写（保住指纹 → 维持
+// （请求被降级为 USER_QUERY 且历史被截断），并把同一错误传染给其它健康账号。零特征 403 的
+// 那一次重试经会话粘性回原号。同时断言 req.Messages 未被就地改写（保住指纹 → 维持
 // TOOL_RESPONSE + conversationId），即从源头杜绝「压缩改写 → 破坏指纹 → 换号 → 降级失忆」。
 func TestStreamGatewayBlockedContinuationNoFailoverNoDowngrade(t *testing.T) {
 	r := newTestRouter(t)
@@ -480,7 +479,7 @@ func TestStreamGatewayBlockedContinuationNoFailoverNoDowngrade(t *testing.T) {
 				"data: [DONE]\n\n"
 			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
 		}
-		// 原账号(token-1)始终被 Cloudflare 拦截:新契约下不重试、不换号,立即返回。
+		// 原账号(token-1)始终被 Cloudflare 拦截:零特征 403 原号重试一次,仍拦即终止、绝不换号。
 		atomic.AddInt32(&token1Calls, 1)
 		h := make(http.Header)
 		h.Set("Server", "cloudflare")
@@ -506,8 +505,8 @@ func TestStreamGatewayBlockedContinuationNoFailoverNoDowngrade(t *testing.T) {
 	if n := atomic.LoadInt32(&token2Calls); n != 0 {
 		t.Fatalf("must NOT fail over to the other account on a continuation (would lose server-side session), but token-2 was called %d time(s)", n)
 	}
-	if n := atomic.LoadInt32(&token1Calls); n != 1 {
-		t.Fatalf("expected exactly 1 call to the original account (no retry on gateway block), got %d", n)
+	if n := atomic.LoadInt32(&token1Calls); n != 2 {
+		t.Fatalf("expected exactly 2 calls to the original account (zero-signature 403 retries once on the same account), got %d", n)
 	}
 	if output.Len() != 0 {
 		t.Fatalf("no output should be emitted to client on gateway block, got %q", output.String())
@@ -521,8 +520,8 @@ func TestStreamGatewayBlockedContinuationNoFailoverNoDowngrade(t *testing.T) {
 	}
 }
 
-// 网关拦截(Cloudflare 403)绝不跨账号 failover:换号既大概率同样被 WAF 拦、又会把错误传染给
-// 一批健康账号并丢失会话上下文。新契约下无论号池多大,遇网关拦截都只打一次上游、立即返回 403。
+// 网关拦截(Cloudflare 403)不逐账号 failover:换号既大概率同样被 WAF 拦、又会把错误传染给
+// 一批健康账号并丢失会话上下文。无论号池多大,零特征 403 只重试一次(共两次上游)后立即终止。
 func TestStreamGatewayBlockedNoFailoverAcrossAccounts(t *testing.T) {
 	r := newTestRouter(t)
 	// 扩充到 5 个账号:即便有大量可用号,网关拦截也不得逐个换号兜底。
@@ -558,9 +557,9 @@ func TestStreamGatewayBlockedNoFailoverAcrossAccounts(t *testing.T) {
 	if !ok || !re.GatewayBlocked {
 		t.Fatalf("error should be *RouteError with GatewayBlocked=true, got %T %v", err, err)
 	}
-	// 关键断言:无论号池多大,网关拦截只打一次上游、绝不换号。
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Fatalf("gateway block must NOT fail over across accounts: expected exactly 1 upstream call, got %d", got)
+	// 关键断言:无论号池多大,零特征 403 只重试一次(共 2 次上游)、绝不逐号空转。
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("gateway block must stop after one retry regardless of pool size: expected 2 upstream calls, got %d", got)
 	}
 	if output.Len() != 0 {
 		t.Fatalf("no output should be emitted to client on gateway block, got %q", output.String())
@@ -854,5 +853,44 @@ func TestNextEgressSeqResetsOnAccountSwitch(t *testing.T) {
 	}
 	if got := nextEgressSeq(100, 7, 3, false); got != 0 {
 		t.Fatalf("account switch must reset egress seq regardless of how high the previous seq was, got %d", got)
+	}
+}
+
+// 零特征(概率型)403 的一次重试应能恢复：第一次上游 403(Cloudflare 风控页)、第二次成功，
+// 客户端拿到正常输出且不感知中间的 403。这是「网关内一次重试」修复的核心价值路径
+// （实测 2026-09-10：同账号+同出口+同 body 秒级重发即成功，单发拦截率 ~8%）。
+func TestStreamZeroSignature403RetryRecovers(t *testing.T) {
+	r := newTestRouter(t)
+	var calls int32
+	r.Provider.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			h := make(http.Header)
+			h.Set("Server", "cloudflare")
+			h.Set("Content-Type", "text/html; charset=UTF-8")
+			h.Set("Cf-Ray", "a2d562e1bc2349d4-LAX")
+			body := "<!doctype html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>"
+			return &http.Response{StatusCode: 403, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+		}
+		body := "data: {\"eventType\":\"conversation\",\"data\":{\"id\":\"conv-1\"}}\n\n" +
+			"data: {\"eventType\":\"textChunk\",\"data\":{\"textContent\":\"ok\"}}\n\n" +
+			"data: [DONE]\n\n"
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	})}
+
+	var output strings.Builder
+	res, _, err := r.Stream(context.Background(), &provider.ChatRequest{
+		Model: "claude-opus-4-8", Messages: []provider.ChatMessage{mustMsg(t, "user", "hello")},
+	}, func(delta provider.Delta) error {
+		output.WriteString(delta.Content)
+		return nil
+	})
+	if err != nil || res == nil || !res.Success {
+		t.Fatalf("retry after zero-signature 403 should recover: res=%+v err=%v", res, err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected exactly 2 upstream calls (403 then success), got %d", got)
+	}
+	if output.String() != "ok" {
+		t.Fatalf("client should see the retried output, got %q", output.String())
 	}
 }
