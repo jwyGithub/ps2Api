@@ -7,7 +7,8 @@ import (
 )
 
 // 会话指纹需要在"多轮之间"稳定。Claude Code 等无状态客户端每一轮都会把完整历史
-// 重发，并在其中注入随轮变化的包装块（<system-reminder>…、<total_tokens>… 及时间戳等）。
+// 重发，并在其中注入随轮变化的包装块（<system-reminder>…、<total_tokens>… 及时间戳等），
+// 流被切断后自动重试时还会注入一次性续写提示块（"Your response above was cut off..."）。
 // 若把这些易变片段计入指纹，历史前缀每轮都变 → LookupConversation 必然落空 → 退回被上游
 // 拒收的 seedingMessages 路径。这里在计算指纹前剥离这些易变包装，只保留稳定正文，
 // 使续聊能稳定命中同一个 Postman conversationId（对齐网页版靠 conversationId 续接的行为）。
@@ -27,7 +28,7 @@ func stableFingerprintText(s string) string {
 func conversationFingerprint(messages []ChatMessage) string {
 	parts := make([]string, 0, len(messages)*4)
 	for _, m := range messages {
-		parts = append(parts, m.Role, stableFingerprintText(ExtractText(m.Content)), m.ToolCallID, toolCallFingerprint(m))
+		parts = append(parts, m.Role, stableFingerprintText(ExtractStableText(m.Content)), m.ToolCallID, toolCallFingerprint(m))
 	}
 	return fingerprint(parts...)
 }
@@ -168,10 +169,11 @@ func trailingToolCallIDs(messages []ChatMessage) []string {
 }
 
 // InvalidateConversation 定点失效一个已损坏(空流被消费 / TOOL_CALL_NOT_FOUND)的 Postman
-// 会话：删掉指向该 conversationId 的会话映射与对应归属映射，以及本次请求携带的 pending
-// toolCallId 组映射。下一轮续聊会因 LookupConversation 落空而降级为 conversationId=null 的
-// USER_QUERY 重建，不再反复把已消费的 toolCallId 交回死会话。与账号级 ResetConversation 不同，
-// 这里只动这一个会话，绝不误伤同账号上并发的健康会话。
+// 会话：删掉指向该 conversationId 的会话映射，以及本次请求携带的 pending toolCallId 组映射。
+// 归属映射(fingerprint→账号)刻意保留：会话损坏丢的只是服务端上下文，粘性账号不变——下一轮
+// 续聊因 LookupConversation 落空而降级为 conversationId=null 的 USER_QUERY 回原账号重放一轮，
+// 回存干净指纹后即恢复增量模式，而不是每次会话损坏都换号冷启动。与账号级 ResetConversation
+// 不同，这里只动这一个会话，绝不误伤同账号上并发的健康会话。
 func (p *Provider) InvalidateConversation(accountID int64, messages []ChatMessage) {
 	convID := p.LookupConversation(accountID, messages)
 	if convID == "" {

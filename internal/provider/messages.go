@@ -189,8 +189,10 @@ func (p *Provider) splitMessages(messages []ChatMessage, convID string) splitRes
 	// 未命中任何会话（冷启动/首轮/指纹未命中）：
 	// 绝不使用 seedingMessages —— 上游 Postman 会以 INPUT_VALIDATION_ERROR/Forbidden 拒收
 	// （已由网页/桌面全量抓包证实：真实客户端多轮只靠 conversationId，从不发 seedingMessages）。
-	// 改为把完整历史线性折叠进单条 USER_QUERY（conversationId=null）。折叠本身不截断；
-	// 上游 10000 字符硬上限由出站前的 capUpstreamQuery 统一兜底（保头保尾、省略中段）。
+	// 改为把完整历史线性折叠进单条 USER_QUERY（conversationId=null）。折叠路径逐段设预算
+	// （system / 历史文本 / 待处理 tool-tail，见 types.go 的 Folded* 预算），且把「原始任务」
+	// 后置渲染在紧贴最新一轮的位置——这两点保证原始任务永远落在 capUpstreamQuery 的尾部
+	// 保留区，不再被巨型 system 消息挤进中段省略区（2026-09-10 线上事故）。
 	// 后续轮次靠稳定指纹命中 conversationId 后自动切回增量发送。
 	// 先数出折叠范围内的 tool-result 总条数，据此动态分摊单条预算：
 	// 条数少时每条留得多，多时自动收紧，避免固定单条上限在短会话浪费预算、长会话又超预算。
@@ -205,9 +207,22 @@ func (p *Provider) splitMessages(messages []ChatMessage, convID string) splitRes
 	}
 	perResultBudget := foldedToolResultBudget(foldedResultCount)
 
-	var contextParts []string
+	// 原始任务：折叠范围内首条非 tool-result 的 user 消息。它在时间序上离最新一轮最远，
+	// 中段省略时最先被吃掉，所以从时间序里拎出、后置渲染在 tail 之前，保住任务存活。
+	firstUserIdx := -1
 	for i, msg := range messages {
 		if i == queryIdx || i >= skipFrom {
+			continue
+		}
+		if msg.Role == "user" && !isAnthropicToolResult(msg) {
+			firstUserIdx = i
+			break
+		}
+	}
+
+	var contextParts []string
+	for i, msg := range messages {
+		if i == queryIdx || i == firstUserIdx || i >= skipFrom {
 			continue
 		}
 		if msg.Role == "tool" || isAnthropicToolResult(msg) {
@@ -222,16 +237,16 @@ func (p *Provider) splitMessages(messages []ChatMessage, convID string) splitRes
 		switch msg.Role {
 		case "system":
 			if text != "" {
-				contextParts = append(contextParts, "[System]\n"+text)
+				contextParts = append(contextParts, "[System]\n"+truncateMiddleRunes(text, FoldedSystemBudgetRunes))
 			}
 		case "user":
 			if text != "" {
-				contextParts = append(contextParts, "[User]\n"+text)
+				contextParts = append(contextParts, "[User]\n"+truncateMiddleRunes(text, FoldedTextMsgBudgetRunes))
 			}
 		case "assistant":
 			block := "[Assistant]"
 			if text != "" {
-				block = "[Assistant]\n" + text
+				block = "[Assistant]\n" + truncateMiddleRunes(text, FoldedTextMsgBudgetRunes)
 			}
 			if calls := formatAssistantToolCalls(msg.ToolCalls); calls != "" {
 				block += "\n\n" + calls
@@ -239,20 +254,28 @@ func (p *Provider) splitMessages(messages []ChatMessage, convID string) splitRes
 			contextParts = append(contextParts, block)
 		}
 	}
-	context := strings.Join(contextParts, "\n\n")
-	if context == "" {
-		return splitResult{Query: query}
-	}
-	// 折叠：历史在前，最新一轮在后。tool-tail 的 query 已是带指令的工具块，直接拼接；
+	// 折叠：历史在前，原始任务居中（后置渲染，紧贴最新一轮，落在 cap 的尾部保留区），
+	// 最新一轮在后。重放模式下待处理 tool-tail 也截预算（单条巨结果会吃光尾部窗口）；
 	// 普通对话把最新用户输入标注为 [User] 以保留角色边界。
+	sections := make([]string, 0, 3)
+	if context := strings.Join(contextParts, "\n\n"); context != "" {
+		sections = append(sections, context)
+	}
+	if firstUserIdx >= 0 {
+		if task := ExtractText(messages[firstUserIdx].Content); task != "" {
+			sections = append(sections, "[User (original task)]\n"+truncateMiddleRunes(task, FoldedTextMsgBudgetRunes))
+		}
+	}
 	tail := query
-	if !isToolTail && queryIdx >= 0 && query != "" {
+	if isToolTail {
+		tail = truncateMiddleRunes(query, FoldedTailToolResultRunes)
+	} else if queryIdx >= 0 && query != "" {
 		tail = "[User]\n" + query
 	}
 	if tail != "" {
-		context = context + "\n\n" + tail
+		sections = append(sections, tail)
 	}
-	return splitResult{Query: context}
+	return splitResult{Query: strings.Join(sections, "\n\n")}
 }
 
 // capUpstreamQuery 把出站 query 压进上游 MaxUpstreamQueryRunes（10000 字符）校验上限。

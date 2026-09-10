@@ -313,16 +313,21 @@ func TestBuildBodyCapsOversizedQueryToUpstreamLimit(t *testing.T) {
 		t.Fatalf("seedingMessages must not be used anymore")
 	}
 	// 上游对 input.query 有 10000 字符硬校验（实测），超限请求会被
-	// INPUT_VALIDATION_ERROR 拒收。封顶必须保头（系统提示）保尾（最新一轮）。
+	// INPUT_VALIDATION_ERROR 拒收。折叠路径现在对 system 消息截预算（保头保尾、
+	// 中段省略，见 FoldedSystemBudgetRunes），50K 的 system 不再需要落到
+	// capUpstreamQuery 的兜底截断，原始内容也无中段 omit 标记。
 	query := input["query"].(string)
 	if n := len([]rune(query)); n > MaxUpstreamQueryRunes {
 		t.Fatalf("query exceeds upstream limit: %d > %d", n, MaxUpstreamQueryRunes)
 	}
-	if !strings.Contains(query, "HEAD") || !strings.Contains(query, "hello") {
-		t.Fatalf("capped query lost head or latest turn: %q...", query[:80])
+	if !strings.Contains(query, "HEAD") || !strings.Contains(query, "TAIL") {
+		t.Fatalf("folded system must keep head and tail")
 	}
-	if !strings.Contains(query, "middle context omitted") {
-		t.Fatalf("capped query missing omission marker")
+	if !strings.Contains(query, "hello") {
+		t.Fatalf("capped query lost latest turn: %q...", query[:80])
+	}
+	if strings.Contains(query, strings.Repeat("x", 1000)) {
+		t.Fatalf("oversized system must be middle-truncated at fold time, not rendered in full")
 	}
 }
 
@@ -564,5 +569,118 @@ func TestStickyAccountAfterReset(t *testing.T) {
 	}
 	if id, ok := p.StickyAccount(cont); ok {
 		t.Fatalf("after ResetConversation account 3 must not be sticky, got %d", id)
+	}
+}
+
+// TestFingerprintIgnoresClientCutoffNotice 复现 2026-09-10 线上事故缺陷1：客户端流被切断后
+// 自动重试时，往本轮 user 消息里注入一次性续写提示块（"Your response above was cut off
+// mid-stream. ..."）——下一轮同一消息里该块即消失（system-reminder 块已被 stableFingerprintText
+// 剥掉，这个纯文本块没有）。计入指纹 → 该轮指纹带毒 → 下一轮前缀匹配必失配。修复：指纹
+// 计算按块跳过该提示，带毒轮回存的会话干净轮仍能命中。
+func TestFingerprintIgnoresClientCutoffNotice(t *testing.T) {
+	const toolResult = `[{"type":"tool_result","tool_use_id":"toolu_1","content":"res"}]`
+	withNotice := ChatMessage{Role: "user", Content: rawJSON(t, `[{"type":"tool_result","tool_use_id":"toolu_1","content":"res"},
+		{"type":"text","text":"<system-reminder>\n<total_tokens>1 tokens left</total_tokens>\n</system-reminder>"},
+		{"type":"text","text":"Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start."}]`)}
+	clean := ChatMessage{Role: "user", Content: rawJSON(t, toolResult)}
+	polluted := []ChatMessage{mustMsg(t, "user", "task"), mustMsg(t, "assistant", "ok"), withNotice}
+	cleaned := []ChatMessage{mustMsg(t, "user", "task"), mustMsg(t, "assistant", "ok"), clean}
+	if conversationFingerprint(polluted) != conversationFingerprint(cleaned) {
+		t.Fatalf("cutoff notice must not change the conversation fingerprint")
+	}
+	p := New()
+	p.setConversationID(1, polluted, "conv-x")
+	// 前缀游走只查严格前缀，下一轮历史 = 干净版 + 后续消息，其前缀即带毒轮的完整列表。
+	followup := append(append([]ChatMessage{}, cleaned...), mustMsg(t, "user", "next"))
+	if got := p.LookupConversation(1, followup); got != "conv-x" {
+		t.Fatalf("clean follow-up must still hit the conversation stored from the polluted turn, got %q", got)
+	}
+}
+
+// TestFoldedReplayKeepsOriginalTaskUnderOversizedHistory 复现 2026-09-10 线上事故形态：
+// 会话粘性断裂后每轮降级为全历史重放，42K 的 system 消息在折叠时不设预算全量渲染，
+// 把原始任务（首条 user 消息）挤进 capUpstreamQuery 的「中段省略」区——模型只见系统
+// 提示开头与最近的 tool results，于是回复「没有收到实际任务请求」。
+// 修复契约：重放折叠时 system 截预算、原始任务后置渲染（紧贴最新一轮，永远落在尾部
+// 保留区）、待处理 tool-tail 也截预算（防单条巨结果吃光尾部窗口）。
+func TestFoldedReplayKeepsOriginalTaskUnderOversizedHistory(t *testing.T) {
+	p := New()
+	sys := "SYS_HEAD " + strings.Repeat("s", 42000) + " SYS_TAIL"
+	sdk := strings.Repeat("d", 6500)
+	task := "TASK_MARKER 分析 openapi 调用返回 data 为 null 的原因"
+	userBlocks, err := json.Marshal([]map[string]interface{}{
+		{"type": "text", "text": sdk},
+		{"type": "text", "text": task},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRes, _ := json.Marshal([]map[string]interface{}{
+		{"type": "tool_result", "tool_use_id": "toolu_1", "content": strings.Repeat("r", 10000)},
+	})
+	tailRes, _ := json.Marshal([]map[string]interface{}{
+		{"type": "tool_result", "tool_use_id": "toolu_2", "content": strings.Repeat("t", 26000)},
+	})
+	msgs := []ChatMessage{
+		{Role: "user", Content: userBlocks},
+		mustMsg(t, "system", sys),
+		{Role: "assistant", ToolCalls: rawJSON(t, `[{"id":"toolu_1","type":"function","function":{"name":"Read","arguments":"{}"}}]`)},
+		{Role: "user", Content: oldRes},
+		{Role: "assistant", ToolCalls: rawJSON(t, `[{"id":"toolu_2","type":"function","function":{"name":"Read","arguments":"{}"}}]`)},
+		{Role: "user", Content: tailRes},
+	}
+	body := p.buildBody(&ChatRequest{Messages: msgs}, &Tokens{PostmanSID: "sid", UserID: "u", WorkspaceID: "w", WorkspaceSubdomain: "sub"}, "test", 1)
+	query := body["input"].(map[string]interface{})["query"].(string)
+	if n := len([]rune(query)); n > MaxUpstreamQueryRunes {
+		t.Fatalf("query exceeds upstream limit: %d > %d", n, MaxUpstreamQueryRunes)
+	}
+	// 核心回归断言：原始任务必须活在出站 query 里。
+	if !strings.Contains(query, "TASK_MARKER") {
+		t.Fatalf("folded replay lost the original task: %q...", query[:200])
+	}
+	if !strings.Contains(query, "[User (original task)]") {
+		t.Fatalf("original task should be rendered with its own label: %q...", query[:200])
+	}
+	// system 消息截预算：保留头尾、省略中段。
+	if !strings.Contains(query, "SYS_HEAD") || !strings.Contains(query, "SYS_TAIL") {
+		t.Fatalf("folded system must keep head and tail")
+	}
+	if strings.Contains(query, strings.Repeat("s", 1000)) {
+		t.Fatalf("folded system must be middle-truncated, not rendered in full")
+	}
+	// 26K 的待处理 tool-tail 截预算：不把尾部保留区整个吃掉。阈值取 2000：预算 4000 的
+	// 保头段本身约 1990 连续字符，再低会误伤合法的保头段。
+	if strings.Contains(query, strings.Repeat("t", 2000)) {
+		t.Fatalf("oversized pending tool result must be middle-truncated in replay mode")
+	}
+	if !strings.Contains(query, "Tool Result id=toolu_2") {
+		t.Fatalf("pending tool result should still be labeled in replay query")
+	}
+}
+
+// TestInvalidateConversationKeepsStickyOwner 验证会话失效的株连范围：
+// 死会话只删 (账号,指纹)→conversationId 映射，保留 指纹→账号 的粘性归属——
+// 会话损坏丢的是服务端上下文，不该连带换号。下一轮仍粘回原账号重放一轮、
+// 回存干净指纹后即恢复增量模式（一轮自愈）。
+func TestInvalidateConversationKeepsStickyOwner(t *testing.T) {
+	p := New()
+	turn1 := []ChatMessage{mustMsg(t, "user", "task"), mustMsg(t, "assistant", "ok")}
+	p.setConversationID(1, turn1, "conv-1")
+	// 粘性查找走前缀游走（fp(messages[:i])），命中需要下一轮历史把 turn1 作为前缀。
+	next := append(append([]ChatMessage{}, turn1...), mustMsg(t, "user", "continue"))
+	if owner, ok := p.StickyAccount(next); !ok || owner != 1 {
+		t.Fatalf("sticky owner should be 1, got %d ok=%v", owner, ok)
+	}
+	p.InvalidateConversation(1, next)
+	if got := p.LookupConversation(1, next); got != "" {
+		t.Fatalf("dead conversation must not be reused, got %q", got)
+	}
+	if owner, ok := p.StickyAccount(next); !ok || owner != 1 {
+		t.Fatalf("sticky owner must survive conversation invalidation, got %d ok=%v", owner, ok)
+	}
+	// 同账号重放成功后回存新会话：下一轮即恢复命中。
+	p.setConversationID(1, turn1, "conv-2")
+	if got := p.LookupConversation(1, next); got != "conv-2" {
+		t.Fatalf("replay on the sticky account should re-bind the conversation, got %q", got)
 	}
 }

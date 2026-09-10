@@ -3,6 +3,7 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -80,7 +81,19 @@ func unsupportedMediaInValue(v interface{}) (string, bool) {
 	return "", false
 }
 
-func ExtractText(content json.RawMessage) string {
+// cutoffNoticeRe 匹配客户端(Claude Code 等)在「流被切断后自动重试」时注入的一次性续写提示
+// 文本块（"Your response above was cut off mid-stream. ..."）。该块只出现在重试那一轮的历史里，
+// 下一轮同一消息中即消失——计入会话指纹会让该轮指纹带毒、下一轮前缀匹配必失配
+// （2026-09-10 线上事故缺陷1）。只按开头短语锚定、整块跳过，客户端后续措辞调整不影响。
+var cutoffNoticeRe = regexp.MustCompile(`(?i)^\s*your response above was cut off`)
+
+func ExtractText(content json.RawMessage) string { return extractText(content, false) }
+
+// ExtractStableText 同 ExtractText，但额外跳过指纹易变的一次性注入文本块（客户端流切断
+// 重试提示等）。仅用于会话指纹计算（conversationFingerprint），不影响发往上游的正文。
+func ExtractStableText(content json.RawMessage) string { return extractText(content, true) }
+
+func extractText(content json.RawMessage, stable bool) string {
 	if len(content) == 0 {
 		return ""
 	}
@@ -98,6 +111,9 @@ func ExtractText(content json.RawMessage) string {
 		switch typ {
 		case "text":
 			if t, ok := part["text"].(string); ok {
+				if stable && cutoffNoticeRe.MatchString(t) {
+					continue
+				}
 				out = append(out, t)
 			}
 		case "tool_result":
@@ -109,6 +125,9 @@ func ExtractText(content json.RawMessage) string {
 			out = append(out, "[image attachment]")
 		default:
 			if t, ok := part["text"].(string); ok {
+				if stable && cutoffNoticeRe.MatchString(t) {
+					continue
+				}
 				out = append(out, t)
 			}
 		}

@@ -54,6 +54,24 @@ const (
 	// 保证再长的会话每条结果也留得下关键的命令/报错头尾，而不是被压到不可读。
 	MinFoldedToolResultRunes = 500
 
+	// 以下三个预算服务于「降级重放折叠」路径（splitMessages 的 conversationId=null 分支）。
+	// 2026-09-10 线上事故：会话粘性断裂后每轮全历史重放，42K 的 system 消息折叠时不设预算
+	// 全量渲染，独占 capUpstreamQuery 的头部 30%，原始任务被推进「中段省略」区——模型只看到
+	// 系统提示开头与最近的 tool results，回复「没有收到实际任务请求」后结束。修复契约：
+	// 折叠路径逐段设预算 + 原始任务后置渲染（紧贴最新一轮，永远落在 cap 的尾部保留区）。
+	// 不变量：任务(≤FoldedTextMsgBudgetRunes) + tail 块(≤FoldedTailToolResultRunes) + 指令
+	// ≈ 6150 < cap 尾部窗口 ≈ 6800，任务永远存活。
+	//
+	// FoldedSystemBudgetRunes 限制折叠路径里单条 system 消息的渲染长度（保头保尾、中段省略）。
+	FoldedSystemBudgetRunes = 2000
+	// FoldedTextMsgBudgetRunes 限制折叠路径里单条历史 user/assistant 文本消息的渲染长度，
+	// 也是「原始任务」后置渲染时的长度上限。
+	FoldedTextMsgBudgetRunes = 2000
+	// FoldedTailToolResultRunes 限制重放模式下待处理 tool-tail（query 本体）的长度：单条巨型
+	// 工具结果若不截断会把尾部保留区整个吃掉，把刚后置渲染的任务再次挤进省略区。
+	// 仅作用于重放折叠路径；命中已有会话时 tool-tail 仍不截断（服务端上下文在 Postman 侧）。
+	FoldedTailToolResultRunes = 4000
+
 	// MaxRequestBodyWarnBytes 是出站请求体的软告警阈值。超过此值时记录告警，
 	// 因为过大的 body 更容易触发 Postman 网关侧的 Cloudflare WAF（返回 403 HTML）。
 	// 仅告警、不阻断，避免误伤合法的大请求。

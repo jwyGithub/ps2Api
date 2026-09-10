@@ -174,7 +174,8 @@ func (r *redisConversationStore) Reset(accountID int64) {
 }
 
 // InvalidateConversation 定点失效单个会话：删掉本账号下所有值==conversationID 的会话映射键
-// 及对应 owner，并删除给定 toolCallID 的组映射键。与 Reset(账号级全清)不同，不误伤并发的健康会话。
+// 及给定 toolCallID 的组映射键；owner 归属键刻意保留（粘性路由用，会话损坏不该换号，见
+// ConversationStore 接口注释）。与 Reset(账号级全清)不同，不误伤并发的健康会话。
 // 任一 Redis 故障均优雅降级(仅打 WARN)：会话存储是"最佳努力"优化，最坏结果是漏删一个死映射，
 // 下一轮命中后仍会经空流/TOOL_CALL_NOT_FOUND 再次触发失效。
 func (r *redisConversationStore) InvalidateConversation(accountID int64, conversationID string, toolCallIDs []string) {
@@ -182,7 +183,6 @@ func (r *redisConversationStore) InvalidateConversation(accountID int64, convers
 	defer cancel()
 
 	if conversationID != "" {
-		want := strconv.FormatInt(accountID, 10)
 		var cursor uint64
 		for {
 			keys, next, err := r.rdb.Scan(ctx, cursor, r.convK(accountID, "*"), scanCount).Result()
@@ -194,14 +194,7 @@ func (r *redisConversationStore) InvalidateConversation(accountID int64, convers
 				if v, err := r.rdb.Get(ctx, k).Result(); err != nil || v != conversationID {
 					continue
 				}
-				// key 布局 {prefix}:conv:{account}:{fingerprint}，fingerprint 是 sha256 hex（无冒号）。
-				fp := k[strings.LastIndex(k, ":")+1:]
-				del := []string{k}
-				if ov, err := r.rdb.Get(ctx, r.ownerK(fp)).Result(); err == nil && ov == want {
-					del = append(del, r.ownerK(fp))
-					r.rdb.SRem(ctx, r.ownSetK(accountID), fp) // 同步收缩反向索引
-				}
-				if err := r.rdb.Del(ctx, del...).Err(); err != nil {
+				if err := r.rdb.Del(ctx, k).Err(); err != nil {
 					log.Printf("WARN: Redis 失效会话删除失败(account=%d): %v", accountID, err)
 				}
 			}
