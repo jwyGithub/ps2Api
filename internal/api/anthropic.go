@@ -229,7 +229,13 @@ func openAIToAnthropic(res *provider.Result, model string) map[string]interface{
 	if len(res.ToolCalls) > 0 {
 		stop = "tool_use"
 	}
-	return map[string]interface{}{"id": newID("msg_"), "type": "message", "role": "assistant", "model": model, "content": blocks, "stop_reason": stop, "stop_sequence": nil, "usage": map[string]int{"input_tokens": res.PromptTokens, "output_tokens": res.CompletionTokens}}
+	// Anthropic 规范：input_tokens 不含缓存命中部分，命中量单列 cache_read_input_tokens。
+	usage := map[string]interface{}{"input_tokens": res.PromptTokens, "output_tokens": res.CompletionTokens}
+	if res.Cached {
+		usage["input_tokens"] = 0
+		usage["cache_read_input_tokens"] = res.PromptTokens
+	}
+	return map[string]interface{}{"id": newID("msg_"), "type": "message", "role": "assistant", "model": model, "content": blocks, "stop_reason": stop, "stop_sequence": nil, "usage": usage}
 }
 func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, req *provider.ChatRequest, ar AnthropicReq) {
 	fl, ok := w.(http.Flusher)
@@ -362,9 +368,14 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, req *pr
 	}
 	// output_tokens 取本次真实产出（此前硬编码 0，靠 usage 计费/展示的客户端会读到 0）。
 	outputTokens := 0
+	deltaUsage := map[string]interface{}{}
 	if res != nil {
 		outputTokens = res.CompletionTokens
+		if res.Cached {
+			deltaUsage["cache_read_input_tokens"] = res.PromptTokens
+		}
 	}
-	writeEvent("message_delta", map[string]interface{}{"type": "message_delta", "delta": map[string]string{"stop_reason": stop}, "usage": map[string]int{"output_tokens": outputTokens}})
+	deltaUsage["output_tokens"] = outputTokens
+	writeEvent("message_delta", map[string]interface{}{"type": "message_delta", "delta": map[string]string{"stop_reason": stop}, "usage": deltaUsage})
 	writeEvent("message_stop", map[string]string{"type": "message_stop"})
 }

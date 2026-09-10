@@ -489,7 +489,10 @@
       : total === 0
         ? '已开启，尚无可缓存请求样本——等团队发起单发无状态请求后开始累计。'
         : '基于 ' + fmt(total) + ' 条可缓存请求：命中率 ' + (Number(c.potentialHitRate || 0) * 100).toFixed(2) + '% 决定响应缓存价值，并发去重可省 ' + fmt(c.singleflightSaved) + ' 次。');
-    setText('#cpMeta', on ? 'shadow · 只度量不改返回' : 'cache_probe_enabled=false');
+    setText('#cpMeta', (on ? 'shadow · 只度量不改返回' : 'cache_probe_enabled=false')
+      + (c.cacheEnabled
+        ? ' · 响应缓存已开启：命中 ' + fmt(c.cacheHits) + ' / 未命中 ' + fmt(c.cacheMisses) + ' / 在存 ' + fmt(c.cacheEntries) + ' 条'
+        : ' · 响应缓存未开启'));
   }
 
   function renderStatsReal() {

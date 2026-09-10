@@ -172,6 +172,9 @@ type Result struct {
 	UpstreamURL string
 	// Egress 是本次出站选用的出口标识（代理标签或 direct）。
 	Egress string
+	// Cached 表示本结果来自网关响应缓存回放（零上游调用）。HTTP 层据此在 usage 里
+	// 报告 cached_tokens（OpenAI prompt_tokens_details / Anthropic cache_read_input_tokens）。
+	Cached bool
 }
 
 type ToolCall struct {

@@ -11,10 +11,11 @@ type Router struct {
 	Provider *provider.Provider
 	Store    *store.Store
 	shadow   shadowProbe
+	cache    *responseCache
 }
 
 func New(s *store.Store) *Router {
-	r := &Router{Pool: pool.New(s), Provider: provider.New(), Store: s, shadow: shadowProbe{inflight: map[string]int{}}}
+	r := &Router{Pool: pool.New(s), Provider: provider.New(), Store: s, shadow: shadowProbe{inflight: map[string]int{}}, cache: newResponseCache()}
 	// 出口代理池：仅当 proxy_enabled=true 且配置了 proxy_urls 时启用，否则返回 nil → 走本机直连。
 	// 每次请求实时读设置，面板改动即时生效、无需重启。
 	r.Provider.SetProxyList(func() []string {

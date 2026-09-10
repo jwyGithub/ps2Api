@@ -37,6 +37,7 @@ var settingDefs = []settingDef{
 	{Key: "alert_quota", Label: "额度告警阈值", Type: "number", Default: "0.2", Description: "账号剩余额度低于总配额该比例（0~1）时触发告警"},
 	{Key: "log_retention", Label: "日志页展示条数", Type: "number", Default: "100", Description: "实时日志与部分聚合最多展示的最近日志条数"},
 	{Key: "cache_probe_enabled", Label: "缓存探针（影子度量）", Type: "bool", Default: "false", Description: "只度量不改返回：记录可缓存请求指纹，用真实流量测潜在命中率。长期开启会让探针表增长，测完可关"},
+	{Key: "cache_enabled", Label: "响应缓存", Type: "bool", Default: "false", Description: "开启后，单发无状态请求的「成功且无工具调用」响应在网关缓存 24h，相同请求直接回放、零上游调用（省额度）。命中时 usage 报告 cached_tokens"},
 	{Key: "proxy_enabled", Label: "启用出口代理", Type: "bool", Default: "false", Group: "proxy", Description: "开启后所有发往上游的请求都经代理池出站（不再直连），遇 Cloudflare 403 重试时自动轮换出口 IP；仅对纯源 IP 限速有效"},
 	{Key: "proxy_urls", Label: "代理出口列表", Type: "text", Default: "", Group: "proxy", Description: "换行或逗号分隔的代理 URL，支持 http/https/socks5，如 socks5://127.0.0.1:1080、http://user:pass@host:port。同一账号默认粘同一出口，403 才换下一个出口 IP 轮换"},
 	{Key: "proxy_fallback_direct", Label: "代理全挂兜底直连", Type: "bool", Default: "false", Group: "proxy", Description: "开启后，当出口代理不可达（拨号/CONNECT 失败）时改用本机直连重试一次而非直接失败；关闭则严格只走代理（代理全挂即请求失败）。默认关闭"},

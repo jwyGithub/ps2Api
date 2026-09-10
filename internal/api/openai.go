@@ -137,5 +137,10 @@ func openAIResponse(res *provider.Result, model string) map[string]interface{} {
 	if len(res.ToolCalls) > 0 {
 		finish = "tool_calls"
 	}
-	return map[string]interface{}{"id": newID("chatcmpl-"), "object": "chat.completion", "created": nowUnix(), "model": model, "choices": []interface{}{map[string]interface{}{"index": 0, "message": msg, "finish_reason": finish}}, "usage": map[string]int{"prompt_tokens": res.PromptTokens, "completion_tokens": res.CompletionTokens, "total_tokens": res.PromptTokens + res.CompletionTokens}}
+	usage := map[string]interface{}{"prompt_tokens": res.PromptTokens, "completion_tokens": res.CompletionTokens, "total_tokens": res.PromptTokens + res.CompletionTokens}
+	if res.Cached {
+		// 网关缓存命中回放：按 OpenAI 规范报告 prompt 缓存命中数。
+		usage["prompt_tokens_details"] = map[string]int{"cached_tokens": res.PromptTokens}
+	}
+	return map[string]interface{}{"id": newID("chatcmpl-"), "object": "chat.completion", "created": nowUnix(), "model": model, "choices": []interface{}{map[string]interface{}{"index": 0, "message": msg, "finish_reason": finish}}, "usage": usage}
 }

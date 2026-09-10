@@ -49,6 +49,7 @@ func (r *Router) CacheProbeStats() map[string]interface{} {
 	r.shadow.mu.Lock()
 	collisions := r.shadow.collisions
 	r.shadow.mu.Unlock()
+	hits, misses, size := r.cache.stats()
 	return map[string]interface{}{
 		"enabled":           r.cacheProbeEnabled(),
 		"cacheableRequests": total,
@@ -56,5 +57,9 @@ func (r *Router) CacheProbeStats() map[string]interface{} {
 		"potentialHits":     repeats,
 		"potentialHitRate":  rate,
 		"singleflightSaved": collisions,
+		"cacheEnabled":      r.cacheEnabled(),
+		"cacheHits":         hits,
+		"cacheMisses":       misses,
+		"cacheEntries":      size,
 	}
 }
