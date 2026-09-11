@@ -8,6 +8,7 @@
 //   - accounts.go    账号 CRUD、导入导出、额度刷新
 //   - metrics.go     告警、设置、analytics、代理检查
 //   - ops.go         运维只读端点与面板静态资源
+//   - waf.go         WAF 检测（签名表暴露、对照候选、离线分析）
 //   - helpers.go     公共 helper（jsonWrite/sse/... 与协议专属错误体
 //     anthropicError/openAIError/protoError；jsonError 只给面板端点用）
 package api
@@ -72,6 +73,10 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/cache-probe", s.cacheProbe)
 	mux.HandleFunc("DELETE /api/cache-probe", s.cacheProbeReset)
 	mux.HandleFunc("POST /api/sql-query", s.sqlQuery)
+
+	// 管理类端点（/api/*）——WAF 检测（见 waf.go）
+	mux.HandleFunc("GET /api/waf-signatures", s.wafSignatures)
+	mux.HandleFunc("GET /api/waf/baselines", s.wafBaselines)
 
 	// 面板登录（见 login.go）：ADMIN_PASSWORD 设置后生效
 	mux.HandleFunc("GET /login", s.loginPage)
