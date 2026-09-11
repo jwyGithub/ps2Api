@@ -6,11 +6,24 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	_ "time/tzdata" // 内嵌时区库：alpine 无 tzdata 也能按 TZ 解析
 	"time"
 
 	"ps2api/internal/api"
 	"ps2api/internal/store"
 )
+
+// init 把日志时区固定为东八区（标准 log 包取 time.Local，容器里默认 UTC）。
+// 设了 TZ 环境变量则优先 TZ。
+func init() {
+	if tz := strings.TrimSpace(os.Getenv("TZ")); tz != "" {
+		if loc, err := time.LoadLocation(tz); err == nil {
+			time.Local = loc
+			return
+		}
+	}
+	time.Local = time.FixedZone("CST", 8*3600)
+}
 
 func main() {
 	// 端口只用专属变量 GATEWAY_PORT，避免通用 PORT 环境变量被其他程序占用时
