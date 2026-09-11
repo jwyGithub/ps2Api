@@ -17,6 +17,7 @@
     days: 14, page: 'overview', poolQuery: '', poolStatus: 'ALL', alertTab: 'open',
     poolPage: 1, quotaPage: 1,
     reqlogs: [], reqlogsPage: 1, reqlogsTotal: 0, reqlogsCollapsed: {},
+    waf: { list: [], page: 1, total: 0, currentId: 0, baselineId: '', analysis: null },
     sqlLast: null
   };
   var PAGE_SIZE = 20;
@@ -54,7 +55,7 @@
   }
 
   function bootstrapDashboard() {
-    var names = ['fragments/topnav.html', 'fragments/sidebar.html', 'fragments/page-overview.html', 'fragments/page-stats.html', 'fragments/page-reqlogs.html', 'fragments/page-sql.html', 'fragments/page-pools.html', 'fragments/page-quota.html', 'fragments/page-routing.html', 'fragments/page-alerts.html', 'fragments/page-settings.html', 'fragments/page-proxies.html', 'fragments/page-vision.html', 'fragments/drawer.html'];
+    var names = ['fragments/topnav.html', 'fragments/sidebar.html', 'fragments/page-overview.html', 'fragments/page-stats.html', 'fragments/page-reqlogs.html', 'fragments/page-sql.html', 'fragments/page-waf.html', 'fragments/page-pools.html', 'fragments/page-quota.html', 'fragments/page-routing.html', 'fragments/page-alerts.html', 'fragments/page-settings.html', 'fragments/page-proxies.html', 'fragments/page-vision.html', 'fragments/drawer.html'];
     return Promise.all(names.map(loadFragment)).then(function (parts) {
       var app = document.getElementById('dashboard-app');
       if (!app) return;
@@ -148,10 +149,11 @@
     state.page = page;
     document.querySelectorAll('.page').forEach(function (el) { el.classList.toggle('active', el.id === 'page-' + page); });
     document.querySelectorAll('.sidebar-item[data-page]').forEach(function (el) { el.classList.toggle('active', el.dataset.page === page); });
-    var names = { overview:'概览', stats:'统计分析', reqlogs:'请求日志', sql:'数据查询', pools:'号池 & 额度', routing:'路由策略', proxies:'代理出口', vision:'图片识别', alerts:'告警中心', settings:'系统设置' };
+    var names = { overview:'概览', stats:'统计分析', reqlogs:'请求日志', sql:'数据查询', waf:'WAF 检测', pools:'号池 & 额度', routing:'路由策略', proxies:'代理出口', vision:'图片识别', alerts:'告警中心', settings:'系统设置' };
     setText('#crumb', names[page] || page);
     if (page === 'reqlogs') renderReqLogsReal();
     if (page === 'sql') renderSqlPresets();
+    if (page === 'waf') wafRefresh();
     if (page === 'pools') { renderPoolsReal(); renderQuotaReal(); }
     if (page === 'alerts') renderAlertsReal();
     if (page === 'routing') renderRoutingReal();
@@ -219,7 +221,8 @@
       vision: ['settings'],
       alerts: ['alerts'],
       settings: ['settings'],
-      sql: []
+      sql: [],
+      waf: []
     };
     var resources = pages[state.page] || ['stats'];
     return resources.length ? loadResources(resources) : Promise.resolve();
@@ -587,9 +590,116 @@
     if (resolveAllBtn) resolveAllBtn.style.display = (sum.open || 0) > 0 ? '' : 'none';
   }
 
+  // ─── WAF 检测（403 离线分析）─────────────────────────────
+  var WAF_PAGE_SIZE = 15;
+  window.wafRefresh = function () {
+    var body = document.getElementById('wafListBody'); if (!body) return;
+    // 403 列表用 SQL 只读通道取（复用 store 的过滤条件，列表只拉元数据不拉 body）
+    api('/api/sql-query', { method: 'POST', body: JSON.stringify({ sql:
+      "SELECT id, datetime(substr(created_at,1,19)) AS t, COALESCE((SELECT email FROM accounts WHERE id=account_id),'') AS email, " +
+      "request_bytes, error_message FROM request_logs " +
+      "WHERE status='error' AND error_message LIKE '%Cloudflare%' ORDER BY id DESC LIMIT " + WAF_PAGE_SIZE + " OFFSET " + ((state.waf.page - 1) * WAF_PAGE_SIZE)
+    }) }).then(function (data) {
+      renderWafList(data.rows || []);
+    }).catch(function (e) { toast('403 列表加载失败：' + e.message); });
+  };
+  function renderWafList(rows) {
+    var body = document.getElementById('wafListBody'); if (!body) return;
+    body.innerHTML = rows.map(function (r) {
+      return '<tr><td class="font-mono">' + esc(r.id) + '</td><td class="font-mono">' + esc(r.t) + '</td><td>' + esc(r.email) + '</td>' +
+        '<td class="font-mono">' + fmt(r.request_bytes) + 'B</td>' +
+        '<td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + esc(r.error_message) + '">' + esc(r.error_message) + '</td>' +
+        '<td><button class="btn btn-ghost text-[12px]" onclick="wafAnalyze(' + r.id + ')">分析</button></td></tr>';
+    }).join('');
+    var meta = document.getElementById('wafListMeta');
+    if (meta) meta.textContent = '第 ' + state.waf.page + ' 页';
+  }
+  window.wafPage = function (p) { state.waf.page = Math.max(1, p); wafRefresh(); };
+  window.wafAnalyze = function (logId) {
+    state.waf.currentId = logId;
+    state.waf.baselineId = '';
+    wafRunAnalyze();
+    api('/api/waf/baselines?log_id=' + logId).then(function (data) {
+      var sel = document.getElementById('wafBaselineSel'); if (!sel) return;
+      sel.innerHTML = '<option value="">自动挑选</option>' + (data.data || []).map(function (c) {
+        return '<option value="' + c.id + '">#' + c.id + ' · ' + fmt(c.requestBytes) + 'B · ' + esc(c.accountEmail || '') + '</option>';
+      }).join('');
+    }).catch(function () {});
+  };
+  window.wafSetBaseline = function (v) { state.waf.baselineId = v; wafRunAnalyze(); };
+  function wafRunAnalyze() {
+    var url = '/api/waf/analyze?log_id=' + state.waf.currentId + (state.waf.baselineId ? '&baseline_id=' + state.waf.baselineId : '');
+    api(url).then(function (data) {
+      state.waf.analysis = data;
+      renderWafAnalysis(data);
+    }).catch(function (e) { toast('分析失败：' + e.message); });
+  }
+  function renderWafAnalysis(d) {
+    var box = document.getElementById('wafAnalysis'); if (!box) return;
+    box.style.display = '';
+    var meta = document.getElementById('wafLogMeta');
+    if (meta) meta.textContent = '#' + d.log.id + ' · ' + fmt(d.log.requestBytes) + 'B · ' + esc(d.log.accountEmail || '');
+    var html = '';
+    // 1. 签名扫描
+    var sigs = d.signatureCounts || {};
+    var sigKeys = Object.keys(sigs);
+    html += '<div class="mb-5"><div class="text-[12px] font-semibold mb-2" style="color:var(--muted);">签名扫描</div>';
+    html += sigKeys.length
+      ? '<div class="flex gap-2 flex-wrap">' + sigKeys.map(function (k) {
+          return '<span class="tag tag-red font-mono">' + esc(k) + ' ×' + sigs[k] + '</span>';
+        }).join('') + '</div>'
+      : '<span class="tag tag-gray">零特征（已知签名表未命中——可能是未知特征，看下方 diff）</span>';
+    html += '</div>';
+    // 2. 对照 diff
+    html += '<div class="mb-5"><div class="text-[12px] font-semibold mb-2" style="color:var(--muted);">对照 diff' +
+      (d.baseline ? '（对照 #' + d.baseline.id + ' · ' + esc(d.baseline.tier || '') + '）' : '（无对照可选）') + '</div>';
+    var diffs = d.diff || [];
+    if (!d.baseline) {
+      html += '<div class="text-[13px]" style="color:var(--muted);">没有可用的成功对照记录（该请求之前无成功请求），可在上方下拉手动指定对照。</div>';
+    } else if (!diffs.length) {
+      html += '<div class="text-[13px]" style="color:var(--muted);">与对照逐叶一致——内容形状排除，指向 IP/账号/速率维度。</div>';
+    } else {
+      html += diffs.map(function (x) {
+        return '<details class="card p-3 mb-2"><summary class="cursor-pointer font-mono text-[12px]">' +
+          '<span class="tag ' + (x.kind === 'added' ? 'tag-red' : x.kind === 'removed' ? 'tag-gray' : 'tag-amber') + '">' + esc(x.kind) + '</span> ' +
+          esc(x.path) + ' <span style="color:var(--muted);">' + (x.baselineLen || 0) + 'B → ' + (x.targetLen || 0) + 'B</span></summary>' +
+          '<pre class="text-[11px] mt-2 p-2 overflow-x-auto" style="background:var(--bg-2);border-radius:6px;">' +
+          (x.baselinePreview ? '对照: ' + esc(x.baselinePreview) + '\n\n' : '') +
+          '目标: ' + esc(x.targetPreview || '(删除)') + '</pre></details>';
+      }).join('');
+    }
+    html += '</div>';
+    // 3. 体积画像
+    var buckets = d.sizeBuckets || [];
+    if (buckets.length) {
+      html += '<div><div class="text-[12px] font-semibold mb-2" style="color:var(--muted);">当天体积分布（10KB 分桶）</div>' +
+        '<table class="data-table"><thead><tr><th>桶</th><th>成功</th><th>失败</th><th>最大成功</th></tr></thead><tbody>' +
+        buckets.map(function (b) {
+          return '<tr><td class="font-mono">' + esc(b.bucket) + '</td><td>' + fmt(b.ok) + '</td><td>' + fmt(b.fail) + '</td><td class="font-mono">' + (b.maxOk ? fmt(b.maxOk) + 'B' : '-') + '</td></tr>';
+        }).join('') + '</tbody></table></div>';
+    }
+    var el = document.getElementById('wafAnalysisBody');
+    if (el) el.innerHTML = html;
+  }
+
   // ─── 数据查询（只读 SQL 控制台）─────────────────────────────
+  // WAF 签名 OR 链从 /api/waf-signatures 取（单一事实源：加新特征零前端改动）。
+  // 未加载完成时退回内置兜底表，保证 SQL 页离线可用。
+  var wafSigCache = null;
+  function wafSigPatterns() {
+    if (wafSigCache !== null) return wafSigCache;
+    return ["%<script%", "%u003cscript%", "%bin/cat%"];
+  }
+  function wafTimelineSQL() {
+    var pats = wafSigPatterns().map(function (p) { return "upstream_body LIKE '" + p + "'"; }).join("\n         OR ");
+    return "SELECT datetime(substr(created_at,1,19)) AS t, status, egress, account_id,\n" +
+      "  CASE WHEN " + pats + " THEN '有特征' ELSE '零特征' END AS sig,\n" +
+      "  length(upstream_body) AS bytes\nFROM request_logs\n" +
+      "WHERE created_at >= datetime('now','-3 hours')\n" +
+      "  AND (status='success' OR error_message LIKE '%Cloudflare%')\nORDER BY created_at";
+  }
   var SQL_PRESETS = [
-    { name: '403 时间线判别', sql: "SELECT datetime(substr(created_at,1,19)) AS t, status, egress, account_id,\n  CASE WHEN upstream_body LIKE '%u003cscript%' OR upstream_body LIKE '%<script%'\n         OR upstream_body LIKE '%u003csvg%' OR upstream_body LIKE '%<svg%'\n         OR upstream_body LIKE '%onerror=%' OR upstream_body LIKE '%onload=%'\n       THEN 'HTML特征'\n       WHEN upstream_body LIKE '%bin/cat%'\n       THEN 'bin/cat特征'\n       ELSE '零特征' END AS sig,\n  length(upstream_body) AS bytes\nFROM request_logs\nWHERE created_at >= datetime('now','-3 hours')\n  AND (status='success' OR error_message LIKE '%Cloudflare%')\nORDER BY created_at" },
+    { name: '403 时间线判别', sql: wafTimelineSQL() },
     { name: 'bin/cat 重分类', sql: "SELECT id, datetime(substr(created_at,1,19)) AS t, account_id, status, request_bytes,\n  instr(lower(upstream_body), 'bin/cat') > 0 AS bin_cat_hit,\n  error_message\nFROM request_logs\nWHERE (error_message LIKE '%403%' OR error_message LIKE '%Cloudflare%')\n  AND created_at >= '2026-09-10'\nORDER BY id DESC LIMIT 30" },
     { name: '最近错误请求', sql: "SELECT datetime(substr(created_at,1,19)) AS t, account_id, model, error_message\nFROM request_logs WHERE status='error'\nORDER BY created_at DESC LIMIT 50" },
     { name: '表清单', sql: "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name" },
@@ -600,10 +710,19 @@
     box.innerHTML = SQL_PRESETS.map(function (p, i) {
       return '<button class="btn btn-ghost text-[12px]" onclick="sqlPreset(' + i + ')">' + esc(p.name) + '</button>';
     }).join('');
+    // 拉一次签名表缓存到 wafSigCache：预设 0 取用时重算，保证签名 API 加载后 SQL 是最新特征。
+    // < 转 u003c 子串形（存储体是 json.Marshal 转义形），剥掉 % 免得破坏 LIKE 语法。
+    if (wafSigCache === null) {
+      api('/api/waf-signatures').then(function (d) {
+        var pats = (d.probes || []).map(function (p) { return "%" + p.replace(/</g, 'u003c').replace(/%/g, '') + "%"; });
+        // ponytail: 空签名表保持 null 走内置兜底（也避免拼出空 CASE WHEN 的坏 SQL）
+        if (pats.length) wafSigCache = pats;
+      }).catch(function () {});
+    }
   }
   window.sqlPreset = function (i) {
     var input = document.getElementById('sqlInput');
-    if (input && SQL_PRESETS[i]) { input.value = SQL_PRESETS[i].sql; input.focus(); }
+    if (input && SQL_PRESETS[i]) { input.value = i === 0 ? wafTimelineSQL() : SQL_PRESETS[i].sql; input.focus(); }
   };
   window.sqlRun = function () {
     var input = document.getElementById('sqlInput'); if (!input) return;

@@ -1,0 +1,34 @@
+<section class="page" id="page-waf">
+    <div class="p-8">
+      <div class="mb-8">
+        <div class="text-[11px] font-semibold tracking-wider uppercase mb-2" style="color: var(--muted);">WAF Detection</div>
+        <h1 class="hero-title">WAF <em>检测</em></h1>
+        <p class="mt-2 text-[14px]" style="color: var(--fg-2);">Cloudflare 403 离线分析：签名扫描 + 与成功请求逐叶对照，定位触发内容。零出站请求。</p>
+      </div>
+
+      <div class="card p-6 mb-4">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="font-display text-[16px] font-medium">403 记录</h3>
+          <div class="text-[12px] font-mono" id="wafListMeta" style="color: var(--muted);"></div>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="data-table">
+            <thead><tr><th>ID</th><th>时间</th><th>账号</th><th>出站体</th><th>错误</th><th></th></tr></thead>
+            <tbody id="wafListBody"></tbody>
+          </table>
+        </div>
+        <div class="flex items-center gap-2 mt-4" id="wafPager"></div>
+      </div>
+
+      <div class="card p-6" id="wafAnalysis" style="display:none;">
+        <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
+          <h3 class="font-display text-[16px] font-medium">分析结果 <span class="font-mono text-[13px]" id="wafLogMeta" style="color: var(--muted);"></span></h3>
+          <div class="flex items-center gap-2">
+            <span class="text-[12px]" style="color: var(--muted);">对照</span>
+            <select id="wafBaselineSel" class="input" style="width:auto;" onchange="wafSetBaseline(this.value)"></select>
+          </div>
+        </div>
+        <div id="wafAnalysisBody"></div>
+      </div>
+    </div>
+  </section>
