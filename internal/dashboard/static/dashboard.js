@@ -601,6 +601,15 @@
       "WHERE status='error' AND error_message LIKE '%Cloudflare%' ORDER BY id DESC LIMIT " + WAF_PAGE_SIZE + " OFFSET " + ((state.waf.page - 1) * WAF_PAGE_SIZE)
     }) }).then(function (data) {
       renderWafList(data.rows || []);
+      // 总数单独 COUNT（列表 SQL 带 LIMIT，拿不到总数算不出 pages）
+      return api('/api/sql-query', { method: 'POST', body: JSON.stringify({ sql:
+        "SELECT COUNT(*) AS n FROM request_logs WHERE status='error' AND error_message LIKE '%Cloudflare%'"
+      }) });
+    }).then(function (data) {
+      var n = (data.rows && data.rows[0] && Number(data.rows[0].n)) || 0;
+      state.waf.total = n;
+      var pager = document.getElementById('wafPager');
+      if (pager) pager.innerHTML = pagerHTML({ page: state.waf.page, pages: Math.ceil(n / WAF_PAGE_SIZE) }, 'wafPage');
     }).catch(function (e) { toast('403 列表加载失败：' + e.message); });
   };
   function renderWafList(rows) {
@@ -638,7 +647,7 @@
     var box = document.getElementById('wafAnalysis'); if (!box) return;
     box.style.display = '';
     var meta = document.getElementById('wafLogMeta');
-    if (meta) meta.textContent = '#' + d.log.id + ' · ' + fmt(d.log.requestBytes) + 'B · ' + esc(d.log.accountEmail || '');
+    if (meta) meta.textContent = '#' + d.log.id + ' · ' + fmt(d.log.requestBytes) + 'B · ' + (d.log.accountEmail || '');
     var html = '';
     // 1. 签名扫描
     var sigs = d.signatureCounts || {};
