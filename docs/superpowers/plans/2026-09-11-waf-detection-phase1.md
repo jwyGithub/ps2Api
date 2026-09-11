@@ -1218,7 +1218,31 @@ git commit -m "api: leaf-diff engine and /api/waf/analyze offline 403 analysis"
 
 注意：列表页故意不显示签名计数——算签名要拉整条 upstream_body（60KB+），列表只做入口；签名块在分析面板里完整呈现。
 
-- [ ] **Step 5: 手动验证（浏览器）**
+- [ ] **Step 5: SQL 预设从签名 API 生成（spec §1 单一事实源的闭环）**
+
+`SQL_PRESETS` 里「403 时间线判别」的 sig CASE 改为渲染时从 `/api/waf-signatures` 生成（缓存一份）。`renderSqlPresets` 改为：
+
+```js
+  var wafSigCache = null;
+  function wafSigPatterns() {
+    // 签名 OR 链从 /api/waf-signatures 取（单一事实源：加新特征零前端改动）。
+    // 未加载完成时退回内置兜底表，保证 SQL 页离线可用。
+    if (wafSigCache !== null) return wafSigCache;
+    return ["%<script%", "%u003cscript%", "%bin/cat%"];
+  }
+  function wafTimelineSQL() {
+    var pats = wafSigPatterns().map(function (p) { return "upstream_body LIKE '" + p + "'"; }).join("\n         OR ");
+    return "SELECT datetime(substr(created_at,1,19)) AS t, status, egress, account_id,\n" +
+      "  CASE WHEN " + pats + " THEN '有特征' ELSE '零特征' END AS sig,\n" +
+      "  length(upstream_body) AS bytes\nFROM request_logs\n" +
+      "WHERE created_at >= datetime('now','-3 hours')\n" +
+      "  AND (status='success' OR error_message LIKE '%Cloudflare%')\nORDER BY created_at";
+  }
+```
+
+`SQL_PRESETS` 第一项的 `sql` 字段改为动态引用：`{ name: '403 时间线判别', sql: wafTimelineSQL() }`（`sqlPreset(i)` 取用时重算，保证签名 API 加载后取到最新）；`renderSqlPresets` 里同时发一次 `api('/api/waf-signatures').then(function (d) { wafSigCache = (d.probes || []).map(function (p) { return "%" + p.replace(/</g, 'u003c').replace(/%/g, '') + "%"; }); })`——注意 `<` 转成 `u003c` 子串形（存储体是 json.Marshal 转义形），并剥掉签名里可能出现的 `%` 免得破坏 LIKE 语法。
+
+- [ ] **Step 6: 手动验证（浏览器）**
 
 Run: `go run . &`（或项目现有启动方式），浏览器开面板 → 「WAF 检测」：
 - 列表显示 403 行（本地库若无 Cloudflare 行，用 SQL 控制台造一条：`INSERT INTO request_logs (...)`——只读通道造不了，改用 curl 打一次 `/v1/messages` 触发真实 403，或临时改 `newTestStore` 风格的单测已覆盖）
@@ -1226,7 +1250,7 @@ Run: `go run . &`（或项目现有启动方式），浏览器开面板 → 「W
 
 Expected: 页面无 JS 报错（控制台干净）、分析块完整渲染
 
-- [ ] **Step 6: 提交**
+- [ ] **Step 7: 提交**
 
 ```bash
 git add internal/dashboard/static/fragments/page-waf.html internal/dashboard/static/fragments/sidebar.html internal/dashboard/static/dashboard.js
@@ -1279,7 +1303,7 @@ git commit -m "docs: point 403 runbook at the new WAF detection page"
 
 ## 验收清单（对照 spec §1/§2）
 
-- [ ] 加新签名只改 `wafSignatureProbes` 一处：面板 SQL 预设若需引用，前端从 `/api/waf-signatures` 取（Task 4 完成后，dashboard.js 的 403 预设可后续跟进改造——本期不强制，spec §1 的硬性要求是 store 统计不再手写，已由 Task 2 保证）
+- [ ] 加新签名只改 `wafSignatureProbes` 一处：store 统计（Task 2 注入）与面板 SQL 预设（Task 6 Step 5 从 /api/waf-signatures 生成）均自动跟随
 - [ ] 403 列表 + 签名扫描 + 逐叶 diff + 体积画像四块全部可用
 - [ ] 对照组自动三级回退 + 手动覆盖
 - [ ] 零出站请求（分析全程只读 SQLite）
