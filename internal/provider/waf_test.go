@@ -27,6 +27,14 @@ func TestWafNeutralize(t *testing.T) {
 		// 转义形：wrap 的 json.Marshal / 客户端双重编码产生的 "<" 字面量转义序列。
 		{"\\u003cscript\\u003ex\\u003c/script\\u003e",
 			"\\u003c" + zwsp + "script\\u003ex\\u003c" + zwsp + "/script\\u003e"},
+		// bin/cat 形（2026-09-11 实测）：cat 前缀词跟在 bin/ 后被 Cloudflare 当作
+		// cat 命令执行路径（./bin/catpaw2api、/bin/cat、大写均 403；bin/ls、bin/sh、
+		// bin/rm、bin/python、bin/curl、./cat、裸 cat 均放行——cat 是唯一触发命令）。
+		{"./bin/catpaw2api -config config.json", "./bin/" + zwsp + "catpaw2api -config config.json"},
+		{"/bin/cat /etc/passwd", "/bin/" + zwsp + "cat /etc/passwd"},
+		{"./bin/Catpaw2api", "./bin/" + zwsp + "Catpaw2api"},
+		{"catpaw2api -config config.json", "catpaw2api -config config.json"}, // 无 bin/ 前缀不误伤
+		{"./bin/ls -la", "./bin/ls -la"},                                     // 非 cat 命令不误伤
 	}
 	for _, c := range cases {
 		if got := wafNeutralize(c.in); got != c.want {

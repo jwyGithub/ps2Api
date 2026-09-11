@@ -29,6 +29,12 @@ var wafNeutralizeRules = []struct {
 	{regexp.MustCompile(`(?i)(\bon[a-z]+)(\s*=)`), "${1}" + wafBreak + "${2}"},
 	{regexp.MustCompile(`(?i)(javascript|vbscript)(:)`), "${1}" + wafBreak + "${2}"},
 	{regexp.MustCompile(`(?i)(v-on|@)(:|click)`), "${1}" + wafBreak + "${2}"},
+	// bin/cat 形（2026-09-11 实测，repro403 探针七轮二分定位）：cat 前缀词跟在
+	// bin/ 后被 Cloudflare 当作 cat 命令执行路径——`./bin/cat`、`/bin/cat`、
+	// `./bin/catpaw2api`、大写 `Catpaw2api` 均 403；`bin/`+ZWSP+`cat` 放行；
+	// bin/ls、bin/sh、bin/rm、bin/python、bin/curl、`./cat`、裸 `cat` 均放行，
+	// 即特征是字面量 bin/cat（cat 是唯一触发命令），ZWSP 插在 bin/ 与 cat 之间。
+	{regexp.MustCompile(`(?i)(s?bin/)(cat)`), "${1}" + wafBreak + "${2}"},
 }
 
 // wafNeutralizeEnabled 是中和的 kill-switch：GATEWAY_DISABLE_WAF_NEUTRALIZE=1 时关闭

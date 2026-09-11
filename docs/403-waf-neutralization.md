@@ -88,9 +88,10 @@
 ```sql
 SELECT id, datetime(substr(created_at,1,19)) t, status, request_bytes,
   length(upstream_body) body_len,
-  -- 原始特征在场（中和泄漏）
+  -- 原始特征在场（中和泄漏）：script 家族（含转义形）+ bin/cat（第 9 节第二类签名）
   instr(lower(upstream_body), '<script') > 0
-    OR instr(lower(upstream_body), '\u003cscript') > 0 AS raw_sig,
+    OR instr(lower(upstream_body), '\u003cscript') > 0
+    OR instr(lower(upstream_body), 'bin/cat') > 0 AS raw_sig,
   -- ZWSP 中和形态在场（说明中和跑了）
   instr(upstream_body, char(8203)) > 0 AS zwsp,
   error_message
@@ -151,3 +152,30 @@ ZWSP 版上线后再次出现 403。按第 6 节手册排查，结论与第 6 �
 - `== 0`（概率型）→ 冷却账号 + **允许一次网关内重试**（`gwRetried` 标志控制，`maxAttempts++` 扩一档预算，不挤占普通重试额度）：续聊经会话粘性回原号（egressSeq 递增换出口 IP），新对话回号池会跳过刚冷却的号（等效换号重试）。重试仍 403 才终止，剩余尾巴由客户端 529 退避兜底。
 
 验证：`go vet` + `go test ./...` 全绿；7 个既有 GatewayBlocked 测试按新契约更新（共两次上游调用），新增 `TestStreamZeroSignature403RetryRecovers` 覆盖「首次 403、重试成功、客户端无感」的核心路径。
+
+## 9. 第二类内容签名：bin/cat（2026-09-11，七轮探针二分定位）
+
+第 8 节的「概率型」结论需要修正一部分：**存在第二类内容签名，探测表当时看不见它**。
+
+**案发**：14:15:45 起同一会话连续 403（双出口、客户端重试均复现），出站体 0 签名、0 个 `<`、ZWSP=0（无可中和内容），日志误判「非内容形状」。但 14 秒前（14:15:31）同工作区、同 IP、52427 字节的近似体成功。
+
+**定位方法**：成功体与失败体做 970 个文本叶子逐叶 diff——唯一实质差异是新增的 `toolResponses[0].content.message`（93B→4136B，一段 CatPaw2API 的 README + `ls` 输出，纯后端内容、无任何 HTML 标签）。用 repro403 探针七轮二分（F→P→S→V→W→X，每轮 2 次重复，全部确定性复现）：
+
+| 输入形态 | 上游结果 |
+|---|---|
+| `./bin/cat …` / `/bin/cat …` / `./bin/catpaw2api`（无参数）/ `./bin/Catpaw2api` | **403** |
+| `bin/` + ZWSP + `catpaw2api` | 放行 |
+| `bin/ls` `bin/sh` `bin/rm` `bin/python` `bin/curl` `bin/myapp` `bin/dogpaw2api` | 放行 |
+| `./cat`（无 bin/）、裸 `catpaw2api` | 放行 |
+
+**结论**：特征是字面量 **`bin/cat`**（大小写不敏感）——`cat` 前缀词跟在 `bin/` 后被当作 `cat` 命令执行路径匹配。`catpaw2api` 撞上纯属项目名倒霉；`export API_KEY=`、`sudo/systemctl`、`curl -H "Authorization: Bearer …"`、`X-Header: <…>` 全部实测放行（第 3 节「真正的特征只有 script 家族」修正为：**script 家族标签 + bin/cat**，其余仍是保险层）。
+
+**修复**（与第 4 节同一套机制，零新代码路径）：
+
+- `waf.go` 新增第 5 条规则 `(?i)(s?bin/)(cat)` → `bin/` 与 `cat` 之间插 ZWSP，自动覆盖 `input.query` 与 `toolResponses[].content` 两个既有出口；幂等（破坏后不再命中）。
+- `errors.go` 签名探测表补 `bin/cat`，403 取证不再误报「未检出」（也修正第 8 节概率型判定的盲区：当时 raw_sig=0 的 403 里可能混有 bin/cat 内容型，需按新表重分类——同 body 成败分岔的样本仍是真概率型）。
+
+**验证**：单测钉住 cat 形与误伤边界（`catpaw2api` 无 bin/ 前缀、`bin/ls` 必须原样通过）；`go vet` + `go test ./...` 全绿；端到端——修复前 2/2 被 403 的完整 README 原文（探针 I_full_readme），修复后 2/2 成功（出站体 +3 字节 = 一个 ZWSP）。
+
+**已知边界**：只实测了 `cat` 一个命令名（ls/sh/rm/python/curl 均放行）；`bin/` 前必须紧跟 `cat`，`sbin/cat` 由 `(s?bin/)` 覆盖。若未来出现其他命令名触发，按本节方法加词即可。
+

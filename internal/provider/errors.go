@@ -90,6 +90,9 @@ func parseRateLimit(headers http.Header, now time.Time) *RateLimit {
 var wafSignatureProbes = []string{
 	"<script", "<iframe", "<svg", "<template", "<!doctype",
 	"onerror=", "onload=", "onclick=", "onchange=", "javascript:", "v-on:", "@click",
+	// bin/cat：cat 前缀词跟在 bin/ 后被当作 cat 命令执行路径（2026-09-11 实测
+	// 确认的第二类内容签名，如 ./bin/catpaw2api -config …；详见 waf.go 注释）。
+	"bin/cat",
 }
 
 // normalizeWafBody 做小写化并还原 Go json.Marshal 对 < > & 的六字符 unicode 转义，
