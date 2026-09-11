@@ -77,6 +77,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	// 管理类端点（/api/*）——WAF 检测（见 waf.go）
 	mux.HandleFunc("GET /api/waf-signatures", s.wafSignatures)
 	mux.HandleFunc("GET /api/waf/baselines", s.wafBaselines)
+	mux.HandleFunc("GET /api/waf/analyze", s.wafAnalyze)
 
 	// 面板登录（见 login.go）：ADMIN_PASSWORD 设置后生效
 	mux.HandleFunc("GET /login", s.loginPage)
