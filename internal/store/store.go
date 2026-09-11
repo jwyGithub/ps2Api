@@ -672,6 +672,153 @@ func (s *Store) Cloudflare403SignatureSummary(window time.Duration, probes []str
 	return out, nil
 }
 
+// GetRequestLog 按主键取单条请求日志（WAF 分析页用）。不存在返回 (nil, nil)。
+func (s *Store) GetRequestLog(id int64) (*RequestLog, error) {
+	rows, err := s.db.Query(`SELECT `+requestLogColumns+`
+		FROM request_logs rl LEFT JOIN accounts a ON a.id = rl.account_id
+		WHERE rl.id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	logs, err := scanRequestLogs(rows)
+	if err != nil || len(logs) == 0 {
+		return nil, err
+	}
+	return logs[0], nil
+}
+
+// PageCloudflare403Logs 分页返回 Cloudflare 网关拒绝(403)的日志，id 倒序（WAF 检测页列表）。
+func (s *Store) PageCloudflare403Logs(offset, limit int) ([]*RequestLog, error) {
+	rows, err := s.db.Query(`SELECT `+requestLogColumns+`
+		FROM request_logs rl LEFT JOIN accounts a ON a.id = rl.account_id
+		WHERE rl.status='error' AND rl.error_message LIKE '%Cloudflare%'
+		ORDER BY rl.id DESC LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRequestLogs(rows)
+}
+
+// CountCloudflare403Logs 返回 403 日志总数（分页用）。
+func (s *Store) CountCloudflare403Logs() (int64, error) {
+	var n int64
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM request_logs
+		WHERE status='error' AND error_message LIKE '%Cloudflare%'`).Scan(&n)
+	return n, err
+}
+
+// wafBaselineQuery 构造三级回退的对照查询：tier 依次为同会话 → 同账号 → 全局，
+// 都要求 success 且 id 早于目标（时间上在前的成功请求才有 diff 意义）。
+func (s *Store) wafBaselineQuery(target *RequestLog, cond string, args ...interface{}) (*RequestLog, error) {
+	q := `SELECT ` + requestLogColumns + `
+		FROM request_logs rl LEFT JOIN accounts a ON a.id = rl.account_id
+		WHERE rl.status='success' AND rl.id < ? ` + cond + `
+		ORDER BY rl.id DESC LIMIT 1`
+	args = append([]interface{}{target.ID}, args...)
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	logs, err := scanRequestLogs(rows)
+	if err != nil || len(logs) == 0 {
+		return nil, err
+	}
+	return logs[0], nil
+}
+
+// FindWafBaseline 为一条 403 日志挑对照成功请求：同 conversation_id 最近成功 →
+// 同 account_id 最近成功 → 全局最近成功。无对照返回 (nil, "", nil)。
+func (s *Store) FindWafBaseline(target *RequestLog) (baseline *RequestLog, tier string, err error) {
+	if target.ConversationID != "" {
+		if b, e := s.wafBaselineQuery(target, `AND rl.conversation_id = ?`, target.ConversationID); e != nil {
+			return nil, "", e
+		} else if b != nil {
+			return b, "conversation", nil
+		}
+	}
+	if target.AccountID != nil {
+		if b, e := s.wafBaselineQuery(target, `AND rl.account_id = ?`, *target.AccountID); e != nil {
+			return nil, "", e
+		} else if b != nil {
+			return b, "account", nil
+		}
+	}
+	if b, e := s.wafBaselineQuery(target, ``); e != nil {
+		return nil, "", e
+	} else if b != nil {
+		return b, "global", nil
+	}
+	return nil, "", nil
+}
+
+// WafBaselineCandidates 返回手动换对照的候选成功请求：同会话/同账号/全局三层各
+// 取 limit/3 条，同层按 id 倒序，层间按相关度（conversation > account > global）排列。
+func (s *Store) WafBaselineCandidates(target *RequestLog, limit int) ([]*RequestLog, error) {
+	if limit < 3 {
+		limit = 3
+	}
+	var out []*RequestLog
+	seen := map[int64]bool{}
+	appendTier := func(cond string, args ...interface{}) {
+		q := `SELECT ` + requestLogColumns + `
+			FROM request_logs rl LEFT JOIN accounts a ON a.id = rl.account_id
+			WHERE rl.status='success' AND rl.id < ? ` + cond + `
+			ORDER BY rl.id DESC LIMIT ?`
+		args = append([]interface{}{target.ID}, args...)
+		args = append(args, limit/3)
+		rows, err := s.db.Query(q, args...)
+		if err != nil {
+			return
+		}
+		defer rows.Close()
+		logs, _ := scanRequestLogs(rows)
+		for _, l := range logs {
+			if !seen[l.ID] {
+				seen[l.ID] = true
+				out = append(out, l)
+			}
+		}
+	}
+	if target.ConversationID != "" {
+		appendTier(`AND rl.conversation_id = ?`, target.ConversationID)
+	}
+	if target.AccountID != nil {
+		appendTier(`AND rl.account_id = ?`, *target.AccountID)
+	}
+	appendTier(``)
+	return out, nil
+}
+
+// WafSizeBuckets 按天返回出站体积分桶的成功/失败分布（10KB 一档，手册第 7 节口径），
+// 供分析页判断本条体积在当天分布里的位置。
+func (s *Store) WafSizeBuckets(day string) ([]map[string]interface{}, error) {
+	rows, err := s.db.Query(`SELECT ((request_bytes/10000)*10) || 'K' AS bucket,
+			SUM(status='success') AS ok, SUM(status!='success') AS fail,
+			MAX(request_bytes) FILTER (WHERE status='success') AS max_ok
+		FROM request_logs
+		WHERE substr(created_at,1,10) = ?
+		GROUP BY bucket ORDER BY bucket`, day)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []map[string]interface{}
+	for rows.Next() {
+		var bucket string
+		var ok, fail, maxOk sql.NullInt64
+		if err := rows.Scan(&bucket, &ok, &fail, &maxOk); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]interface{}{
+			"bucket": bucket, "ok": ok.Int64, "fail": fail.Int64, "maxOk": maxOk.Int64,
+		})
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) RecentLogs(limit int) ([]*RequestLog, error) {
 	if limit <= 0 {
 		limit = 100
