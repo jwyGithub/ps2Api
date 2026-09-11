@@ -122,3 +122,42 @@ func TestNativeToolResponseNeutralizesWrappedPayload(t *testing.T) {
 		t.Fatalf("wrapped payload should contain ZWSP-broken script tag, got: %s", payload)
 	}
 }
+
+// TestWafSignatureProbesAndCounts 钉住导出接口：列表与内部表一致（外部拿到的副本
+// 不可被改写），逐特征计数只含命中项且对 json.Marshal 转义形归一化后计数。
+func TestWafSignatureProbesAndCounts(t *testing.T) {
+	probes := WafSignatureProbes()
+	if len(probes) == 0 {
+		t.Fatal("WafSignatureProbes should not be empty")
+	}
+	// 副本不可变：改外部切片不得影响内部表
+	probes[0] = "mutated"
+	if WafSignatureProbes()[0] == "mutated" {
+		t.Fatal("WafSignatureProbes must return a copy")
+	}
+	// 计数：bin/cat ×1、onerror= ×1，其余不出现；转义形 <script 也计数
+	body := `{"q":"./bin/catpaw2api -config x","h":"<img onerror=alert(1)>","e":"\\u003cscript\\u003e"}`
+	got := WafSignatureCounts(body)
+	if got["bin/cat"] != 1 {
+		t.Fatalf("bin/cat count = %d, want 1: %v", got["bin/cat"], got)
+	}
+	if got["onerror="] != 1 {
+		t.Fatalf("onerror= count = %d, want 1: %v", got["onerror="], got)
+	}
+	if got["<script"] != 1 {
+		t.Fatalf("escaped <script should count as 1, got %v", got)
+	}
+	if len(got) != 3 {
+		t.Fatalf("only nonzero probes expected, got %v", got)
+	}
+	if n := len(WafSignatureCounts("干净文本，无特征")); n != 0 {
+		t.Fatalf("clean body should give empty counts, got %d", n)
+	}
+	if n := len(WafSignatureCounts("")); n != 0 {
+		t.Fatalf("empty body should give empty counts, got %d", n)
+	}
+	// 与既有总数口径一致：各特征计数之和 == WafSignatureHitCount
+	if total := WafSignatureHitCount(body); got["bin/cat"]+got["onerror="]+got["<script"] != total {
+		t.Fatalf("per-probe sum should equal WafSignatureHitCount: %v vs %d", got, total)
+	}
+}

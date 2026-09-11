@@ -121,6 +121,31 @@ func WafSignatureHitCount(outboundBody string) int {
 	return total
 }
 
+// WafSignatureProbes 返回 WAF 特征子串表的副本（单一事实源：面板 SQL 预设、store
+// 统计、/api/waf-signatures 都从这里取，加新特征只改 wafSignatureProbes 一处）。
+// 返回副本防止外部改写内部表。
+func WafSignatureProbes() []string {
+	out := make([]string, len(wafSignatureProbes))
+	copy(out, wafSignatureProbes)
+	return out
+}
+
+// WafSignatureCounts 逐特征统计出站请求体里的出现次数（归一化后、大小写不敏感），
+// 只返回 >0 的项。供面板「WAF 检测」页展示"HTML 特征 ×N / bin/cat ×N / 零特征"。
+func WafSignatureCounts(outboundBody string) map[string]int {
+	counts := map[string]int{}
+	if outboundBody == "" {
+		return counts
+	}
+	normalized := normalizeWafBody(outboundBody)
+	for _, probe := range wafSignatureProbes {
+		if n := strings.Count(normalized, probe); n > 0 {
+			counts[probe] = n
+		}
+	}
+	return counts
+}
+
 // wafSignatureSummary 统计出站请求体里各 WAF 可疑特征的出现次数，返回一行取证文本。
 // 若 Cloudflare 是解码后匹配，被拦请求应大量出现特征；若零特征仍被拦，则说明拦截
 // 另有诱因（IP/账号/速率），这正是取证要区分的问题。
