@@ -611,20 +611,39 @@ func (s *Store) Cloudflare403BodySizeSummary(window time.Duration) (string, erro
 	return out, nil
 }
 
+// WafSignatureLikeSQL 把签名子串表拼成 request_logs.upstream_body 的 LIKE 匹配
+// 片段。签名里含 `<` 时自动补一条转义形变体（同行，` OR ` 连接）：Go json.Marshal
+// 把 `<` 存成六字符字面量 <，SQL 子串匹配用 `u003c`（不写反斜杠避免多层转义歧义，
+// 先例见旧手写 SQL）。空表返回恒 false 的 `(0)`，拼进 WHERE 不炸。
+func WafSignatureLikeSQL(probes []string) string {
+	var groups []string
+	for _, p := range probes {
+		if p == "" {
+			continue
+		}
+		g := fmt.Sprintf("upstream_body LIKE '%%%s%%'", p)
+		if esc := strings.ReplaceAll(p, "<", "u003c"); esc != p {
+			g += " OR " + fmt.Sprintf("upstream_body LIKE '%%%s%%'", esc)
+		}
+		groups = append(groups, g)
+	}
+	if len(groups) == 0 {
+		return "(0)"
+	}
+	return "(" + strings.Join(groups, "\n\t\tOR ") + ")"
+}
+
 // Cloudflare403SignatureSummary 用 request_logs 里留存的出站请求体，统计最近 window 内
 // 「Cloudflare 拒绝(403)」与「成功」两类请求各自含 HTML/JS 注入类签名的比例。403 组几乎
 // 全含签名而成功组几乎不含，即证实拦截由出站内容形状（前端源码标记文本）触发，而非
-// 体积/账号/IP。无匹配样本时返回空串（调用方据此不追加）。
-func (s *Store) Cloudflare403SignatureSummary(window time.Duration) (string, error) {
+// 体积/账号/IP。签名表由调用方注入（单一事实源 provider.WafSignatureProbes；store 不得
+// import provider 避免循环依赖）。无匹配样本时返回空串（调用方据此不追加）。
+func (s *Store) Cloudflare403SignatureSummary(window time.Duration, probes []string) (string, error) {
 	minutes := int(window.Minutes())
 	if minutes < 1 {
 		minutes = 1
 	}
-	// LIKE 对 ASCII 大小写不敏感；原文匹配 <script，转义形态匹配子串 u003cscript
-	// （Go json.Marshal 把 < 转成 < 反斜杠 u003c，该子串实际只会出现在转义形态里），
-	// 不写反斜杠字面量以避免多层转义歧义。
-	const sig = `(upstream_body LIKE '%<script%' OR upstream_body LIKE '%u003cscript%'
-		OR upstream_body LIKE '%onerror=%' OR upstream_body LIKE '%onload=%' OR upstream_body LIKE '%javascript:%')`
+	sig := WafSignatureLikeSQL(probes)
 	var blockedTotal, blockedHit, okTotal, okHit int
 	err := s.db.QueryRow(`SELECT
 		COALESCE(SUM(CASE WHEN status='error' THEN 1 ELSE 0 END),0),
