@@ -161,3 +161,30 @@ func TestWafSignatureProbesAndCounts(t *testing.T) {
 		t.Fatalf("per-probe sum should equal WafSignatureHitCount: %v vs %d", got, total)
 	}
 }
+
+// TestBuildBodyWafProbeBypass 钉住探针旁路：WafProbe 请求的出站 query 原样保留——
+// 不中和（中和会掐灭待验证的已知特征，叶子轮必然假阴性）、不截断（二分切片必须
+// padding 到与原叶子等长，截断破坏等长方法论）。非探针请求行为不变。
+func TestBuildBodyWafProbeBypass(t *testing.T) {
+	p := New()
+	tokens := &Tokens{AccessToken: "tok", UserID: "u", WorkspaceID: "ws"}
+	// 大于 10000 rune 验证截断旁路；含 <script> 验证中和旁路。
+	long := "<script>alert(1)</script>" + strings.Repeat("x", 10100)
+
+	probeReq := &ChatRequest{Model: "claude-haiku-4-5", WafProbe: true,
+		Messages: []ChatMessage{{Role: "user", Content: rawText(t, long)}}}
+	probeQuery := p.buildBody(probeReq, tokens, "CLAUDE_HAIKU", 1)["input"].(map[string]interface{})["query"].(string)
+	if probeQuery != long {
+		t.Fatalf("probe query must be verbatim (no neutralize, no cap): got %d bytes, want %d", len(probeQuery), len(long))
+	}
+
+	normalReq := &ChatRequest{Model: "claude-haiku-4-5",
+		Messages: []ChatMessage{{Role: "user", Content: rawText(t, long)}}}
+	normalQuery := p.buildBody(normalReq, tokens, "CLAUDE_HAIKU", 1)["input"].(map[string]interface{})["query"].(string)
+	if len(normalQuery) >= len(long) {
+		t.Fatalf("normal request should stay capped, got %d bytes", len(normalQuery))
+	}
+	if n := WafSignatureHitCount(normalQuery); n != 0 {
+		t.Fatalf("normal request should stay neutralized, got %d hits", n)
+	}
+}

@@ -121,6 +121,11 @@ type ChatRequest struct {
 	EgressAttempt int `json:"-"`
 	// OutputConfig 是客户端发来的 output_config 字段(JSON 原文)，由 HTTP handler 注入，只进请求日志。
 	OutputConfig map[string]interface{} `json:"output_config"`
+	// WafProbe 标记本请求来自面板「WAF 检测」的在线探针：出站 query 跳过 WAF 中和
+	// 与 capUpstreamQuery 截断。探针的存在意义是原样复现可疑内容验证是否触发
+	// Cloudflare 拦截——中和会掐灭已知特征（叶子轮假阴性），截断会破坏二分切片的
+	// 等长 padding（方法论：唯一变量是内容形状，不是长度）。
+	WafProbe bool `json:"-"`
 }
 
 type Result struct {

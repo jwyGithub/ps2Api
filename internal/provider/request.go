@@ -18,7 +18,7 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 	} else if toolTail(req.Messages) {
 		convID = ""
 	}
-	split := p.splitMessages(req.Messages, convID)
+	split := p.splitMessages(req.Messages, convID, req.WafProbe)
 	tools, toolInstruction := selectedTools(req.Tools, req.ToolChoice)
 	if len(tools) > 0 {
 		if toolInstruction != "" {
@@ -36,14 +36,19 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 	// 出站 query 统一过 WAF 中和（覆盖 tool-tail/折叠历史/普通 query 三条路径）：
 	// 前端源码里的 HTML/JS 标记确定性触发 Cloudflare 403，在特征内插零宽空格破坏形态。
 	// 先中和再 cap，保证中和后的长度仍受 10000 rune 上限约束。
+	// 探针请求（req.WafProbe）两条都跳过：见 ChatRequest.WafProbe 注释。
 	upstreamQuery := split.Query
-	if wafNeutralizeEnabled() {
+	if wafNeutralizeEnabled() && !req.WafProbe {
 		upstreamQuery = wafNeutralize(upstreamQuery)
+	}
+	query := capUpstreamQuery(upstreamQuery)
+	if req.WafProbe {
+		query = upstreamQuery
 	}
 
 	input := map[string]interface{}{
 		"chatType": "USER_QUERY",
-		"query":    capUpstreamQuery(upstreamQuery),
+		"query":    query,
 		"toolResponse": "",
 		"useCase":      nil,
 		"agent":        nil,

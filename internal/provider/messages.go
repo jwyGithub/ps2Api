@@ -121,7 +121,7 @@ func foldedToolResultParts(msg ChatMessage, budget int) []string {
 	return parts
 }
 
-func (p *Provider) splitMessages(messages []ChatMessage, convID string) splitResult {
+func (p *Provider) splitMessages(messages []ChatMessage, convID string, wafProbe bool) splitResult {
 	toolIdx := toolTailIndex(messages)
 	isToolTail := toolIdx >= 0
 	hasConv := convID != ""
@@ -270,7 +270,13 @@ func (p *Provider) splitMessages(messages []ChatMessage, convID string) splitRes
 	if isToolTail {
 		tail = truncateMiddleRunes(query, FoldedTailToolResultRunes)
 	} else if queryIdx >= 0 && query != "" {
-		tail = "[User]\n" + query
+		// 探针请求不加 “[User]\n” 角色标注：探针必须逐字复现可疑内容，任何前缀
+		// 都改变字节形状（见 ChatRequest.WafProbe 注释）。
+		if wafProbe {
+			tail = query
+		} else {
+			tail = "[User]\n" + query
+		}
 	}
 	if tail != "" {
 		sections = append(sections, tail)
