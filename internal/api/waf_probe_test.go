@@ -1,10 +1,18 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"ps2api/internal/provider"
+	"ps2api/internal/store"
 )
 
 // TestProbePad 钉住等长 padding：不足补良性散文、已达标原样返回、绝不截断
@@ -65,5 +73,191 @@ func TestBisectDescend(t *testing.T) {
 	lo, hi, amb, rounds = bisectDescend(1, func(a, b int) bool { t.Fatal("single line must not be tested"); return false })
 	if lo != 0 || hi != 1 || amb || rounds != 0 {
 		t.Fatalf("single line: got [%d,%d) amb=%v rounds=%d", lo, hi, amb, rounds)
+	}
+}
+
+// newFakeProbeTestServer 构造带假发送器的测试服务：blocked(text) 决定一条探针文本
+// 是否「触发 403」，其余一律 pass。零网络。
+func newFakeProbeTestServer(t *testing.T, blocked func(text string) bool) (*http.ServeMux, *Server) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	// 简报原版测试没插入账号，ActiveAccounts() 为空会让所有 POST 卡在
+	// 「没有活跃账号」400；这里补一个活跃账号，POST 默认选中它。
+	if _, err := st.ImportAccount("probe@test", "", "{}", "manual", true); err != nil {
+		t.Fatal(err)
+	}
+	var acc int64 = 7
+	st.LogRequest(&store.RequestLog{Status: "success", AccountID: &acc, RequestBytes: 10,
+		UpstreamBody: `{"input":{"query":"clean"}}`, ConversationID: "c1", CreatedAt: time.Now()})
+	st.LogRequest(&store.RequestLog{Status: "error", ErrorMessage: "(403, Cloudflare)", AccountID: &acc,
+		RequestBytes: 20, UpstreamBody: `{"input":{"query":"padding one\n./bin/catpaw2api -config config.json\npadding two\npadding three\npadding four\npadding five\npadding six"}}`,
+		ConversationID: "c1", CreatedAt: time.Now()})
+	s := New(st)
+	s.probe.newSender = func(acc *store.Account, model string) probeSender {
+		return func(ctx context.Context, text string) probeOutcome {
+			if blocked(text) {
+				return probeOutcome{Label: "403", Ray: "fake-ray", Bytes: len(text)}
+			}
+			return probeOutcome{Label: "pass", Bytes: len(text)}
+		}
+	}
+	mux := http.NewServeMux()
+	s.Register(mux)
+	return mux, s
+}
+
+// waitProbeDone 轮询 GET 直到 job 结束（假发送器零延迟，5s 上限足够）。
+func waitProbeDone(t *testing.T, mux *http.ServeMux, jobID string) map[string]interface{} {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/waf/probe/"+jobID, nil))
+		if rec.Code != 200 {
+			t.Fatalf("probe status GET = %d: %s", rec.Code, rec.Body.String())
+		}
+		var j map[string]interface{}
+		if err := json.Unmarshal(rec.Body.Bytes(), &j); err != nil {
+			t.Fatal(err)
+		}
+		if j["status"] != "running" {
+			return j
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("probe job did not finish in 5s")
+	return nil
+}
+
+func postProbe(t *testing.T, mux *http.ServeMux, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/api/waf/probe", strings.NewReader(body)))
+	return rec
+}
+
+// TestWafProbeBisectEndToEnd 端到端（假发送器）：叶子轮命中 → 行级二分收敛到
+// bin/cat 行；对照变体放行；结论与证据齐全。
+func TestWafProbeBisectEndToEnd(t *testing.T) {
+	probePause = 0 // 测试不发真实请求，退避归零
+	t.Cleanup(func() { probePause = 1500 * time.Millisecond })
+	mux, _ := newFakeProbeTestServer(t, func(text string) bool { return strings.Contains(text, "bin/cat") })
+
+	rec := postProbe(t, mux, `{"log_id":2,"baseline_id":1,"paths":["input.query"]}`)
+	if rec.Code != 200 {
+		t.Fatalf("POST = %d: %s", rec.Code, rec.Body.String())
+	}
+	var started struct {
+		JobID string `json:"job_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+	j := waitProbeDone(t, mux, started.JobID)
+	if j["status"] != "done" {
+		t.Fatalf("status = %v, summary = %v", j["status"], j["summary"])
+	}
+	// 命中叶子与收敛行
+	hits := j["hits"].([]interface{})
+	if len(hits) != 1 || hits[0] != "input.query" {
+		t.Fatalf("hits = %v", hits)
+	}
+	cs := j["conclusions"].([]interface{})
+	if len(cs) != 1 {
+		t.Fatalf("conclusions = %v", cs)
+	}
+	c := cs[0].(map[string]interface{})
+	lines := c["lines"].([]interface{})
+	if len(lines) != 1 || lines[0] != "./bin/catpaw2api -config config.json" {
+		t.Fatalf("converged lines = %v", lines)
+	}
+	if c["ambiguous"] != false {
+		t.Fatalf("should not be ambiguous: %v", c)
+	}
+	// 变体序列：对照在前且 pass；叶子轮 403；二分轮 ≥1
+	variants := j["variants"].([]interface{})
+	if len(variants) < 3 {
+		t.Fatalf("variants too few: %v", variants)
+	}
+	if variants[0].(map[string]interface{})["outcome"] != "pass" {
+		t.Fatalf("control variant should pass: %v", variants[0])
+	}
+	saw403 := false
+	for _, v := range variants[1:] {
+		if v.(map[string]interface{})["outcome"] == "403" {
+			saw403 = true
+		}
+	}
+	if !saw403 {
+		t.Fatalf("no 403 variant recorded: %v", variants)
+	}
+}
+
+// TestWafProbeAllPass 全放行：结论提示组合特征/换对照（spec 原文案）。
+func TestWafProbeAllPass(t *testing.T) {
+	probePause = 0
+	t.Cleanup(func() { probePause = 1500 * time.Millisecond })
+	mux, _ := newFakeProbeTestServer(t, func(string) bool { return false })
+	rec := postProbe(t, mux, `{"log_id":2,"baseline_id":1,"paths":["input.query"]}`)
+	if rec.Code != 200 {
+		t.Fatalf("POST = %d: %s", rec.Code, rec.Body.String())
+	}
+	var started struct {
+		JobID string `json:"job_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &started)
+	j := waitProbeDone(t, mux, started.JobID)
+	if j["status"] != "done" || !strings.Contains(fmt.Sprint(j["summary"]), "组合特征") {
+		t.Fatalf("all-pass summary wrong: %v", j["summary"])
+	}
+}
+
+// TestWafProbeControlBlocked 对照被拦：中止并提示风控窗口。
+func TestWafProbeControlBlocked(t *testing.T) {
+	probePause = 0
+	t.Cleanup(func() { probePause = 1500 * time.Millisecond })
+	mux, _ := newFakeProbeTestServer(t, func(string) bool { return true })
+	rec := postProbe(t, mux, `{"log_id":2,"baseline_id":1,"paths":["input.query"]}`)
+	var started struct {
+		JobID string `json:"job_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &started)
+	j := waitProbeDone(t, mux, started.JobID)
+	if j["status"] != "aborted" || !strings.Contains(fmt.Sprint(j["summary"]), "风控窗口") {
+		t.Fatalf("control-blocked should abort with hint: %v / %v", j["status"], j["summary"])
+	}
+}
+
+// TestWafProbeValidation 校验分支：未知路径 400、单飞 409、缺参 400、日志不存在 404。
+func TestWafProbeValidation(t *testing.T) {
+	probePause = 0
+	t.Cleanup(func() { probePause = 1500 * time.Millisecond })
+	mux, s := newFakeProbeTestServer(t, func(string) bool { return false })
+
+	if rec := postProbe(t, mux, `{"log_id":2,"baseline_id":1,"paths":["input.absent"]}`); rec.Code != 400 {
+		t.Fatalf("unknown path should 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := postProbe(t, mux, `{"log_id":0,"baseline_id":1,"paths":["input.query"]}`); rec.Code != 400 {
+		t.Fatalf("bad log_id should 400, got %d", rec.Code)
+	}
+	if rec := postProbe(t, mux, `{"log_id":999,"baseline_id":1,"paths":["input.query"]}`); rec.Code != 404 {
+		t.Fatalf("missing log should 404, got %d", rec.Code)
+	}
+	// 单飞：手工塞一个 running job（无需真跑）
+	s.probe.mu.Lock()
+	s.probe.current = &probeJob{id: "probe-x", status: "running"}
+	s.probe.mu.Unlock()
+	if rec := postProbe(t, mux, `{"log_id":2,"baseline_id":1,"paths":["input.query"]}`); rec.Code != 409 {
+		t.Fatalf("second job while running should 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// 未知 job id
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/waf/probe/nope", nil))
+	if rec.Code != 404 {
+		t.Fatalf("unknown job should 404, got %d", rec.Code)
 	}
 }

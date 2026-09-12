@@ -9,13 +9,17 @@
 //   - metrics.go     告警、设置、analytics、代理检查
 //   - ops.go         运维只读端点与面板静态资源
 //   - waf.go         WAF 检测（签名表暴露、对照候选、离线分析）
+//   - waf_probe.go  WAF 在线探针二分（后台 job：发起/进度/中止）
 //   - helpers.go     公共 helper（jsonWrite/sse/... 与协议专属错误体
 //     anthropicError/openAIError/protoError；jsonError 只给面板端点用）
 package api
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"ps2api/internal/provider"
 	"ps2api/internal/router"
@@ -26,10 +30,29 @@ type Server struct {
 	Store  *store.Store
 	Router *router.Router
 	Vision *provider.MediaResolver
+	// probe 是「WAF 检测」在线探针的 job 管理器（内存态、单飞，见 waf_probe.go）。
+	probe probeManager
 }
 
 func New(s *store.Store) *Server {
 	srv := &Server{Store: s, Router: router.New(s), Vision: provider.NewMediaResolver(s)}
+	// 在线探针发送器：经共享 Provider 直发（出口配置与业务流量一致；绕过 router，
+	// 不占重试预算、不触发账号冷却、不写 request_logs）。测试覆写 newSender 注入假实现。
+	srv.probe.newSender = func(acc *store.Account, model string) probeSender {
+		return func(ctx context.Context, text string) probeOutcome {
+			content, _ := json.Marshal(text)
+			// 不 ResetConversation：探针消息带唯一 nonce，指纹必然未命中 → 冷启动
+			// USER_QUERY；Reset 会清掉该账号全部业务会话映射，干扰线上续聊。
+			req := &provider.ChatRequest{
+				Model:    model,
+				Messages: []provider.ChatMessage{{Role: "user", Content: content}},
+				WafProbe: true, // 原样出站：不中和（掐灭待验证特征）、不截断（破坏等长 padding）
+			}
+			cctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+			defer cancel()
+			return classifyProbeOutcome(srv.Router.Provider.Chat(cctx, acc, req))
+		}
+	}
 	// 后台告警评估器：基于真实日志/额度统计定期落告警（见 metrics.go）
 	go srv.runAlertEvaluator()
 	return srv
@@ -78,6 +101,9 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/waf-signatures", s.wafSignatures)
 	mux.HandleFunc("GET /api/waf/baselines", s.wafBaselines)
 	mux.HandleFunc("GET /api/waf/analyze", s.wafAnalyze)
+	mux.HandleFunc("POST /api/waf/probe", s.wafProbeStart)
+	mux.HandleFunc("GET /api/waf/probe/{job_id}", s.wafProbeStatus)
+	mux.HandleFunc("DELETE /api/waf/probe/{job_id}", s.wafProbeAbort)
 
 	// 面板登录（见 login.go）：ADMIN_PASSWORD 设置后生效
 	mux.HandleFunc("GET /login", s.loginPage)
