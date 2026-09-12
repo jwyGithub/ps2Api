@@ -26,9 +26,22 @@
           <div class="flex items-center gap-2">
             <span class="text-[12px]" style="color: var(--muted);">对照</span>
             <select id="wafBaselineSel" class="input" style="width:auto;" onchange="wafSetBaseline(this.value)"></select>
+            <button class="btn btn-ghost text-[12px]" id="wafProbeBtn" onclick="wafProbe()" style="display:none;">发起探针</button>
           </div>
         </div>
         <div id="wafAnalysisBody"></div>
+      </div>
+
+      <div class="card p-6 mt-4" id="wafProbePanel" style="display:none;">
+        <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
+          <h3 class="font-display text-[16px] font-medium">在线探针 <span class="font-mono text-[13px]" id="wafProbeMeta" style="color: var(--muted);"></span></h3>
+          <div class="flex items-center gap-2">
+            <input id="wafProbeAccount" class="input" style="width:110px;" placeholder="账号ID(可选)">
+            <input id="wafProbeModel" class="input" style="width:170px;" value="claude-haiku-4-5" placeholder="模型">
+            <button class="btn btn-ghost text-[12px]" onclick="wafProbeAbort()">中止</button>
+          </div>
+        </div>
+        <div id="wafProbeBody"></div>
       </div>
     </div>
   </section>

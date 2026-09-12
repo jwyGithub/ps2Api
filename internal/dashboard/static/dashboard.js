@@ -17,7 +17,7 @@
     days: 14, page: 'overview', poolQuery: '', poolStatus: 'ALL', alertTab: 'open',
     poolPage: 1, quotaPage: 1,
     reqlogs: [], reqlogsPage: 1, reqlogsTotal: 0, reqlogsCollapsed: {},
-    waf: { list: [], page: 1, total: 0, currentId: 0, baselineId: '', analysis: null },
+    waf: { list: [], page: 1, total: 0, currentId: 0, baselineId: '', analysis: null, probePaths: [], probeJob: '', probeTimer: null },
     sqlLast: null
   };
   var PAGE_SIZE = 20;
@@ -640,6 +640,7 @@
     var url = '/api/waf/analyze?log_id=' + state.waf.currentId + (state.waf.baselineId ? '&baseline_id=' + state.waf.baselineId : '');
     api(url).then(function (data) {
       state.waf.analysis = data;
+      state.waf.probePaths = (data.diff || []).map(function (x) { return x.kind !== 'removed'; });
       renderWafAnalysis(data);
     }).catch(function (e) { toast('分析失败：' + e.message); });
   }
@@ -668,8 +669,11 @@
     } else if (!diffs.length) {
       html += '<div class="text-[13px]" style="color:var(--muted);">与对照逐叶一致——内容形状排除，指向 IP/账号/速率维度。</div>';
     } else {
-      html += diffs.map(function (x) {
-        return '<details class="card p-3 mb-2"><summary class="cursor-pointer font-mono text-[12px]">' +
+      html += diffs.map(function (x, i) {
+        var ck = x.kind === 'removed'
+          ? '<input type="checkbox" disabled> '
+          : '<input type="checkbox" ' + (state.waf.probePaths[i] ? 'checked' : '') + ' onchange="wafToggleLeaf(' + i + ', this.checked)" onclick="event.stopPropagation()"> ';
+        return '<details class="card p-3 mb-2"><summary class="cursor-pointer font-mono text-[12px]">' + ck +
           '<span class="tag ' + (x.kind === 'added' ? 'tag-red' : x.kind === 'removed' ? 'tag-gray' : 'tag-amber') + '">' + esc(x.kind) + '</span> ' +
           esc(x.path) + ' <span style="color:var(--muted);">' + (x.baselineLen || 0) + 'B → ' + (x.targetLen || 0) + 'B</span></summary>' +
           '<pre class="text-[11px] mt-2 p-2 overflow-x-auto" style="background:var(--bg-2);border-radius:6px;">' +
@@ -688,6 +692,91 @@
         }).join('') + '</tbody></table></div>';
     }
     var el = document.getElementById('wafAnalysisBody');
+    if (el) el.innerHTML = html;
+    var probeBtn = document.getElementById('wafProbeBtn');
+    if (probeBtn) probeBtn.style.display = (d.baseline && diffs.length) ? '' : 'none';
+  }
+
+  // ─── WAF 在线探针（后台 job 轮询）─────────────────────────
+  window.wafToggleLeaf = function (i, on) { state.waf.probePaths[i] = on; };
+  window.wafProbe = function () {
+    var d = state.waf.analysis;
+    if (!d || !d.baseline) { toast('无对照记录，不能发起探针'); return; }
+    var paths = [];
+    (d.diff || []).forEach(function (x, i) {
+      if (x.kind !== 'removed' && state.waf.probePaths[i]) paths.push(x.path);
+    });
+    if (!paths.length) { toast('未勾选任何差异叶子'); return; }
+    var accEl = document.getElementById('wafProbeAccount');
+    var modelEl = document.getElementById('wafProbeModel');
+    var accId = accEl ? accEl.value.trim() : '';
+    var model = modelEl ? modelEl.value.trim() : '';
+    if (!model) model = 'claude-haiku-4-5';
+    if (!confirm('发起在线探针：' + (1 + paths.length) + ' 个变体（对照 1 + 叶子 ' + paths.length +
+      '），每变体 2 次真实请求；命中后另有行级二分（约 log2(行数) 轮）。\n账号：' +
+      (accId ? '#' + accId : '自动（首个活跃号）') + '\n模型：' + model +
+      '\n将真实消耗额度并打到线上 Cloudflare，确认继续？')) return;
+    api('/api/waf/probe', { method: 'POST', body: JSON.stringify({
+      log_id: state.waf.currentId, baseline_id: d.baseline.id, paths: paths,
+      account_id: accId ? Number(accId) : 0, model: model
+    }) }).then(function (r) {
+      state.waf.probeJob = r.job_id;
+      var panel = document.getElementById('wafProbePanel');
+      if (panel) panel.style.display = '';
+      wafPollProbe();
+    }).catch(function (e) { toast('探针发起失败：' + e.message); });
+  };
+  window.wafProbeAbort = function () {
+    if (!state.waf.probeJob) return;
+    api('/api/waf/probe/' + state.waf.probeJob, { method: 'DELETE' }).catch(function () {});
+  };
+  function wafPollProbe() {
+    if (state.waf.probeTimer) clearInterval(state.waf.probeTimer);
+    var tick = function () {
+      api('/api/waf/probe/' + state.waf.probeJob).then(function (j) {
+        renderWafProbe(j);
+        if (j.status !== 'running') {
+          clearInterval(state.waf.probeTimer);
+          state.waf.probeTimer = null;
+        }
+      }).catch(function (e) {
+        clearInterval(state.waf.probeTimer);
+        state.waf.probeTimer = null;
+        toast('探针状态获取失败：' + e.message);
+      });
+    };
+    state.waf.probeTimer = setInterval(tick, 2000);
+    tick();
+  }
+  function renderWafProbe(j) {
+    var meta = document.getElementById('wafProbeMeta');
+    if (meta) meta.textContent = '#' + (j.id || '') + ' · ' + (j.account || '') + ' · ' + (j.model || '') + ' · ' + (j.status || '');
+    var html = '';
+    if (j.phase === 'running' || j.status === 'running') html += '<div class="mb-3 text-[12px]" style="color:var(--muted);">进行中：' + esc(j.phase || '') + '（' + ((j.variants || []).length) + ' 个变体已完成）</div>';
+    if (j.summary) html += '<div class="mb-3 text-[13px]" style="color:var(--fg-2);">' + esc(j.summary) + '</div>';
+    var vs = j.variants || [];
+    if (vs.length) {
+      html += '<table class="data-table"><thead><tr><th>变体</th><th>结果</th><th>出站</th><th>Ray</th></tr></thead><tbody>' +
+        vs.map(function (v) {
+          return '<tr><td class="font-mono text-[12px]">' + esc(v.name) + '</td>' +
+            '<td><span class="tag ' + (v.outcome === '403' ? 'tag-red' : v.outcome === 'pass' ? 'tag-green' : 'tag-gray') + '">' + esc(v.outcome) + '</span></td>' +
+            '<td class="font-mono">' + fmt(v.bytes) + 'B</td>' +
+            '<td class="font-mono text-[11px]">' + esc((v.rays || []).join(', ')) + '</td></tr>';
+        }).join('') + '</tbody></table>';
+    }
+    var cs = j.conclusions || [];
+    if (cs.length) {
+      html += '<div class="mt-4"><div class="text-[12px] font-semibold mb-2" style="color:var(--muted);">触发行（行级二分收敛）</div>' +
+        cs.map(function (c) {
+          return '<details class="card p-3 mb-2" open><summary class="cursor-pointer font-mono text-[12px]">' +
+            '<span class="tag tag-red">命中</span> ' + esc(c.path) +
+            (c.ambiguous ? ' <span class="tag tag-amber">歧义（跨行组合特征）</span>' : '') +
+            ' <span style="color:var(--muted);">' + (c.rounds || 0) + ' 轮</span></summary>' +
+            '<pre class="text-[11px] mt-2 p-2 overflow-x-auto" style="background:var(--bg-2);border-radius:6px;">' +
+            esc((c.lines || []).join('\n')) + '</pre></details>';
+        }).join('') + '</div>';
+    }
+    var el = document.getElementById('wafProbeBody');
     if (el) el.innerHTML = html;
   }
 
