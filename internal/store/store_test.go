@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +65,7 @@ func TestWafAnalysisQueries(t *testing.T) {
 	s.LogRequest(mk("success", "", "", acc, 42000, 40))                     // id 3（无会话键 → 独立组）
 	s.LogRequest(mk("error", "(403, Cloudflare)", "convB", acc, 43000, 30)) // id 4
 	s.LogRequest(mk("success", "", "convC", acc+1, 44000, 20))              // id 5
+	s.LogRequest(mk("success", "", "", acc, 105000, 10))                   // id 6（105K 桶，钉住数值排序）
 
 	n, err := s.CountCloudflare403Logs()
 	if err != nil || n != 2 {
@@ -115,6 +117,18 @@ func TestWafAnalysisQueries(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("bucket 40K missing in %v", buckets)
+	}
+	// 桶按数值升序："105K" 必须排在 "40K" 之后（字符串序会把 "105K" 排前面）
+	prevKB := -1
+	for _, bk := range buckets {
+		var kb int
+		if _, err := fmt.Sscanf(bk["bucket"].(string), "%dK", &kb); err != nil {
+			t.Fatalf("bad bucket label %v", bk["bucket"])
+		}
+		if kb <= prevKB {
+			t.Fatalf("buckets not numerically ordered: %v", buckets)
+		}
+		prevKB = kb
 	}
 }
 

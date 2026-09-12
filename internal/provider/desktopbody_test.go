@@ -120,7 +120,7 @@ func TestCloudflareRejectionDetail(t *testing.T) {
 	outbound := strings.Repeat("func main() { fmt.Println(`hi`) } ", 3000)
 	detail := cloudflareRejectionDetail(http.StatusForbidden, h, body, outbound)
 
-	for _, want := range []string{"HTTP 状态: 403", "8b2c1d3e4f5a6b7c-SJC", "Attention Required", "触发 Cloudflare WAF", "未检出 HTML/JS 注入类特征"} {
+	for _, want := range []string{"HTTP 状态: 403", "8b2c1d3e4f5a6b7c-SJC", "Attention Required", "触发 Cloudflare WAF", "未检出已知内容签名"} {
 		if !strings.Contains(detail, want) {
 			t.Fatalf("rejection detail missing %q\ngot: %s", want, detail)
 		}

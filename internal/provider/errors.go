@@ -83,8 +83,8 @@ func parseRateLimit(headers http.Header, now time.Time) *RateLimit {
 	return rate
 }
 
-// wafSignatureProbes 是出站请求体中可能命中 Cloudflare WAF 托管内容规则（XSS/HTML 注入
-// 规则族）的子串特征，全小写、大小写不敏感计数。用于 403 取证：验证「前端源码里的
+// wafSignatureProbes 是出站请求体中可能命中 Cloudflare WAF 托管内容规则（XSS/HTML
+// 注入规则族，以及 bin/cat 命令路径类）的子串特征，全小写、大小写不敏感计数。用于 403 取证：验证「前端源码里的
 // HTML/JS 标记文本触发拦截」假设（前端项目 100% 被拦、Java/Rust/Go 项目从不被拦，
 // 唯一稳定变量就是 tool_result 回传的文件内容形状）。
 var wafSignatureProbes = []string{
@@ -163,7 +163,7 @@ func wafSignatureSummary(outboundBody string) string {
 		}
 	}
 	if total == 0 {
-		return "出站体特征: 未检出 HTML/JS 注入类特征——拦截诱因可能不是内容形状，建议排查 IP/账号/速率维度"
+		return "出站体特征: 未检出已知内容签名（HTML/JS 注入类与 bin/cat 命令路径类）——拦截诱因可能不是内容形状，建议排查 IP/账号/速率维度"
 	}
 	return "出站体特征(HTML/JS 注入类特征计数, 合计 " + strconv.Itoa(total) + "): " + strings.Join(hits, ", ")
 }

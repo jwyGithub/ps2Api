@@ -793,27 +793,26 @@ func (s *Store) WafBaselineCandidates(target *RequestLog, limit int) ([]*Request
 }
 
 // WafSizeBuckets 按天返回出站体积分桶的成功/失败分布（10KB 一档，手册第 7 节口径），
-// 供分析页判断本条体积在当天分布里的位置。
+// 供分析页判断本条体积在当天分布里的位置。按桶的数值排序（"100K" 不再串排在 "40K" 前）。
 func (s *Store) WafSizeBuckets(day string) ([]map[string]interface{}, error) {
-	rows, err := s.db.Query(`SELECT ((request_bytes/10000)*10) || 'K' AS bucket,
+	rows, err := s.db.Query(`SELECT (request_bytes/10000)*10 AS kb,
 			SUM(status='success') AS ok, SUM(status!='success') AS fail,
 			MAX(request_bytes) FILTER (WHERE status='success') AS max_ok
 		FROM request_logs
 		WHERE substr(created_at,1,10) = ?
-		GROUP BY bucket ORDER BY bucket`, day)
+		GROUP BY kb ORDER BY kb`, day)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []map[string]interface{}
 	for rows.Next() {
-		var bucket string
-		var ok, fail, maxOk sql.NullInt64
-		if err := rows.Scan(&bucket, &ok, &fail, &maxOk); err != nil {
+		var kb, ok, fail, maxOk sql.NullInt64
+		if err := rows.Scan(&kb, &ok, &fail, &maxOk); err != nil {
 			return nil, err
 		}
 		out = append(out, map[string]interface{}{
-			"bucket": bucket, "ok": ok.Int64, "fail": fail.Int64, "maxOk": maxOk.Int64,
+			"bucket": fmt.Sprintf("%dK", kb.Int64), "ok": ok.Int64, "fail": fail.Int64, "maxOk": maxOk.Int64,
 		})
 	}
 	return out, rows.Err()
