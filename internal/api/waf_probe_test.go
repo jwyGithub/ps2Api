@@ -232,6 +232,56 @@ func TestWafProbeControlBlocked(t *testing.T) {
 	}
 }
 
+// TestWafProbeAbortPropagation 中止传播：叶子轮中途 abort 后主流程必须停，
+// 最终 status 是 aborted，不产出「全部叶子放行」假结论，conclusions 为空。
+// 全放行假发送器：若中止不传播，job 会以 done + 假结论收场，此测试即失败。
+func TestWafProbeAbortPropagation(t *testing.T) {
+	probePause = 0
+	t.Cleanup(func() { probePause = 1500 * time.Millisecond })
+	mux, s := newFakeProbeTestServer(t, func(string) bool { return false })
+	// 覆写发送器：第 3 次调用（对照 2 次后的叶子轮第 1 次）挂起，
+	// 等测试走真实 abort 端点后再放行，保证取消发生在 job 运行中。
+	entered, release := make(chan struct{}), make(chan struct{})
+	calls := 0
+	s.probe.newSender = func(*store.Account, string) probeSender {
+		return func(ctx context.Context, text string) probeOutcome {
+			calls++
+			if calls == 3 {
+				close(entered)
+				<-release
+			}
+			return probeOutcome{Label: "pass", Bytes: len(text)}
+		}
+	}
+	rec := postProbe(t, mux, `{"log_id":2,"baseline_id":1,"paths":["input.query"]}`)
+	if rec.Code != 200 {
+		t.Fatalf("POST = %d: %s", rec.Code, rec.Body.String())
+	}
+	var started struct {
+		JobID string `json:"job_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		<-entered
+		// 走真实 DELETE abort 端点（内部做 isRunning 检查后调 cancel）
+		abortRec := httptest.NewRecorder()
+		mux.ServeHTTP(abortRec, httptest.NewRequest("DELETE", "/api/waf/probe/"+started.JobID, nil))
+		close(release)
+	}()
+	j := waitProbeDone(t, mux, started.JobID)
+	if j["status"] != "aborted" {
+		t.Fatalf("status = %v, summary = %v", j["status"], j["summary"])
+	}
+	if summary := fmt.Sprint(j["summary"]); strings.Contains(summary, "全部叶子放行") {
+		t.Fatalf("abort must not be overwritten by fake all-pass conclusion: %q", summary)
+	}
+	if cs, ok := j["conclusions"].([]interface{}); !ok || len(cs) != 0 {
+		t.Fatalf("aborted job must have no conclusions: %v", j["conclusions"])
+	}
+}
+
 // TestWafProbeValidation 校验分支：未知路径 400、单飞 409、缺参 400、日志不存在 404。
 func TestWafProbeValidation(t *testing.T) {
 	probePause = 0

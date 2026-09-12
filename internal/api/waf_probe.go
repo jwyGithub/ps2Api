@@ -155,6 +155,14 @@ func (j *probeJob) setPhase(p string) {
 	j.mu.Unlock()
 }
 
+// isRunning 统一锁口径：status 属于 j.mu，读它必须先取 j.mu（abort handler 与
+// 单飞检查共用，避免跨锁读的数据竞争）。
+func (j *probeJob) isRunning() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.status == "running"
+}
+
 func (j *probeJob) finish(status, summary string) {
 	j.mu.Lock()
 	j.status = status
@@ -291,7 +299,7 @@ func (s *Server) wafProbeStart(w http.ResponseWriter, r *http.Request) {
 	}
 	// 单飞：运行中直接拒绝。
 	s.probe.mu.Lock()
-	if s.probe.current != nil && s.probe.current.status == "running" {
+	if s.probe.current != nil && s.probe.current.isRunning() {
 		s.probe.mu.Unlock()
 		jsonError(w, 409, "已有探针 job 在运行，请等它结束或先中止", "invalid_request_error")
 		return
@@ -336,10 +344,7 @@ func (s *Server) wafProbeAbort(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 404, "探针 job 不存在", "invalid_request_error")
 		return
 	}
-	j.mu.Lock()
-	running := j.status == "running"
-	j.mu.Unlock()
-	if running {
+	if j.isRunning() {
 		j.cancel()
 	}
 	jsonWrite(w, 200, map[string]interface{}{"status": "aborted"})
@@ -356,7 +361,7 @@ func (s *Server) runProbeJob(ctx context.Context, j *probeJob, leaves []probeLea
 	// 403 内容签名是确定性拦截：任一次 403 即命中；偶发风控型 403 会先在对照变体暴露。
 	trySend := func(name, text string) (hit bool) {
 		v := probeVariantResult{Name: name, Bytes: len(text)}
-		blocked, passed, other := 0, 0, 0
+		blocked, other := 0, 0
 		for i := 0; i < probeReps; i++ {
 			select {
 			case <-ctx.Done():
@@ -378,7 +383,7 @@ func (s *Server) runProbeJob(ctx context.Context, j *probeJob, leaves []probeLea
 			case "403":
 				blocked++
 			case "pass":
-				passed++
+				// pass 无需计数：blocked/other 皆零即 pass
 			default:
 				other++
 			}
@@ -402,6 +407,17 @@ func (s *Server) runProbeJob(ctx context.Context, j *probeJob, leaves []probeLea
 		seq++
 		return fmt.Sprintf("%s-%d-%d", j.id, seq, time.Now().UnixNano())
 	}
+	// stopIfCancelled 在阶段边界统一处理中止传播。trySend 的 select 在 ctx 已取消时
+	// 仍可能随机选中 time.After 分支（两 case 同就绪）而跳过 aborted 置位，
+	// 所以不能只靠 trySend：这里兜底设置状态后返回 true，调用方直接 return，
+	// 严禁让后续阶段的 finish("done", ...) 覆盖成假结论。
+	stopIfCancelled := func() bool {
+		if ctx.Err() == nil {
+			return false
+		}
+		j.finish("aborted", "探针已中止")
+		return true
+	}
 
 	// 1) 对照变体：等长纯文本（repro403 实验 A_plain_prose 的角色）。被拦说明
 	//    当前账号/出口在风控窗口，后续结果全部不可信，直接中止。
@@ -418,18 +434,30 @@ func (s *Server) runProbeJob(ctx context.Context, j *probeJob, leaves []probeLea
 		j.finish("aborted", "对照变体（等长纯文本）也被 403——当前账号/出口处于风控窗口，探针结果不可信。请稍后重试或换账号。")
 		return
 	}
+	// 中止传播：取消后直接退出，不产出假结论。
+	if stopIfCancelled() {
+		return
+	}
 
 	// 2) 叶子轮：每个勾选叶子单独成变体（基于对照，只注入该叶子内容）。
 	j.setPhase("leaf")
 	var hitLeaves []probeLeaf
 	for _, l := range leaves {
-		text := probePad(probePrefix(nextNonce())+l.value, len(probePrefix(nextNonce())+l.value))
-		if trySend("叶子 "+l.path, text) {
+		if stopIfCancelled() {
+			return
+		}
+		// 前缀只取一次：两次 nextNonce() 恒等长，pad 到自身长度是 no-op，
+		// 会让叶子变体与对照不等长。统一 pad 到 maxLen（对照组的长度）。
+		prefix := probePrefix(nextNonce())
+		if trySend("叶子 "+l.path, probePad(prefix+l.value, maxLen)) {
 			hitLeaves = append(hitLeaves, l)
 			j.mu.Lock()
 			j.hits = append(j.hits, l.path)
 			j.mu.Unlock()
 		}
+	}
+	if stopIfCancelled() {
+		return
 	}
 	if len(hitLeaves) == 0 {
 		j.finish("done", "全部叶子放行——触发可能是组合特征或对照本身已含特征，建议换对照或转手工（repro403 实验）。")
@@ -439,6 +467,9 @@ func (s *Server) runProbeJob(ctx context.Context, j *probeJob, leaves []probeLea
 	// 3) 行级二分：对每个命中叶子按行二分，~log2(行数) 轮收敛到触发行。
 	j.setPhase("bisect")
 	for _, l := range hitLeaves {
+		if stopIfCancelled() {
+			return
+		}
 		lines := strings.Split(l.value, "\n")
 		if len(lines) == 1 {
 			// 整叶触发且只有一行：无需二分，这行就是结论。
@@ -453,11 +484,19 @@ func (s *Server) runProbeJob(ctx context.Context, j *probeJob, leaves []probeLea
 			name := fmt.Sprintf("二分 %s 行[%d:%d]", l.path, a, b)
 			return trySend(name, probePad(probePrefix(nextNonce())+slice, target))
 		})
+		// 中止传播：取消后 bisectDescend 的两次 trySend 都是 ctx.Done 短路，
+		// 其 ambiguous 结论不可信，不落盘。
+		if stopIfCancelled() {
+			return
+		}
 		j.mu.Lock()
 		j.conclusions = append(j.conclusions, probeConclusion{
 			Path: l.path, Lines: lines[lo:hi], Ambiguous: amb, Rounds: rounds,
 		})
 		j.mu.Unlock()
+	}
+	if stopIfCancelled() {
+		return
 	}
 	j.finish("done", "探针完成：命中 "+fmt.Sprint(len(hitLeaves))+" 个叶子，结论见触发行列表。")
 }
