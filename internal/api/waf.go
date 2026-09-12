@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 
 	"ps2api/internal/provider"
 	"ps2api/internal/store"
@@ -278,4 +279,82 @@ func (s *Server) wafAnalyze(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	jsonWrite(w, 200, resp)
+}
+
+// ── 探针支撑：按路径取叶子全文 ──────────────────────────────
+
+// leafSeg 是 leafDiff 路径的一段：对象键或数组下标。
+type leafSeg struct {
+	key     string
+	index   int
+	isIndex bool
+}
+
+// parseLeafPath 把 leafDiff 产出的路径（"input.query"、"toolResponses[0].content.message"）
+// 解析成段序列，供 leafValue 定位叶子。畸形路径（缺 ]、下标非数字）返回 nil——
+// 只截断到已解析前缀会让 "arr[x]" 误命中前缀节点 arr，故显式判畸形。
+func parseLeafPath(p string) []leafSeg {
+	var segs []leafSeg
+	var key strings.Builder
+	flush := func() {
+		if key.Len() > 0 {
+			segs = append(segs, leafSeg{key: key.String()})
+			key.Reset()
+		}
+	}
+	for i := 0; i < len(p); i++ {
+		switch p[i] {
+		case '.':
+			flush()
+		case '[':
+			flush()
+			j := strings.IndexByte(p[i:], ']')
+			if j < 0 {
+				return nil
+			}
+			n, err := strconv.Atoi(strings.TrimSpace(p[i+1 : i+j]))
+			if err != nil {
+				return nil
+			}
+			segs = append(segs, leafSeg{index: n, isIndex: true})
+			i += j
+		default:
+			key.WriteByte(p[i])
+		}
+	}
+	flush()
+	return segs
+}
+
+// leafValue 返回 JSON 出站体中该路径叶子的完整字符串值（leafDiff 的 preview 截 500
+// 字符，在线探针需要全文来构造等长变体）。路径不存在或 body 非法 JSON 时 ok=false。
+func leafValue(body, path string) (string, bool) {
+	var v interface{}
+	if json.Unmarshal([]byte(body), &v) != nil {
+		return "", false
+	}
+	segs := parseLeafPath(path)
+	if segs == nil {
+		return "", false
+	}
+	for _, seg := range segs {
+		if seg.isIndex {
+			arr, ok := v.([]interface{})
+			if !ok || seg.index < 0 || seg.index >= len(arr) {
+				return "", false
+			}
+			v = arr[seg.index]
+			continue
+		}
+		m, ok := v.(map[string]interface{})
+		if !ok {
+			return "", false
+		}
+		nv, ok := m[seg.key]
+		if !ok {
+			return "", false
+		}
+		v = nv
+	}
+	return leafString(v), true
 }

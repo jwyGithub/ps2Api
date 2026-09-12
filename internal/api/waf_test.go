@@ -181,3 +181,29 @@ func newWafTestServer(t *testing.T) (*store.Store, *Server, *http.ServeMux) {
 	s.Register(mux)
 	return st, s, mux
 }
+
+// TestParseLeafPathAndLeafValue 钉住路径解析与叶子全文提取：对象键/数组下标/
+// 混合路径、路径不存在、畸形路径、非 JSON body。
+func TestParseLeafPathAndLeafValue(t *testing.T) {
+	body := `{"input":{"query":"./bin/catpaw2api -config x"},"arr":["a","b"],"nested":[{"msg":"hello"}]}`
+	cases := []struct{ path, want string }{
+		{"input.query", "./bin/catpaw2api -config x"},
+		{"arr[1]", "b"},
+		{"nested[0].msg", "hello"},
+		{"input", `{"query":"./bin/catpaw2api -config x"}`}, // 中间节点：leafString 走 json.Marshal
+	}
+	for _, c := range cases {
+		got, ok := leafValue(body, c.path)
+		if !ok || got != c.want {
+			t.Fatalf("leafValue(%q) = %q, %v; want %q", c.path, got, ok, c.want)
+		}
+	}
+	for _, bad := range []string{"input.missing", "arr[5]", "nested[0].gone", "arr[x]", "input["} {
+		if got, ok := leafValue(body, bad); ok {
+			t.Fatalf("leafValue(%q) should miss, got %q", bad, got)
+		}
+	}
+	if _, ok := leafValue("not-json{", "input.query"); ok {
+		t.Fatal("malformed body should miss")
+	}
+}
