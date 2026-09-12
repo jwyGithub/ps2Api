@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"ps2api/internal/provider"
 	"ps2api/internal/store"
@@ -271,6 +272,14 @@ func (s *Server) wafProbeStart(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, 400, "无法从目标出站体提取叶子全文（JSON 解析失败的分析不支持探针）: "+p, "invalid_request_error")
 			return
 		}
+		// 上游对 input.query 有 MaxUpstreamQueryRunes 硬校验：超长叶子会让所有变体
+		// 变 other_error → 不命中 → 「全部叶子放行」的误导性假阴性，必须在发起前拒绝。
+		// 前缀按 probePrefix 一个典型 nonce 的长度估算，保守留 100 字符余量。
+		const probePrefixRunes = 100
+		if utf8.RuneCountInString(v)+probePrefixRunes > provider.MaxUpstreamQueryRunes {
+			jsonError(w, 400, fmt.Sprintf("叶子 %s 全文加前缀超出上游 %d 字符 query 上限，无法逐字探测", p, provider.MaxUpstreamQueryRunes), "invalid_request_error")
+			return
+		}
 		leaves = append(leaves, probeLeaf{path: p, value: v})
 	}
 	// 账号：显式指定或首个活跃号。不走 pool（探针不占预留/在飞统计）。
@@ -347,7 +356,11 @@ func (s *Server) wafProbeAbort(w http.ResponseWriter, r *http.Request) {
 	if j.isRunning() {
 		j.cancel()
 	}
-	jsonWrite(w, 200, map[string]interface{}{"status": "aborted"})
+	// 已结束的 job 是 no-op：按实际状态返回，不谎报 aborted。
+	j.mu.Lock()
+	st := j.status
+	j.mu.Unlock()
+	jsonWrite(w, 200, map[string]interface{}{"status": st})
 }
 
 // runProbeJob 是探针主流程：对照 → 叶子轮 → 行级二分。任何一步出错置 error 并终止。

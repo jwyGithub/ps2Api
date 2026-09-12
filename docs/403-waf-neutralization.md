@@ -199,7 +199,9 @@ ZWSP 版上线后再次出现 403。按第 6 节手册排查，结论与第 6 �
 - 不 ResetConversation：探针消息带唯一 nonce，指纹必然未命中 → 天然冷启动 USER_QUERY；
   Reset 会清掉该账号全部业务会话映射，干扰线上续聊；
 - 绕过 router：不占重试预算、不触发账号冷却、不写 request_logs；
-- 同一时刻仅一个 job（重复发起 409），可中止（DELETE），不持久化（重启即丢）。
+- 同一时刻仅一个 job（重复发起 409），可中止（DELETE），不持久化（重启即丢）；
+- 叶子全文受上游 10000 字符 query 上限约束（provider.MaxUpstreamQueryRunes），
+  超长叶子（全文 + 前缀超限）会被 400 拒绝，无法逐字探测。
 
 验收基准（bin/cat 案例）：对 2026-09-11 b577d7cb 型 403，叶子轮应命中 README 叶子，
 行级二分应收敛到 `./bin/catpaw2api -config config.json` 一行。

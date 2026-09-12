@@ -153,7 +153,7 @@
     setText('#crumb', names[page] || page);
     if (page === 'reqlogs') renderReqLogsReal();
     if (page === 'sql') renderSqlPresets();
-    if (page === 'waf') wafRefresh();
+    if (page === 'waf') { wafRefresh(); wafRestoreProbe(); }
     if (page === 'pools') { renderPoolsReal(); renderQuotaReal(); }
     if (page === 'alerts') renderAlertsReal();
     if (page === 'routing') renderRoutingReal();
@@ -721,11 +721,24 @@
       account_id: accId ? Number(accId) : 0, model: model
     }) }).then(function (r) {
       state.waf.probeJob = r.job_id;
+      try { sessionStorage.setItem('wafProbeJob', r.job_id); } catch (e) {}
       var panel = document.getElementById('wafProbePanel');
       if (panel) panel.style.display = '';
       wafPollProbe();
     }).catch(function (e) { toast('探针发起失败：' + e.message); });
   };
+  // 刷新恢复：probeJob 只存内存 state，浏览器刷新即丢，而后端 job 仍在跑且单飞 409。
+  // 发起时把 job_id 存进 sessionStorage，进 WAF 页时恢复轮询（孤儿 job 可见、可中止）。
+  function wafRestoreProbe() {
+    if (state.waf.probeJob) return;
+    var id = null;
+    try { id = sessionStorage.getItem('wafProbeJob'); } catch (e) {}
+    if (!id) return;
+    state.waf.probeJob = id;
+    var panel = document.getElementById('wafProbePanel');
+    if (panel) panel.style.display = '';
+    wafPollProbe();
+  }
   window.wafProbeAbort = function () {
     if (!state.waf.probeJob) return;
     api('/api/waf/probe/' + state.waf.probeJob, { method: 'DELETE' }).catch(function () {});
@@ -734,14 +747,18 @@
     if (state.waf.probeTimer) clearInterval(state.waf.probeTimer);
     var tick = function () {
       api('/api/waf/probe/' + state.waf.probeJob).then(function (j) {
+        // 竞态：旧 job 在途 GET 延迟 resolve 时不覆盖新面板、不误清新定时器。
+        if (j.id !== state.waf.probeJob) return;
         renderWafProbe(j);
         if (j.status !== 'running') {
           clearInterval(state.waf.probeTimer);
           state.waf.probeTimer = null;
+          try { sessionStorage.removeItem('wafProbeJob'); } catch (e) {}
         }
       }).catch(function (e) {
         clearInterval(state.waf.probeTimer);
         state.waf.probeTimer = null;
+        try { sessionStorage.removeItem('wafProbeJob'); } catch (e) {}
         toast('探针状态获取失败：' + e.message);
       });
     };
@@ -752,7 +769,7 @@
     var meta = document.getElementById('wafProbeMeta');
     if (meta) meta.textContent = '#' + (j.id || '') + ' · ' + (j.account || '') + ' · ' + (j.model || '') + ' · ' + (j.status || '');
     var html = '';
-    if (j.phase === 'running' || j.status === 'running') html += '<div class="mb-3 text-[12px]" style="color:var(--muted);">进行中：' + esc(j.phase || '') + '（' + ((j.variants || []).length) + ' 个变体已完成）</div>';
+    if (j.status === 'running') html += '<div class="mb-3 text-[12px]" style="color:var(--muted);">进行中：' + esc(j.phase || '') + '（' + ((j.variants || []).length) + ' 个变体已完成）</div>';
     if (j.summary) html += '<div class="mb-3 text-[13px]" style="color:var(--fg-2);">' + esc(j.summary) + '</div>';
     var vs = j.variants || [];
     if (vs.length) {

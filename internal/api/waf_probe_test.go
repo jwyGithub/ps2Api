@@ -304,6 +304,18 @@ func TestWafProbeValidation(t *testing.T) {
 	if rec := postProbe(t, mux, `{"log_id":2,"baseline_id":1,"paths":["input.query"]}`); rec.Code != 409 {
 		t.Fatalf("second job while running should 409, got %d: %s", rec.Code, rec.Body.String())
 	}
+	// 超长叶子：全文 + 前缀超出上游 10000 rune query 上限，必须 400 拒绝
+	// （否则所有变体变 other_error，产出「全部叶子放行」的误导性假阴性）。
+	var bigAcc int64 = 7
+	if err := s.Store.LogRequest(&store.RequestLog{Status: "error", ErrorMessage: "(403, Cloudflare)",
+		AccountID: &bigAcc, RequestBytes: 13000, UpstreamBody: `{"input":{"query":"` + strings.Repeat("a", 12000) + `"}}`,
+		ConversationID: "c1", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	big := postProbe(t, mux, `{"log_id":3,"baseline_id":1,"paths":["input.query"]}`)
+	if big.Code != 400 || !strings.Contains(big.Body.String(), "超出上游") {
+		t.Fatalf("oversized leaf should 400 with hint, got %d: %s", big.Code, big.Body.String())
+	}
 	// 未知 job id
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/waf/probe/nope", nil))
