@@ -6,7 +6,7 @@
 //   - anthropic.go   Anthropic 协议（/v1/messages）
 //   - responses.go   OpenAI Responses 协议（/v1/responses）
 //   - accounts.go    账号 CRUD、导入导出、额度刷新
-//   - metrics.go     告警、设置、analytics、代理检查
+//   - metrics.go     设置、analytics、代理检查
 //   - ops.go         运维只读端点与面板静态资源
 //   - waf.go         WAF 检测（签名表暴露、对照候选、离线分析）
 //   - waf_probe.go  WAF 在线探针二分（后台 job：发起/进度/中止）
@@ -17,6 +17,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -32,6 +33,8 @@ type Server struct {
 	Vision *provider.MediaResolver
 	// probe 是「WAF 检测」在线探针的 job 管理器（内存态、单飞，见 waf_probe.go）。
 	probe probeManager
+	// slots 是每 API Key 的进程内并发计数器（见 apikeys.go），traceChat 里 acquire/release。
+	slots keySlots
 }
 
 func New(s *store.Store) *Server {
@@ -53,8 +56,6 @@ func New(s *store.Store) *Server {
 			return classifyProbeOutcome(srv.Router.Provider.Chat(cctx, acc, req))
 		}
 	}
-	// 后台告警评估器：基于真实日志/额度统计定期落告警（见 metrics.go）
-	go srv.runAlertEvaluator()
 	return srv
 }
 
@@ -64,9 +65,9 @@ func (s *Server) Register(mux *http.ServeMux) {
 
 	// 对话类端点（/v1/*）：对外暴露的模型推理协议（见 openai.go / responses.go / anthropic.go）
 	mux.HandleFunc("GET /v1/models", s.models)
-	mux.HandleFunc("POST /v1/chat/completions", traceChat(s.openAI))
-	mux.HandleFunc("POST /v1/responses", traceChat(s.responses))
-	mux.HandleFunc("POST /v1/messages", traceChat(s.anthropic))
+	mux.HandleFunc("POST /v1/chat/completions", s.traceChat(s.openAI))
+	mux.HandleFunc("POST /v1/responses", s.traceChat(s.responses))
+	mux.HandleFunc("POST /v1/messages", s.traceChat(s.anthropic))
 
 	// 管理类端点（/api/*）——账号管理（见 accounts.go）
 	mux.HandleFunc("GET /api/accounts", s.accounts)
@@ -79,15 +80,18 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/accounts/{id}/test", s.testAccount)
 	mux.HandleFunc("POST /api/refresh-quota", s.refreshQuota)
 
-	// 管理类端点（/api/*）——设置、告警、analytics、代理检查（见 metrics.go）
+	// 管理类端点（/api/*）——设置、analytics、代理检查（见 metrics.go）
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
 	mux.HandleFunc("POST /api/proxy-check", s.proxyCheck)
 	mux.HandleFunc("POST /api/proxy-test", s.proxyTest)
 	mux.HandleFunc("GET /api/analytics", s.analytics)
-	mux.HandleFunc("GET /api/alerts", s.alerts)
-	mux.HandleFunc("POST /api/alerts/{id}/resolve", s.resolveAlert)
-	mux.HandleFunc("POST /api/alerts/resolve-all", s.resolveAllAlerts)
+
+	// 管理类端点（/api/*）——API KEY 管理（见 apikeys.go）
+	mux.HandleFunc("GET /api/keys", s.listKeys)
+	mux.HandleFunc("POST /api/keys", s.createKey)
+	mux.HandleFunc("PATCH /api/keys/{id}", s.updateKey)
+	mux.HandleFunc("DELETE /api/keys/{id}", s.deleteKey)
 
 	// 管理类端点（/api/*）——运维只读与缓存探针（见 ops.go）
 	mux.HandleFunc("GET /api/stats", s.stats)
@@ -116,34 +120,27 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /", s.dashboard)
 }
 
+// auth 统一鉴权入口：/api/* 认面板登录会话（/login 签发的 Cookie）或任一有效 API Key
+// （与旧「单 Key 即面板凭据」同信任模型）；/v1/* 是对外模型协议，只认 Bearer/x-api-key，
+// 不认浏览器会话。api_keys 表为空时全开放（首次创建密钥前的引导态）。
 func (s *Server) auth(w http.ResponseWriter, r *http.Request) bool {
-	key := s.apiKey()
-	// 未设置 API Key 时不鉴权（首次进面板设置前的引导态）。
-	if key == "" {
-		return true
-	}
-	// 面板登录会话（/login 签发的 Cookie）只对面板端点 /api/* 生效：
-	// /v1/* 是对外模型协议，鉴权语义必须只有 Bearer/x-api-key，不认浏览器会话。
 	if strings.HasPrefix(r.URL.Path, "/api/") && validSession(r) {
 		return true
 	}
-	// 同时接受两种鉴权头：OpenAI 风格 Authorization: Bearer <key>，
-	// 与 Anthropic 风格 x-api-key: <key>（Claude 客户端按此约定发送）。
-	if r.Header.Get("Authorization") == "Bearer "+key || r.Header.Get("x-api-key") == key {
+	_, err := s.resolveKey(r)
+	if err == nil {
 		return true
 	}
-	// 鉴权失败的错误体也要按调用方协议走：Anthropic 客户端期望 authentication_error，
-	// OpenAI 客户端期望 invalid_request_error + code:invalid_api_key。面板端点(/api/*)
-	// 不经过这里的协议分流也无妨——protoError 对非 /v1/messages 路径统一走 OpenAI 形状，
+	// 鉴权失败的错误体按调用方协议分流：Anthropic 客户端期望 authentication_error，
+	// OpenAI 客户端期望 invalid_request_error + code。面板端点(/api/*)统一走 OpenAI 形状，
 	// 面板前端只读 error.message。
-	protoError(w, r, 401, "Invalid API key", "authentication_error", "invalid_request_error", "invalid_api_key")
+	var ke *keyAuthError
+	if errors.As(err, &ke) {
+		protoError(w, r, ke.status, ke.msg, ke.typ, "invalid_request_error", ke.code)
+		return false
+	}
+	jsonError(w, 500, err.Error(), "internal_error")
 	return false
-}
-
-// apiKey 从 SQLite settings 读取当前生效的客户端 Bearer Key（面板可动态修改，改后立即生效）。
-func (s *Server) apiKey() string {
-	v, _ := s.Store.GetSetting("api_key")
-	return strings.TrimSpace(v)
 }
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	jsonWrite(w, 200, map[string]interface{}{"status": "ok"})

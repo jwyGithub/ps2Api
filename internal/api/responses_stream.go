@@ -91,7 +91,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *pr
 		msgOpen = false
 	}
 
-	_, _, err := s.Router.Stream(r.Context(), req, func(d provider.Delta) error {
+	res, _, err := s.Router.Stream(r.Context(), req, func(d provider.Delta) error {
 		ensureStarted() // 首个增量到达才真正开流（提交 200 + response.created）
 		if d.ReasoningContent != "" {
 			if !rsOpen {
@@ -148,6 +148,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *pr
 		}
 		return nil
 	})
+	s.chargeKey(r.Context(), res) // API Key 用量回写（tokens×倍率）
 
 	closeReasoning() // 纯思考、无正文/工具时的兜底收尾
 	closeText()

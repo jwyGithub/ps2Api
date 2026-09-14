@@ -185,7 +185,8 @@ func TestAuthErrorFollowsCallerProtocol(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if err := db.SetSetting("api_key", "secret"); err != nil {
+	// 鉴权走 api_keys 表：存在任一密钥即开启鉴权（表为空才是引导态）。
+	if _, err := db.CreateAPIKey("secret", "test", nil, 0, 0, 1); err != nil {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -39,6 +40,8 @@ func main() {
 
 	// API Key 不再来自环境变量：改为面板设置并持久化到 SQLite，auth() 每次从库读取。
 	server := api.New(s)
+	// 每日 23:00（本地时区，见 init）自动刷新额度周期已重置的账号。
+	go server.Router.StartDailyQuotaRefresh(context.Background())
 	mux := http.NewServeMux()
 	server.Register(mux)
 

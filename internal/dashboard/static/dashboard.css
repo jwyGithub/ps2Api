@@ -226,13 +226,6 @@ input:checked + .slider::before { transform: translateX(18px); }
   font-family: 'Fraunces', serif; font-weight: 500; font-size: 18px;
 }
 
-.notif-dot {
-  position: absolute; top: 6px; right: 6px;
-  width: 8px; height: 8px;
-  background: var(--gold-2); border-radius: 50%;
-  border: 2px solid var(--bg);
-}
-
 .timeline-item { position: relative; padding-left: 24px; padding-bottom: 20px; }
 .timeline-item::before {
   content: ''; position: absolute;

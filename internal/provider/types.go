@@ -72,9 +72,9 @@ const (
 	// 仅作用于重放折叠路径；命中已有会话时 tool-tail 仍不截断（服务端上下文在 Postman 侧）。
 	FoldedTailToolResultRunes = 4000
 
-	// MaxRequestBodyWarnBytes 是出站请求体的软告警阈值。超过此值时记录告警，
+	// MaxRequestBodyWarnBytes 是出站请求体的软阈值。超过此值时在排查上下文中标注，
 	// 因为过大的 body 更容易触发 Postman 网关侧的 Cloudflare WAF（返回 403 HTML）。
-	// 仅告警、不阻断，避免误伤合法的大请求。
+	// 仅标注、不阻断，避免误伤合法的大请求。
 	MaxRequestBodyWarnBytes = 80 * 1024
 )
 
@@ -163,7 +163,7 @@ type Result struct {
 	// 而不是像 RequestRejected 那样直接返回。
 	GatewayBlocked bool
 	// RejectionDetail 是请求被网关拒绝时采集的排查上下文(如 Cloudflare Ray ID、
-	// 出站 body 大小、响应体片段)。非空时 router 会据此写入一条告警展示到仪表盘,
+	// 出站 body 大小、响应体片段)。WAF 探测会抽取其中的 Ray ID 供证据表展示,
 	// 方便定位 403 的具体诱因。仅诊断用,不影响重试/路由决策。
 	RejectionDetail string
 	// RequestBytes 是本次出站请求体(JSON marshal 后)的字节数。写入 request_logs 后

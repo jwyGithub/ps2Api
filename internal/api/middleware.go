@@ -15,7 +15,7 @@ import (
 
 const maxChatBody = 16 << 20
 
-func traceChat(next http.HandlerFunc) http.HandlerFunc {
+func (s *Server) traceChat(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		endpoint := "openai"
 		if strings.HasSuffix(r.URL.Path, "/messages") {
@@ -36,6 +36,18 @@ func traceChat(next http.HandlerFunc) http.HandlerFunc {
 			provider.Trace(ctx, "client.request.error", map[string]interface{}{"error": "request body too large", "bytes": len(body)})
 			protoError(w, r, http.StatusRequestEntityTooLarge, "request body too large", "request_too_large", "invalid_request_error")
 			return
+		}
+		// API Key 并发限制与计费注入：鉴权本身由各 handler 开头的 s.auth 负责，
+		// 这里只在密钥有效时占并发槽并把密钥放进 ctx（handler 响应完 chargeKey 回写用量）。
+		// 无效密钥不在此时报错——紧随其后的 s.auth 会给出协议化错误。
+		if k, kerr := s.resolveKey(r); kerr == nil && k != nil {
+			if !s.slots.acquire(k.ID, int(k.ConcurrencyLimit)) {
+				provider.Trace(ctx, "client.request.error", map[string]interface{}{"error": "api key concurrency limit reached", "key_id": k.ID})
+				protoError(w, r, 429, "API key concurrency limit reached", "rate_limit_error", "rate_limit_exceeded")
+				return
+			}
+			defer s.slots.release(k.ID)
+			ctx = context.WithValue(ctx, keyCtxKey{}, k)
 		}
 		var loggedBody interface{} = string(body)
 		if json.Valid(body) {

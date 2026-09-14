@@ -76,6 +76,7 @@ func (s *Server) anthropic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, _, err := s.Router.Chat(r.Context(), &req)
+	s.chargeKey(r.Context(), res) // API Key 用量回写（tokens×倍率）
 	if err != nil {
 		// 529 overloaded_error 是 Anthropic 协议表达「上游暂时不可用」的标准方式；
 		// 503 不在其状态码枚举内(400/401/403/404/413/429/500/529)，客户端只能归为未知 5xx。
@@ -332,6 +333,7 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, req *pr
 		}
 		return nil
 	})
+	s.chargeKey(r.Context(), res) // API Key 用量回写（tokens×倍率）
 	// 尚未产生任何输出就失败：这是「流式」请求，必须以 SSE 协议干净收尾。
 	// 之前回退为 HTTP 503 JSON 的做法有缺陷——Anthropic 协议的 agent 终端已经开着
 	// 流式连接在等 SSE 生命周期事件，并不把 503 JSON body 当作流终止信号，于是

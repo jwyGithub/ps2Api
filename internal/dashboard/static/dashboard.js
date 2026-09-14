@@ -4,17 +4,16 @@
    - /api/accounts    号池管理（真实账号 + source/plan/今日调用）
    - /api/logs        真实请求日志流
    - /api/analytics   日/时序列、模型分布、渠道对比、账号排行、活跃热力图
-   - /api/settings    配置项真实读写（重试/故障切换/告警阈值）
-   - /api/alerts      真实告警记录（未处理/解决/MTTR）
+   - /api/settings    配置项真实读写（重试/故障切换/日志保留等）
 */
 (function () {
   'use strict';
 
   var state = {
     stats: {}, accounts: [], logs: [],
-    analytics: {}, settings: {}, settingsDefs: [], apiKey: '',
-    alerts: [], alertSummary: {}, cacheProbe: {},
-    days: 14, page: 'overview', poolQuery: '', poolStatus: 'ALL', alertTab: 'open',
+    analytics: {}, settings: {}, settingsDefs: [], keys: [],
+    cacheProbe: {},
+    days: 14, page: 'overview', poolQuery: '', poolStatus: 'ALL',
     poolPage: 1, quotaPage: 1,
     reqlogs: [], reqlogsPage: 1, reqlogsTotal: 0, reqlogsCollapsed: {},
     waf: { list: [], page: 1, total: 0, currentId: 0, baselineId: '', analysis: null, probePaths: [], probeJob: '', probeTimer: null },
@@ -55,7 +54,7 @@
   }
 
   function bootstrapDashboard() {
-    var names = ['fragments/topnav.html', 'fragments/sidebar.html', 'fragments/page-overview.html', 'fragments/page-stats.html', 'fragments/page-reqlogs.html', 'fragments/page-sql.html', 'fragments/page-waf.html', 'fragments/page-pools.html', 'fragments/page-quota.html', 'fragments/page-routing.html', 'fragments/page-alerts.html', 'fragments/page-settings.html', 'fragments/page-proxies.html', 'fragments/page-vision.html', 'fragments/drawer.html'];
+    var names = ['fragments/topnav.html', 'fragments/sidebar.html', 'fragments/page-overview.html', 'fragments/page-stats.html', 'fragments/page-reqlogs.html', 'fragments/page-sql.html', 'fragments/page-waf.html', 'fragments/page-pools.html', 'fragments/page-quota.html', 'fragments/page-routing.html', 'fragments/page-apikeys.html', 'fragments/page-settings.html', 'fragments/page-proxies.html', 'fragments/page-vision.html', 'fragments/drawer.html'];
     return Promise.all(names.map(loadFragment)).then(function (parts) {
       var app = document.getElementById('dashboard-app');
       if (!app) return;
@@ -113,7 +112,18 @@
     return fetch(path, options).then(function (r) {
       return r.text().then(function (text) {
         var data = {}; try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { raw: text }; }
-        if (!r.ok) throw new Error(data.error && data.error.message || data.message || 'HTTP ' + r.status);
+        if (!r.ok) {
+          // 401 且本地没存密钥：弹一次补录框（未设 ADMIN_PASSWORD 的部署清了浏览器存储后的逃生通道）。
+          if (r.status === 401 && !key() && !api._prompted) {
+            api._prompted = true;
+            var k = window.prompt('面板鉴权失败：请输入一个有效的 API Key');
+            if (k && k.trim()) {
+              localStorage.setItem('ps2api_api_key', k.trim());
+              return api(path, options);
+            }
+          }
+          throw new Error(data.error && data.error.message || data.message || 'HTTP ' + r.status);
+        }
         return data;
       });
     });
@@ -149,17 +159,17 @@
     state.page = page;
     document.querySelectorAll('.page').forEach(function (el) { el.classList.toggle('active', el.id === 'page-' + page); });
     document.querySelectorAll('.sidebar-item[data-page]').forEach(function (el) { el.classList.toggle('active', el.dataset.page === page); });
-    var names = { overview:'概览', stats:'统计分析', reqlogs:'请求日志', sql:'数据查询', waf:'WAF 检测', pools:'号池 & 额度', routing:'路由策略', proxies:'代理出口', vision:'图片识别', alerts:'告警中心', settings:'系统设置' };
+    var names = { overview:'概览', stats:'统计分析', reqlogs:'请求日志', sql:'数据查询', waf:'WAF 检测', pools:'号池 & 额度', routing:'路由策略', proxies:'代理出口', vision:'图片识别', apikeys:'API KEY 管理', settings:'系统设置' };
     setText('#crumb', names[page] || page);
     if (page === 'reqlogs') renderReqLogsReal();
     if (page === 'sql') renderSqlPresets();
     if (page === 'waf') { wafRefresh(); wafRestoreProbe(); }
     if (page === 'pools') { renderPoolsReal(); renderQuotaReal(); }
-    if (page === 'alerts') renderAlertsReal();
     if (page === 'routing') renderRoutingReal();
     if (page === 'proxies') renderProxiesReal();
     if (page === 'vision') renderVisionReal();
     if (page === 'settings') renderSettingsReal();
+    if (page === 'apikeys') renderKeysReal();
     refreshCurrentPage();
   };
 
@@ -188,14 +198,8 @@
     settings: function () { return api('/api/settings').then(function (data) {
       state.settings = data.settings || {};
       state.settingsDefs = data.defs || [];
-      state.apiKey = data.apiKey || '';
-      // 初始化时把服务端存的 API Key 缓存到本地，之后每个请求都带上它。
-      if (data.apiKey) localStorage.setItem('ps2api_api_key', data.apiKey);
     }); },
-    alerts: function () { return api('/api/alerts').then(function (data) {
-      state.alerts = data.data || [];
-      state.alertSummary = data.summary || {};
-    }); },
+    keys: function () { return api('/api/keys').then(function (data) { state.keys = data.data || []; }); },
     cacheProbe: function () { return api('/api/cache-probe').then(function (data) { state.cacheProbe = data || {}; }); }
   };
 
@@ -206,21 +210,21 @@
   }
 
   function loadAll() {
-    return loadResources(['stats', 'accounts', 'logs', 'analytics', 'settings', 'alerts', 'cacheProbe']);
+    return loadResources(['stats', 'accounts', 'logs', 'analytics', 'settings', 'keys', 'cacheProbe']);
   }
 
   function refreshCurrentPage() {
     var pages = {
-      overview: ['stats', 'accounts', 'logs', 'analytics', 'alerts'],
+      overview: ['stats', 'accounts', 'logs', 'analytics'],
       stats: ['stats', 'analytics', 'cacheProbe'],
       reqlogs: [],
       pools: ['accounts', 'analytics'],
-      quota: ['accounts', 'analytics', 'settings', 'alerts'],
+      quota: ['accounts', 'analytics', 'settings'],
       routing: ['settings'],
       proxies: ['settings'],
       vision: ['settings'],
-      alerts: ['alerts'],
       settings: ['settings'],
+      apikeys: ['keys'],
       sql: [],
       waf: []
     };
@@ -230,18 +234,16 @@
 
   function renderAll() {
     renderRealData(); renderStatsReal(); renderChartsReal(); renderTopAccounts();
-    renderPoolsReal(); renderQuotaReal(); renderAlertsReal();
-    renderRoutingReal(); renderSettingsReal(); renderProxiesReal(); renderVisionReal(); renderOverviewActivity(); renderSidebarBadges();
+    renderPoolsReal(); renderQuotaReal();
+    renderRoutingReal(); renderSettingsReal(); renderProxiesReal(); renderVisionReal(); renderKeysReal(); renderOverviewActivity(); renderSidebarBadges();
     renderCacheProbeReal();
   }
 
   function renderSidebarBadges() {
     var pb = document.querySelector('.sidebar-item[data-page="pools"] .badge');
     if (pb) pb.textContent = state.accounts.length;
-    var ab = document.querySelector('.sidebar-item[data-page="alerts"] .badge');
-    if (ab) ab.textContent = state.alertSummary.open || 0;
-    var nd = document.querySelector('.notif-dot');
-    if (nd) nd.style.display = (state.alertSummary.open || 0) > 0 ? '' : 'none';
+    var kb = document.querySelector('.sidebar-item[data-page="apikeys"] .badge');
+    if (kb) kb.textContent = state.keys.length;
   }
 
   function renderRealData() {
@@ -457,20 +459,93 @@
     var rated = tracked.filter(function(a){return Number(a.rateLimit || 0) > 0;});
     setText('#quotaRateSummary', rated.length ? '最低 ' + Math.min.apply(null, rated.map(function(a){return Number(a.rateRemaining || 0);})) + ' / ' + rated[0].rateLimit + ' · ' + (rated[0].rateWindowSeconds || 60) + '秒' : '-');
     var latest = tracked.map(function(a){return a.updatedAt;}).filter(Boolean).sort().pop(); setText('#quotaSnapshotAt', latest ? '最近更新 ' + fmtDate(latest) : '-');
-    var rules = document.getElementById('quotaRules');
-    if (rules) {
-      var th = state.settings['alert_quota'] || '0.2';
-      var quotaAlerts = state.alerts.filter(function (a) { return a.alertType === 'low_quota' || a.alertType === 'quota_exhausted'; });
-      var thPct = (Number(th) * 100).toFixed(0);
-      var rows = [
-        { name: '额度不足告警', cond: '剩余额度低于总配额 ' + thPct + '%', notify: '面板告警中心', status: '已启用', recent: quotaAlerts.filter(function(a){return a.alertType==='low_quota';})[0] },
-        { name: '额度耗尽告警', cond: 'Postman 返回 QUOTA_EXCEEDED / usageState=EXCEEDED', notify: '面板告警中心', status: '已启用', recent: quotaAlerts.filter(function(a){return a.alertType==='quota_exhausted';})[0] }
-      ];
-      rules.innerHTML = rows.map(function (row) {
-        return '<tr><td class="font-semibold">'+row.name+'</td><td>'+row.cond+'</td><td>'+row.notify+'</td><td><span class="tag tag-green">'+row.status+'</span></td><td class="font-mono text-[12px]">'+(row.recent ? ago(row.recent.createdAt) : '—')+'</td><td><span class="text-[12px]" style="color:var(--muted)">阈值可在系统设置修改</span></td></tr>';
-      }).join('');
-    }
   }
+
+  // ─── API KEY 管理 ──────────────────────────────────────────
+  var editingKeyId = 0;
+  function keyStatusTag(k) {
+    if (!k.enabled) return '<span class="tag tag-gray">停用</span>';
+    if (k.expiresAt && new Date(k.expiresAt).getTime() < Date.now()) return '<span class="tag tag-red">已过期</span>';
+    return '<span class="tag tag-green">启用</span>';
+  }
+  function renderKeysReal() {
+    var body = document.getElementById('keysBody');
+    if (!body) return;
+    body.innerHTML = (state.keys || []).map(function (k) {
+      var quota = (k.quotaLimit > 0 ? fmt(k.quotaUsed) + ' / ' + fmt(k.quotaLimit) : fmt(k.quotaUsed) + ' / ∞');
+      var expiredSoon = k.expiresAt && new Date(k.expiresAt).getTime() < Date.now() + 7 * 86400000;
+      return '<tr>'
+        + '<td class="font-semibold">' + esc(k.name || '-') + '</td>'
+        + '<td class="font-mono text-[12px]" style="cursor:pointer" title="点击复制" onclick="copyKey(\'' + esc(k.key) + '\')">' + esc(k.key.slice(0, 12) + '…') + '</td>'
+        + '<td>' + keyStatusTag(k) + '</td>'
+        + '<td class="font-mono text-[12px]' + (expiredSoon ? '" style="color:var(--danger)' : '') + '">' + quota + '</td>'
+        + '<td class="font-mono text-[12px]">' + (Number(k.multiplier) || 1) + '</td>'
+        + '<td class="font-mono text-[12px]">' + (k.concurrencyLimit > 0 ? k.concurrencyLimit : '∞') + '</td>'
+        + '<td class="text-[12px]">' + (k.expiresAt ? fmtDate(k.expiresAt) : '永久') + '</td>'
+        + '<td class="text-[12px]">' + fmtDate(k.createdAt) + '</td>'
+        + '<td><button class="btn btn-ghost" onclick="editKey(' + k.id + ')">编辑</button> <button class="btn btn-ghost" style="color:var(--danger)" onclick="deleteKey(' + k.id + ')">删除</button></td>'
+        + '</tr>';
+    }).join('') || '<tr><td colspan="9" style="text-align:center;padding:30px;color:var(--muted)">暂无 API Key，点击右上角「新增 API KEY」创建</td></tr>';
+  }
+  window.copyKey = function (k) {
+    if (navigator.clipboard) navigator.clipboard.writeText(k).then(function () { toast('密钥已复制'); });
+    else toast(k);
+  };
+  window.openKeyDrawer = function (id) {
+    var drawer = document.getElementById('keyDrawer'), backdrop = document.getElementById('keyDrawerBackdrop');
+    if (!drawer) return;
+    editingKeyId = id || 0;
+    var k = null;
+    if (editingKeyId) k = (state.keys || []).filter(function (x) { return x.id === editingKeyId; })[0];
+    document.getElementById('keyDrawerTitle').textContent = k ? '编辑 API KEY' : '新增 API KEY';
+    document.getElementById('keyFormName').value = k ? (k.name || '') : '';
+    // 有效期回填剩余天数（向上取整），永久则留空；保存时一律「从现在起 N 天」重设。
+    var days = '';
+    if (k && k.expiresAt) days = Math.max(1, Math.ceil((new Date(k.expiresAt).getTime() - Date.now()) / 86400000));
+    document.getElementById('keyFormExpiry').value = k && k.expiresAt ? days : '';
+    document.getElementById('keyFormQuota').value = k && k.quotaLimit > 0 ? k.quotaLimit : '';
+    document.getElementById('keyFormConcurrency').value = k && k.concurrencyLimit > 0 ? k.concurrencyLimit : '';
+    document.getElementById('keyFormMultiplier').value = k ? (k.multiplier || 1) : '';
+    document.getElementById('keyFormEditOnly').style.display = k ? '' : 'none';
+    if (k) document.getElementById('keyFormEnabled').checked = !!k.enabled;
+    drawer.classList.add('show'); backdrop.classList.add('show');
+  };
+  window.closeKeyDrawer = function () {
+    var drawer = document.getElementById('keyDrawer'), backdrop = document.getElementById('keyDrawerBackdrop');
+    if (drawer) drawer.classList.remove('show');
+    if (backdrop) backdrop.classList.remove('show');
+  };
+  window.editKey = function (id) { openKeyDrawer(id); };
+  window.submitKeyForm = function () {
+    var num = function (id) { var v = document.getElementById(id).value.trim(); var n = Number(v); return v === '' || !isFinite(n) ? 0 : n; };
+    var payload = {
+      name: document.getElementById('keyFormName').value.trim(),
+      expiresInDays: num('keyFormExpiry'),
+      quotaLimit: num('keyFormQuota'),
+      concurrencyLimit: num('keyFormConcurrency'),
+      multiplier: num('keyFormMultiplier') || 1
+    };
+    if (editingKeyId) {
+      payload.enabled = document.getElementById('keyFormEnabled').checked;
+      api('/api/keys/' + editingKeyId, { method: 'PATCH', body: JSON.stringify(payload) })
+        .then(function () { toast('API KEY 已更新'); closeKeyDrawer(); return loadAll(); })
+        .catch(function (e) { toast(e.message); });
+      return;
+    }
+    api('/api/keys', { method: 'POST', body: JSON.stringify(payload) }).then(function (data) {
+      var k = data.key || {};
+      // 无 ADMIN_PASSWORD 的部署：把新建密钥缓存到本地，保证面板后续请求仍能鉴权。
+      if (!key() && k.key) localStorage.setItem('ps2api_api_key', k.key);
+      toast('已创建：' + (k.key || ''));
+      closeKeyDrawer();
+      return loadAll();
+    }).catch(function (e) { toast(e.message); });
+  };
+  window.deleteKey = function (id) {
+    var k = (state.keys || []).filter(function (x) { return x.id === id; })[0];
+    if (!confirm('确定删除 API KEY「' + (k && (k.name || k.key.slice(0, 12)) || id) + '」？使用该密钥的客户端将立即失效。')) return;
+    api('/api/keys/' + id, { method: 'DELETE' }).then(function () { toast('已删除'); return loadAll(); }).catch(function (e) { toast(e.message); });
+  };
 
   // ─── 统计分析页 ─────────────────────────────────────────────
   function renderCacheProbeReal() {
@@ -564,30 +639,6 @@
       var detail = l.model || l.errorMessage || '未知请求';
       return '<div class="timeline-item"><div class="flex items-start justify-between gap-3"><div><div class="text-[13px] font-semibold">'+label+' <span class="font-mono" style="color:var(--accent)">'+esc(detail)+'</span></div><div class="text-[12px] mt-0.5" style="color:var(--fg-2)">账号 #'+(l.accountId || '-')+' · '+(l.totalTokens || 0)+' tokens · '+(l.durationMs || 0)+'ms</div></div><span class="text-[11px] font-mono whitespace-nowrap" style="color:var(--muted)">'+ago(l.createdAt)+'</span></div></div>';
     }).join('') || '<div style="padding:20px;color:var(--muted)">暂无活动</div>';
-  }
-
-  // ─── 告警中心（真实告警记录）───────────────────────────────
-  function renderAlertsReal() {
-    var body = document.getElementById('alertsBody'); if (!body) return;
-    var sum = state.alertSummary || {};
-    var k = document.querySelectorAll('#page-alerts .font-display');
-    if (k[0]) k[0].textContent = sum.severe || 0;
-    if (k[1]) k[1].textContent = sum.warning || 0;
-    if (k[2]) k[2].textContent = sum.info || 0;
-    if (k[3]) k[3].textContent = sum.mttrMin ? Math.round(sum.mttrMin) + 'm' : '—';
-    var list = state.alerts.filter(function (a) { return state.alertTab === 'all' || a.status === 'open'; });
-    body.innerHTML = list.map(function (a) {
-      var levelTag = a.level === 'severe' ? 'tag-red' : a.level === 'info' ? 'tag-blue' : 'tag-amber';
-      var levelName = a.level === 'severe' ? '严重' : a.level === 'info' ? '信息' : '警告';
-      var btn = a.status === 'open' ? '<button class="btn btn-ghost" onclick="resolveAlert('+a.id+')">处理</button>' : '<span class="tag tag-gray">已解决</span>';
-      return '<tr><td><span class="tag '+levelTag+'">'+levelName+'</span></td><td><b>'+esc(a.title)+'</b><div class="text-[12px] mt-0.5" style="color:var(--fg-2)">'+esc(a.message)+'</div></td><td class="font-mono text-[12px]">'+(a.sourceType === 'account' && a.sourceId ? 'account #'+a.sourceId : 'system')+'</td><td class="text-[12px]">'+ago(a.createdAt)+'</td><td>'+(a.status === 'open' ? '<span class="tag tag-amber">未处理</span>' : '<span class="tag tag-green">已解决</span>')+'</td><td>'+btn+'</td></tr>';
-    }).join('') || '<tr><td colspan="6" style="text-align:center;padding:30px;color:var(--muted)">暂无告警</td></tr>';
-    var openTab = document.querySelector('#page-alerts .tab.active');
-    var tabs = document.querySelectorAll('#page-alerts .tab');
-    if (tabs[0]) tabs[0].classList.toggle('active', state.alertTab === 'open');
-    if (tabs[1]) tabs[1].classList.toggle('active', state.alertTab === 'all');
-    var resolveAllBtn = document.getElementById('resolveAllBtn');
-    if (resolveAllBtn) resolveAllBtn.style.display = (sum.open || 0) > 0 ? '' : 'none';
   }
 
   // ─── WAF 检测（403 离线分析）─────────────────────────────
@@ -818,7 +869,7 @@
     { name: 'bin/cat 重分类', sql: "SELECT id, datetime(substr(created_at,1,19)) AS t, account_id, status, request_bytes,\n  instr(lower(upstream_body), 'bin/cat') > 0 AS bin_cat_hit,\n  error_message\nFROM request_logs\nWHERE (error_message LIKE '%403%' OR error_message LIKE '%Cloudflare%')\n  AND created_at >= '2026-09-10'\nORDER BY id DESC LIMIT 30" },
     { name: '最近错误请求', sql: "SELECT datetime(substr(created_at,1,19)) AS t, account_id, model, error_message\nFROM request_logs WHERE status='error'\nORDER BY created_at DESC LIMIT 50" },
     { name: '表清单', sql: "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name" },
-    { name: '各表行数', sql: "SELECT 'accounts' t, COUNT(*) n FROM accounts\nUNION ALL SELECT 'request_logs', COUNT(*) FROM request_logs\nUNION ALL SELECT 'alerts', COUNT(*) FROM alerts\nUNION ALL SELECT 'settings', COUNT(*) FROM settings" }
+    { name: '各表行数', sql: "SELECT 'accounts' t, COUNT(*) n FROM accounts\nUNION ALL SELECT 'request_logs', COUNT(*) FROM request_logs\nUNION ALL SELECT 'settings', COUNT(*) FROM settings" }
   ];
   function renderSqlPresets() {
     var box = document.getElementById('sqlPresets'); if (!box) return;
@@ -933,8 +984,6 @@
     if (host) host.textContent = window.location.protocol + '//' + window.location.host;
     var host2 = document.getElementById('settingsHost2');
     if (host2) host2.textContent = window.location.protocol + '//' + window.location.host;
-    var auth = document.getElementById('settingsApiKey');
-    if (auth && document.activeElement !== auth) auth.value = state.apiKey || '';
     var form = document.getElementById('settingsForm');
     if (form) {
       // 代理(group=proxy)、图片识别(group=vision)相关项已迁移到各自独立菜单页，通用设置表单不再渲染。
@@ -1110,18 +1159,6 @@
     var body=f.querySelector('.flex-1');
     if(body&&!body.dataset.real){body.dataset.real='1';body.innerHTML='<div class="space-y-4"><div><label class="text-[12px] font-semibold block mb-1.5">邮箱标识</label><input class="input" placeholder="account@example.com"></div><div><label class="text-[12px] font-semibold block mb-1.5">Postman token（桌面版填 access_token；web 版填 postman.sid）</label><input class="input font-mono" type="password" placeholder="token / postman.sid"></div><div><label class="text-[12px] font-semibold block mb-1.5">workspace_id（= 登录态 teamId）</label><input class="input font-mono" placeholder="workspace UUID"></div><div><label class="text-[12px] font-semibold block mb-1.5">workspace_subdomain（web 版必填，如 abc123；桌面版可留空）</label><input class="input font-mono" placeholder="如 abc123"></div><p class="text-[12px]" style="color:var(--muted)">web 版获取：F12 → Application → Cookies 复制 postman.sid；Console 执行 fetch(\'https://god.postman.co/api/users/me\',{credentials:\'include\'}).then(r=>r.json()).then(m=>console.log(m.id, (m.user_organizations||{}).organizations)) 得到 user_id / workspace_id（orgs[0].id）/ subdomain（m.username 小写）。token 只写入服务端 SQLite，不会回显到面板。</p></div>';}
     f.classList.add('show');document.getElementById('drawerBackdrop').classList.add('show');
-  };
-  window.resolveAlert = function (id) { api('/api/alerts/'+id+'/resolve', {method:'POST',body:'{}'}).then(function(){toast('告警已处理');return loadAll();}).catch(function(e){toast(e.message);}); };
-  window.resolveAllAlerts = function () { if (!confirm('确定处理全部未处理告警？')) return; api('/api/alerts/resolve-all', {method:'POST',body:'{}'}).then(function(){toast('全部告警已处理');return loadAll();}).catch(function(e){toast(e.message);}); };
-  window.saveApiKey = function () {
-    var el = document.getElementById('settingsApiKey');
-    var val = el ? el.value.trim() : '';
-    // 先写本地再 PUT：改 key 后本次 PUT 请求就带新 key，避免改完立刻 401。
-    localStorage.setItem('ps2api_api_key', val);
-    api('/api/settings', {method:'PUT', body:JSON.stringify({apiKey:val})}).then(function(){
-      toast(val ? 'API Key 已保存并生效' : 'API Key 已清空（鉴权已关闭）');
-      return loadAll();
-    }).catch(function(e){toast(e.message);});
   };
   window.saveSettings = function () {
     var payload = {};
@@ -1359,7 +1396,6 @@
   window.logout = function () {
     fetch('/api/logout', {method:'POST'}).catch(function(){}).finally(function(){ window.location.href = '/login'; });
   };
-  window.toggleNotif = function () { toast((state.alertSummary.open || 0) ? '有 ' + state.alertSummary.open + ' 条未处理告警' : '暂无未处理告警'); };
   window.toggleCacheProbe = function () {
     var next = state.cacheProbe && state.cacheProbe.enabled ? 'false' : 'true';
     api('/api/settings', {method:'PUT', body:JSON.stringify({settings:{cache_probe_enabled:next}})})
@@ -1544,9 +1580,8 @@
     download('postman2api-quota-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify({ exportedAt: new Date().toISOString(), accounts: state.accounts }, null, 2));
     toast('额度快照已导出');
   };
-  window.checkHealth = function () { loadAll().then(function () { toast('主动检查完成'); }); };
   window.exportReport = function () {
-    var data = JSON.stringify({ exported: new Date().toISOString(), stats: state.stats, accounts: state.accounts, analytics: state.analytics, alerts: state.alerts }, null, 2);
+    var data = JSON.stringify({ exported: new Date().toISOString(), stats: state.stats, accounts: state.accounts, analytics: state.analytics }, null, 2);
     download('postman2api-report-' + new Date().toISOString().slice(0, 10) + '.json', data);
     toast('报表已导出（真实数据）');
   };
@@ -1556,12 +1591,6 @@
   document.addEventListener('click', function (e) {
     var range = e.target.closest && e.target.closest('[data-range]');
     if (range) { var d = parseInt((range.dataset.range || '14').replace('d', ''), 10); if (d > 0) setTrafficRange(d); return; }
-    var alertTab = e.target.closest && e.target.closest('#page-alerts .tab');
-    if (alertTab) {
-      state.alertTab = (alertTab.textContent || '').indexOf('全部') >= 0 ? 'all' : 'open';
-      renderAlertsReal();
-      return;
-    }
   });
   document.addEventListener('input', function (e) {
     if (e.target && e.target.id === 'poolSearch') { state.poolQuery = e.target.value; state.poolPage = 1; renderPoolsReal(); }
@@ -1575,7 +1604,7 @@
     }
   });
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') { closeDrawer(); closeProxyDrawer(); closeReqLogModal(); }
+    if (e.key === 'Escape') { closeDrawer(); closeProxyDrawer(); closeKeyDrawer(); closeReqLogModal(); }
   });
 
   function startDashboard() {

@@ -13,7 +13,7 @@ func TestTraceChatConnectsRequestAndResponse(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("GATEWAY_TRACE_LOG", "1")
 	t.Setenv("GATEWAY_TRACE_DIR", dir)
-	handler := traceChat(func(w http.ResponseWriter, r *http.Request) {
+	handler := (&Server{Store: newTestStore(t)}).traceChat(func(w http.ResponseWriter, r *http.Request) {
 		jsonWrite(w, 200, map[string]bool{"ok": true})
 	})
 	request := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"test"}`))

@@ -133,7 +133,6 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 			// 流式下：延迟开流（首个 delta 前不落 200 / 不发事件）保证网关 403 时 emitted 仍为 false；
 			// 若已吐出过内容则 abort() 走「已开流」终止路径，避免重复输出。
 			provider.Trace(ctx, "router.gateway_blocked", plan.trace(map[string]interface{}{"account_id": acc.ID, "error": res.Error}, acc, true))
-			r.alertRequestRejected(acc, res)
 			if provider.WafSignatureHitCount(res.UpstreamBody) == 0 {
 				r.Pool.MarkGatewayBlocked(acc.ID, r.gatewayCooldownDur())
 				if !gwRetried {
@@ -153,7 +152,6 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 		if res.RequestRejected {
 			// 请求内容被拒(坏请求、工具名冲突等)——账号本身可用,不标记、不换号重试,直接返回。
 			provider.Trace(ctx, "router.request_rejected", plan.trace(map[string]interface{}{"account_id": acc.ID, "error": res.Error}, acc, false))
-			r.alertRequestRejected(acc, res)
 			return nil, nil, &RouteError{Message: res.Error, Rejected: true}
 		}
 		if res.Usage != nil && res.Usage.UsageState == "BLOCKED" {
@@ -169,7 +167,7 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 		}
 		if res.QuotaExhausted {
 			excluded[acc.ID] = true
-			// 额度耗尽（余量算到 0）标记为 exhausted 并落额度告警：额度问题而非账号故障，不停用，
+			// 额度耗尽（余量算到 0）标记为 exhausted：额度问题而非账号故障，不停用，
 			// 等额度周期重置后经探测自然恢复。（BLOCKED 的停用由上面的 applyUsageState 另行处理。）
 			r.Pool.MarkExhausted(acc.ID)
 			if e, done := abort(); done {

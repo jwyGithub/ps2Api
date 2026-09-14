@@ -170,7 +170,7 @@ func wafSignatureSummary(outboundBody string) string {
 
 // cloudflareRejectionDetail 汇总一条可读的 403 排查上下文：出站请求体大小、出站体里的
 // HTML/JS 注入特征计数、Cloudflare Ray ID、命中的 WAF 规则头，以及拦截页正文里的关键行。
-// 用于写入告警，让排查者不必翻日志就能判断诱因（前端源码标记触发内容规则、超大 body、
+// 供 WAF 探测与排查使用，让排查者不必翻日志就能判断诱因（前端源码标记触发内容规则、超大 body、
 // 账号被封、规则误伤等）。outboundBody 是本次出站请求体（JSON 原文）。
 func cloudflareRejectionDetail(status int, headers http.Header, respBody, outboundBody string) string {
 	reqBodyBytes := len(outboundBody)

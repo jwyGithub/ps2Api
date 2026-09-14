@@ -259,7 +259,15 @@ func (s *Server) testAccount(w http.ResponseWriter, r *http.Request) {
 			scheme = "https"
 		}
 		baseURL := scheme + "://" + r.Host
-		result := s.Router.Provider.StreamServiceTest(ctx, baseURL, s.apiKey(), q.Model, q.Prompt, q.Body, onMeta, onLine)
+		// 回环测试需要一个有效密钥调自己的 /v1：取第一个启用的 key；无可用密钥则提示。
+		var key string
+		if k, kerr := s.firstUsableKey(); kerr == nil {
+			key = k.Key
+		} else {
+			emit(map[string]interface{}{"type": "done", "error": kerr.Error()})
+			return
+		}
+		result := s.Router.Provider.StreamServiceTest(ctx, baseURL, key, q.Model, q.Prompt, q.Body, onMeta, onLine)
 		emit(map[string]interface{}{"type": "done", "result": result})
 		return
 	}
@@ -296,12 +304,6 @@ func (s *Server) toggleAccount(w http.ResponseWriter, r *http.Request) {
 	if err := s.Store.SetAccountEnabled(id, q.Enabled); err != nil {
 		jsonError(w, 404, err.Error(), "not_found")
 		return
-	}
-	// 重新启用账号时，其历史未处理告警自动解决（真实告警生命周期）
-	if q.Enabled {
-		_ = s.Store.ResolveAlertsBySource("account", "account_error", id)
-		_ = s.Store.ResolveAlertsBySource("account", "quota_exhausted", id)
-		_ = s.Store.ResolveAlertsBySource("account", "low_quota", id)
 	}
 	jsonWrite(w, 200, map[string]bool{"success": true})
 }

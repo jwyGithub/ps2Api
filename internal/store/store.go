@@ -65,19 +65,6 @@ type QuotaSnapshot struct {
 	CycleEnd          *time.Time
 }
 
-type Alert struct {
-	ID         int64      `json:"id"`
-	Level      string     `json:"level"` // severe | warning | info
-	Title      string     `json:"title"`
-	Message    string     `json:"message"`
-	SourceType string     `json:"sourceType"` // account | system
-	SourceID   *int64     `json:"sourceId,omitempty"`
-	AlertType  string     `json:"alertType"` // account_error | quota_exhausted | low_quota | high_error_rate
-	Status     string     `json:"status"`    // open | resolved
-	CreatedAt  time.Time  `json:"createdAt"`
-	ResolvedAt *time.Time `json:"resolvedAt,omitempty"`
-}
-
 type RequestLog struct {
 	ID               int64  `json:"id"`
 	AccountID        *int64 `json:"accountId"`
@@ -178,25 +165,24 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
-CREATE TABLE IF NOT EXISTS alerts (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  level TEXT NOT NULL DEFAULT 'warning',
-  title TEXT NOT NULL,
-  message TEXT NOT NULL DEFAULT '',
-  source_type TEXT NOT NULL DEFAULT 'system',
-  source_id INTEGER,
-  alert_type TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'open',
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  resolved_at DATETIME
-);
-CREATE INDEX IF NOT EXISTS alerts_status_idx ON alerts(status);
-CREATE INDEX IF NOT EXISTS alerts_created_idx ON alerts(created_at);
 CREATE TABLE IF NOT EXISTS cache_probe (
   key TEXT PRIMARY KEY,
   hits INTEGER NOT NULL DEFAULT 0,
   first_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   last_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS api_keys (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  key TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL DEFAULT '',
+  expires_at DATETIME,                          -- NULL=永不过期
+  quota_limit INTEGER NOT NULL DEFAULT 0,       -- token 额度，0=不限
+  quota_used INTEGER NOT NULL DEFAULT 0,
+  concurrency_limit INTEGER NOT NULL DEFAULT 0, -- 并发，0=不限
+  multiplier REAL NOT NULL DEFAULT 1,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 `)
 	if err != nil {
@@ -569,48 +555,6 @@ func (s *Store) PageRequestLogsGrouped(offset, limit int) ([]*RequestLog, error)
 	return scanRequestLogs(rows)
 }
 
-// Cloudflare403BodySizeSummary 统计最近 window 内 Cloudflare 网关拒绝(403)错误日志，
-// 按出站请求体大小分桶（以 80KB 软告警阈值为界）给出次数与占比，并据「超阈值占比」
-// 给出 body 大小是否为主要诱因的判断。无匹配样本时返回空串（调用方据此不追加）。
-// 用途：在 403 告警里用真实数据回答「请求体大小与 403 是否相关」，避免仅凭单条日志臆测。
-func (s *Store) Cloudflare403BodySizeSummary(window time.Duration) (string, error) {
-	minutes := int(window.Minutes())
-	if minutes < 1 {
-		minutes = 1
-	}
-	var b0, b1, b2, b3, b4, total int
-	err := s.db.QueryRow(`SELECT
-		COALESCE(SUM(CASE WHEN request_bytes < 16384 THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN request_bytes >= 16384 AND request_bytes < 32768 THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN request_bytes >= 32768 AND request_bytes < 65536 THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN request_bytes >= 65536 AND request_bytes < 81920 THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN request_bytes >= 81920 THEN 1 ELSE 0 END),0),
-		COUNT(*)
-		FROM request_logs
-		WHERE status='error' AND error_message LIKE '%Cloudflare%'
-		  AND created_at >= datetime('now', ?)`,
-		fmt.Sprintf("-%d minutes", minutes)).Scan(&b0, &b1, &b2, &b3, &b4, &total)
-	if err != nil {
-		return "", err
-	}
-	if total == 0 {
-		return "", nil
-	}
-	pct := func(n int) float64 { return float64(n) * 100 / float64(total) }
-	out := fmt.Sprintf("近期 403 请求体大小分布（最近 %d 分钟，共 %d 次 Cloudflare 拒绝）:", minutes, total)
-	out += fmt.Sprintf("\n  <16KB: %d 次 (%.0f%%)", b0, pct(b0))
-	out += fmt.Sprintf("\n  16–32KB: %d 次 (%.0f%%)", b1, pct(b1))
-	out += fmt.Sprintf("\n  32–64KB: %d 次 (%.0f%%)", b2, pct(b2))
-	out += fmt.Sprintf("\n  64–80KB: %d 次 (%.0f%%)", b3, pct(b3))
-	out += fmt.Sprintf("\n  >80KB(超软阈值): %d 次 (%.0f%%)", b4, pct(b4))
-	hint := "多数 403 发生在正常体积请求，body 大小并非主要诱因（更可能是边缘风控评分/速率判定）"
-	if float64(b4)/float64(total) >= 0.5 {
-		hint = "多数 403 集中在超大请求体，body 大小可能是主要诱因，建议压缩出站 payload"
-	}
-	out += fmt.Sprintf("\n结论: 超软阈值(>80KB)的 403 占比 %.0f%%——%s", pct(b4), hint)
-	return out, nil
-}
-
 // WafSignatureLikeSQL 把签名子串表拼成 request_logs.upstream_body 的 LIKE 匹配
 // 片段。签名里含 `<` 时自动补一条转义形变体（同行，` OR ` 连接）：Go json.Marshal
 // 把 `<` 存成六字符字面量 <，SQL 子串匹配用 `u003c`（不写反斜杠避免多层转义歧义，
@@ -887,99 +831,105 @@ func (s *Store) GetStats() (*Stats, error) {
 	return st, nil
 }
 
-// ─── 告警记录 ────────────────────────────────────────────────
+// ─── API Keys（对外 /v1 端点的多密钥管理）─────────────────────
 
-// CreateAlert 写入一条告警。同 source_type+source_id+alert_type 已有未处理告警时跳过（去重）。
-func (s *Store) CreateAlert(level, title, message, sourceType string, sourceID *int64, alertType string) error {
-	var id int64
-	err := s.db.QueryRow(`SELECT id FROM alerts WHERE status='open' AND source_type=? AND alert_type=? AND (source_id=? OR (? IS NULL AND source_id IS NULL)) LIMIT 1`,
-		sourceType, alertType, sourceID, sourceID).Scan(&id)
-	if err == nil {
-		return nil // 已有未处理同源告警，去重
-	}
-	if err != sql.ErrNoRows {
-		return err
-	}
-	_, err = s.db.Exec(`INSERT INTO alerts (level,title,message,source_type,source_id,alert_type,status,created_at) VALUES (?,?,?,?,?,?,'open',?)`,
-		level, title, message, sourceType, sourceID, alertType, time.Now())
-	return err
+// APIKey 是面板「API KEY 管理」里的一条密钥。额度按 token 计：
+// 每次对话消耗 (prompt+completion tokens) × multiplier，累加到 QuotaUsed。
+type APIKey struct {
+	ID              int64      `json:"id"`
+	Key             string     `json:"key"`
+	Name            string     `json:"name"`
+	ExpiresAt       *time.Time `json:"expiresAt"`       // nil=永不过期
+	QuotaLimit      int64      `json:"quotaLimit"`      // 0=不限
+	QuotaUsed       int64      `json:"quotaUsed"`
+	ConcurrencyLimit int       `json:"concurrencyLimit"` // 0=不限
+	Multiplier      float64    `json:"multiplier"`
+	Enabled         bool       `json:"enabled"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	UpdatedAt       time.Time  `json:"updatedAt"`
 }
 
-func (s *Store) ListAlerts(status string, limit int) ([]*Alert, error) {
-	if limit <= 0 {
-		limit = 100
+const apiKeyColumns = `id,key,name,expires_at,quota_limit,quota_used,concurrency_limit,multiplier,enabled,created_at,updated_at`
+
+func scanAPIKey(row interface{ Scan(dest ...any) error }) (*APIKey, error) {
+	k := &APIKey{}
+	var expires sql.NullTime
+	var enabled int
+	if err := row.Scan(&k.ID, &k.Key, &k.Name, &expires, &k.QuotaLimit, &k.QuotaUsed, &k.ConcurrencyLimit,
+		&k.Multiplier, &enabled, &k.CreatedAt, &k.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
 	}
-	q := `SELECT id,level,title,message,source_type,source_id,alert_type,status,created_at,resolved_at FROM alerts`
-	var args []interface{}
-	if status == "open" || status == "resolved" {
-		q += ` WHERE status=?`
-		args = append(args, status)
+	if expires.Valid {
+		k.ExpiresAt = &expires.Time
 	}
-	q += ` ORDER BY id DESC LIMIT ?`
-	args = append(args, limit)
-	rows, err := s.db.Query(q, args...)
+	k.Enabled = enabled != 0
+	return k, nil
+}
+
+func (s *Store) CreateAPIKey(key, name string, expiresAt *time.Time, quotaLimit, concurrencyLimit int64, multiplier float64) (*APIKey, error) {
+	now := time.Now()
+	res, err := s.db.Exec(`INSERT INTO api_keys (key,name,expires_at,quota_limit,concurrency_limit,multiplier,enabled,created_at,updated_at)
+		VALUES (?,?,?,?,?,?,1,?,?)`,
+		key, name, expiresAt, quotaLimit, concurrencyLimit, multiplier, now, now)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	return s.GetAPIKey(id)
+}
+
+func (s *Store) GetAPIKey(id int64) (*APIKey, error) {
+	return scanAPIKey(s.db.QueryRow(`SELECT `+apiKeyColumns+` FROM api_keys WHERE id=?`, id))
+}
+
+// GetAPIKeyByKey 按密钥值取记录（/v1 鉴权用）。不存在返回 (nil, nil)。
+func (s *Store) GetAPIKeyByKey(key string) (*APIKey, error) {
+	if key == "" {
+		return nil, nil
+	}
+	return scanAPIKey(s.db.QueryRow(`SELECT `+apiKeyColumns+` FROM api_keys WHERE key=?`, key))
+}
+
+func (s *Store) ListAPIKeys() ([]*APIKey, error) {
+	rows, err := s.db.Query(`SELECT ` + apiKeyColumns + ` FROM api_keys ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []*Alert
+	var out []*APIKey
 	for rows.Next() {
-		a := &Alert{}
-		var srcID sql.NullInt64
-		var resolved sql.NullTime
-		if err := rows.Scan(&a.ID, &a.Level, &a.Title, &a.Message, &a.SourceType, &srcID, &a.AlertType, &a.Status, &a.CreatedAt, &resolved); err != nil {
+		k, err := scanAPIKey(rows)
+		if err != nil {
 			return nil, err
 		}
-		if srcID.Valid {
-			a.SourceID = &srcID.Int64
-		}
-		if resolved.Valid {
-			a.ResolvedAt = &resolved.Time
-		}
-		out = append(out, a)
+		out = append(out, k)
 	}
 	return out, rows.Err()
 }
 
-func (s *Store) ResolveAlert(id int64) error {
-	_, err := s.db.Exec(`UPDATE alerts SET status='resolved',resolved_at=? WHERE id=? AND status='open'`, time.Now(), id)
+// UpdateAPIKey 全量更新可编辑属性（密钥值本身不可改，换密钥删了重建）。
+func (s *Store) UpdateAPIKey(id int64, name string, expiresAt *time.Time, quotaLimit, concurrencyLimit int64, multiplier float64, enabled bool) error {
+	v := 0
+	if enabled {
+		v = 1
+	}
+	_, err := s.db.Exec(`UPDATE api_keys SET name=?,expires_at=?,quota_limit=?,concurrency_limit=?,multiplier=?,enabled=?,updated_at=? WHERE id=?`,
+		name, expiresAt, quotaLimit, concurrencyLimit, multiplier, v, time.Now(), id)
 	return err
 }
 
-func (s *Store) ResolveAlertsBySource(sourceType, alertType string, sourceID int64) error {
-	_, err := s.db.Exec(`UPDATE alerts SET status='resolved',resolved_at=? WHERE status='open' AND source_type=? AND alert_type=? AND source_id=?`,
-		time.Now(), sourceType, alertType, sourceID)
+func (s *Store) DeleteAPIKey(id int64) error {
+	_, err := s.db.Exec(`DELETE FROM api_keys WHERE id=?`, id)
 	return err
 }
 
-// AlertSummary 返回未处理告警按级别计数 + MTTR（已解决告警的平均处理时长，分钟）。
-type AlertSummary struct {
-	Severe   int     `json:"severe"`
-	Warning  int     `json:"warning"`
-	Info     int     `json:"info"`
-	Open     int     `json:"open"`
-	Resolved int     `json:"resolved"`
-	MTTRMin  float64 `json:"mttrMin"`
-}
-
-func (s *Store) AlertSummary() (*AlertSummary, error) {
-	sum := &AlertSummary{}
-	if err := s.db.QueryRow(`SELECT
-		COALESCE(SUM(CASE WHEN status='open' AND level='severe' THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN status='open' AND level='warning' THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN status='open' AND level='info' THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN status='open' THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN status='resolved' THEN 1 ELSE 0 END),0)
-		FROM alerts`).Scan(&sum.Severe, &sum.Warning, &sum.Info, &sum.Open, &sum.Resolved); err != nil {
-		return nil, err
-	}
-	var mttr float64
-	var cnt int
-	if err := s.db.QueryRow(`SELECT COALESCE(AVG((julianday(resolved_at)-julianday(created_at))*1440),0), COUNT(*) FROM alerts WHERE status='resolved' AND resolved_at IS NOT NULL`).Scan(&mttr, &cnt); err != nil {
-		return nil, err
-	}
-	sum.MTTRMin = mttr
-	return sum, nil
+// AddAPIKeyUsage 把一次请求的 token 消耗（已乘倍率）累加到该密钥。
+func (s *Store) AddAPIKeyUsage(id int64, tokens int64) error {
+	_, err := s.db.Exec(`UPDATE api_keys SET quota_used=quota_used+?,updated_at=? WHERE id=?`, tokens, time.Now(), id)
+	return err
 }
 
 func (s *Store) GetSetting(key string) (string, error) {
@@ -1011,11 +961,6 @@ func (s *Store) ListSettings() (map[string]string, error) {
 		out[k] = v
 	}
 	return out, rows.Err()
-}
-
-// QueryRowScan 单行查询便捷方法（供评估器等内部逻辑使用）。
-func (s *Store) QueryRowScan(query string, dest ...interface{}) error {
-	return s.db.QueryRow(query).Scan(dest...)
 }
 
 // stripSQLComments 去掉 SQL 里的 -- 行注释与 /* */ 块注释，供只读前缀判定，
@@ -1127,16 +1072,5 @@ func (s *Store) CacheProbeStats() (distinct, repeats int64, err error) {
 // ResetCacheProbe 清空探针表，开始一个干净的度量窗口。
 func (s *Store) ResetCacheProbe() error {
 	_, err := s.db.Exec(`DELETE FROM cache_probe`)
-	return err
-}
-
-func (s *Store) ResolveAllOpen() error {
-	_, err := s.db.Exec(`UPDATE alerts SET status='resolved',resolved_at=? WHERE status='open'`, time.Now())
-	return err
-}
-
-func (s *Store) ResolveAllByType(sourceType, alertType string) error {
-	_, err := s.db.Exec(`UPDATE alerts SET status='resolved',resolved_at=? WHERE status='open' AND source_type=? AND alert_type=?`,
-		time.Now(), sourceType, alertType)
 	return err
 }

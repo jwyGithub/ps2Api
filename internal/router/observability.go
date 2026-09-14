@@ -7,30 +7,6 @@ import (
 	"ps2api/internal/store"
 )
 
-// alertRequestRejected 在请求被网关拒绝且带有排查上下文（如 Cloudflare 403 的 Ray ID、
-// 出站 body 大小、响应体片段）时写入一条告警，展示到仪表盘的告警面板，方便定位 403 诱因。
-// 无诊断详情（普通坏请求/工具名冲突等）时不打扰。按账号去重，避免同号连续 403 刷屏。
-func (r *Router) alertRequestRejected(acc *store.Account, res *provider.Result) {
-	if res == nil || res.RejectionDetail == "" {
-		return
-	}
-	title := "请求被网关拒绝: " + acc.Email
-	msg := res.Error + "\n" + res.RejectionDetail
-	// 网关(Cloudflare)拦截时附上近 1 小时 403 按请求体大小的分布，用真实数据佐证
-	// body 大小与 403 是否相关，而非仅凭当前单条请求臆测。
-	if res.GatewayBlocked {
-		if dist, err := r.Store.Cloudflare403BodySizeSummary(60 * time.Minute); err == nil && dist != "" {
-			msg += "\n\n" + dist
-		}
-		// 签名对比：验证 403 与出站体内容形状（HTML/JS 标记，典型为前端源码）的
-		// 相关性，区分「内容规则命中」与「体积/IP/账号」诱因。
-		if sig, err := r.Store.Cloudflare403SignatureSummary(60*time.Minute, provider.WafSignatureProbes()); err == nil && sig != "" {
-			msg += "\n\n" + sig
-		}
-	}
-	_ = r.Store.CreateAlert("warning", title, msg, "account", &acc.ID, "gateway_rejected")
-}
-
 // logAttempt 把每次上游调用（无论成败）都写入 request_logs，
 // 失败次数、错误率、平均延迟、P95 等指标全部来自真实日志。
 func (r *Router) logAttempt(acc *store.Account, req *provider.ChatRequest, res *provider.Result, started time.Time) {

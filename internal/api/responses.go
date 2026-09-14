@@ -105,6 +105,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, _, err := s.Router.Chat(r.Context(), &req)
+	s.chargeKey(r.Context(), res) // API Key 用量回写（tokens×倍率）
 	if err != nil {
 		openAIError(w, upstreamErrorStatus(err), err.Error(), "service_unavailable")
 		return

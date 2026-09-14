@@ -183,9 +183,6 @@ func TestStreamCloudflare403RetriesOnceThenStops(t *testing.T) {
 	if output.Len() != 0 {
 		t.Fatalf("no output should be emitted to client on gateway block, got %q", output.String())
 	}
-	if alerts, err := r.Store.ListAlerts("", 10); err != nil || len(alerts) == 0 {
-		t.Fatalf("expected a gateway-rejected alert to be recorded: alerts=%v err=%v", alerts, err)
-	}
 }
 
 // 403 冷却判别：出站体命中 WAF 特征 = 内容型拦截（同一内容换号必然复现）→ 不冷却账号；
@@ -658,9 +655,6 @@ func TestStreamUpstreamModelFailureContinuationStaysOnOriginalAccount(t *testing
 	if err != nil || same.Status != "active" {
 		t.Fatalf("account must stay active after an upstream-side model failure, got %+v err=%v", same, err)
 	}
-	if alerts, err := r.Store.ListAlerts("", 10); err != nil || len(alerts) != 0 {
-		t.Fatalf("upstream model failure must not raise an account alert, got %d alert(s) err=%v", len(alerts), err)
-	}
 }
 
 // 上游持续报 Policy Error（换号也没用，因为故障在上游侧）：必须把重试全部消耗在原账号上、
@@ -754,9 +748,6 @@ func TestChatStopsImmediatelyWhenClientIsGone(t *testing.T) {
 		if a.Status == "error" {
 			t.Fatalf("a client disconnect must not be blamed on account %d", a.ID)
 		}
-	}
-	if alerts, err := r.Store.ListAlerts("", 10); err != nil || len(alerts) != 0 {
-		t.Fatalf("a client disconnect must not raise account alerts, got %d err=%v", len(alerts), err)
 	}
 }
 

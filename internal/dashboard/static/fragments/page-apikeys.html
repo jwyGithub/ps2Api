@@ -1,0 +1,63 @@
+<section class="page" id="page-apikeys">
+    <div class="p-8">
+      <div class="flex items-end justify-between mb-8 gap-6 flex-wrap">
+        <div>
+          <div class="text-[11px] font-semibold tracking-wider uppercase mb-2" style="color: var(--muted);">API Keys</div>
+          <h1 class="hero-title">API KEY <em>管理</em></h1>
+          <p class="mt-2 text-[14px]" style="color: var(--fg-2);">对外 /v1 端点的访问密钥：有效期、token 额度、并发限制与计费倍率。</p>
+        </div>
+        <button class="btn btn-primary" onclick="openKeyDrawer()">新增 API KEY</button>
+      </div>
+
+      <div class="card overflow-hidden">
+        <div class="overflow-x-auto">
+          <table class="data-table">
+            <thead>
+              <tr><th>名称</th><th>密钥</th><th>状态</th><th>额度（token）</th><th>倍率</th><th>并发</th><th>有效期</th><th>创建时间</th><th>操作</th></tr>
+            </thead>
+            <tbody id="keysBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <aside class="drawer" id="keyDrawer">
+    <div class="flex items-center justify-between p-6" style="border-bottom: 1px solid var(--border);">
+      <div>
+        <div class="text-[11px] uppercase tracking-wider" style="color: var(--muted);">密钥</div>
+        <h2 class="font-display text-[24px] font-medium" id="keyDrawerTitle">新增 API KEY</h2>
+      </div>
+      <button class="icon-btn" onclick="closeKeyDrawer()">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="p-6 space-y-4">
+        <div>
+          <label class="text-[12px] font-semibold block mb-1.5">名称（备注用，如「Claude Code - 本机」）</label>
+          <input class="input" id="keyFormName" placeholder="备注名">
+        </div>
+        <div>
+          <label class="text-[12px] font-semibold block mb-1.5">有效期（天）</label>
+          <input class="input" id="keyFormExpiry" type="number" min="0" placeholder="留空 / 0 = 永不过期">
+        </div>
+        <div>
+          <label class="text-[12px] font-semibold block mb-1.5">额度限制（token 数，消耗 = tokens × 倍率）</label>
+          <input class="input" id="keyFormQuota" type="number" min="0" placeholder="0 = 不限">
+        </div>
+        <div>
+          <label class="text-[12px] font-semibold block mb-1.5">并发限制（同时在飞的请求数）</label>
+          <input class="input" id="keyFormConcurrency" type="number" min="0" placeholder="0 = 不限">
+        </div>
+        <div>
+          <label class="text-[12px] font-semibold block mb-1.5">倍率（默认 1）</label>
+          <input class="input" id="keyFormMultiplier" type="number" min="0" step="0.1" placeholder="1">
+        </div>
+        <div id="keyFormEditOnly" style="display:none;">
+          <label class="text-[12px] font-semibold block mb-1.5">启用</label>
+          <label class="flex items-center gap-2 text-[13px]"><input type="checkbox" id="keyFormEnabled"> 该密钥当前可用</label>
+        </div>
+        <button class="btn btn-primary w-full" onclick="submitKeyForm()">保存</button>
+    </div>
+  </aside>
+  <div class="drawer-backdrop" id="keyDrawerBackdrop" onclick="closeKeyDrawer()"></div>
