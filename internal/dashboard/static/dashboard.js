@@ -21,10 +21,11 @@
   };
   var PAGE_SIZE = 20;
   // 通用分页：切片当前页并生成页码控件 HTML（gotoFn 为全局翻页函数名）
-  function paginate(list, page) {
-    var pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE));
+  function paginate(list, page, size) {
+    size = size || PAGE_SIZE;
+    var pages = Math.max(1, Math.ceil(list.length / size));
     page = Math.min(Math.max(1, page), pages);
-    return { items: list.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE), page: page, pages: pages, total: list.length };
+    return { items: list.slice((page - 1) * size, page * size), page: page, pages: pages, total: list.length };
   }
   function pagerHTML(p, gotoFn) {
     if (p.pages <= 1) return '';
@@ -260,29 +261,59 @@
   }
 
   // ─── 号池管理 ───────────────────────────────────────────────
+  // 卡片视图每页张数：xl 三列 × 四行。
+  var POOLS_CARD_SIZE = 12;
   function renderPoolsReal() {
-    var body = document.getElementById('poolsBody'); if (!body) return;
+    var grid = document.getElementById('poolsCards'); if (!grid) return;
     var list = state.accounts.filter(function (a) {
       var st = effectiveStatus(a);
       if (state.poolStatus !== 'ALL' && st !== state.poolStatus) return false;
       if (state.poolQuery && (a.email + ' ' + (a.source || '')).toLowerCase().indexOf(state.poolQuery.toLowerCase()) < 0) return false;
       return true;
     });
-    var pg = paginate(list, state.poolPage); state.poolPage = pg.page;
-    body.innerHTML = list.length ? pg.items.map(function (a) {
+    var pg = paginate(list, state.poolPage, POOLS_CARD_SIZE); state.poolPage = pg.page;
+    grid.innerHTML = list.length ? pg.items.map(function (a) {
       var s = statusInfo(effectiveStatus(a)), total = Number(a.quotaLimit || 0), remain = Number(a.quotaRemaining || 0);
       var pct = total > 0 ? Math.max(0, Math.min(100, (remain / total) * 100)) : 0;
       var color = pct < 20 ? 'var(--danger)' : pct < 50 ? 'var(--warning)' : 'var(--accent)';
-      return '<tr><td><input type="checkbox"></td><td><div class="flex items-center gap-3"><span class="dot '+s.dot+'"></span><div><div class="font-mono font-semibold">'+esc(a.email)+'</div><div class="text-[11px]" style="color:var(--muted)">ID '+a.id+'</div></div></div></td><td><span class="tag tag-gray">'+esc(sourceName(a.source))+'</span></td><td><span class="tag '+s.tag+'">'+s.label+'</span></td><td>'+esc(a.plan || 'FREE_USER')+'</td><td><div class="w-32"><div class="flex items-center justify-between text-[11px] mb-1"><span class="font-mono">'+fmt(remain)+' / '+fmt(total)+'</span><span class="font-mono" style="color:'+color+'">'+(total ? pct.toFixed(1)+'%' : '-')+'</span></div><div class="progress" style="height:4px"><div class="progress-fill" style="width:'+pct+'%;background:'+color+'"></div></div></div></td><td class="font-mono">'+fmt(todayCalls(a.id))+'</td><td class="text-[12px]" style="color:var(--fg-2)">'+fmtDate(a.quotaCycleEnd)+'</td><td><div class="flex items-center gap-1"><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px" onclick="testAccount('+a.id+')">测试</button><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px" onclick="refreshAccountQuota('+a.id+')">刷新额度</button><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px" onclick="toggleAccount('+a.id+','+(!a.enabled)+')">'+(a.enabled?'停用':'启用')+'</button><button class="btn btn-ghost" style="height:28px;padding:4px 8px;font-size:11px;color:var(--danger)" onclick="deleteAccount('+a.id+')">删除</button></div></td></tr>';
-    }).join('') : '<tr><td colspan="9" style="text-align:center;padding:40px;color:var(--muted)">'+(state.accounts.length ? '没有匹配的账号' : '暂无账号，请点击"添加账号"或通过"导入"上传 account.json')+'</td></tr>';
+      return '<div class="card p-5 flex flex-col gap-3">' +
+        '<div class="flex items-start justify-between gap-2">' +
+          '<div class="flex items-center gap-3 min-w-0">' +
+            '<span class="dot ' + s.dot + '"></span>' +
+            '<div class="min-w-0">' +
+              '<div class="font-mono font-semibold text-[13px] truncate" title="' + esc(a.email) + '">' + esc(a.email) + '</div>' +
+              '<div class="text-[11px]" style="color:var(--muted)">ID ' + a.id + ' · ' + esc(sourceName(a.source)) + ' · ' + esc(a.plan || 'FREE_USER') + '</div>' +
+            '</div>' +
+          '</div>' +
+          '<span class="tag ' + s.tag + '">' + s.label + '</span>' +
+        '</div>' +
+        '<div>' +
+          '<div class="flex items-center justify-between text-[11px] mb-1">' +
+            '<span style="color:var(--muted)">余量 / 总量</span>' +
+            '<span class="font-mono">' + fmt(remain) + ' / ' + fmt(total) + ' <span style="color:' + color + '">' + (total ? pct.toFixed(1) + '%' : '-') + '</span></span>' +
+          '</div>' +
+          '<div class="progress" style="height:6px"><div class="progress-fill" style="width:' + pct + '%;background:' + color + '"></div></div>' +
+        '</div>' +
+        '<div class="flex items-center justify-between text-[11px]">' +
+          '<span style="color:var(--muted)">重置 <span class="font-mono" style="color:var(--fg-2)">' + fmtDate(a.quotaCycleEnd) + (a.quotaCycleEnd ? '（' + countdown(a.quotaCycleEnd) + '后）' : '') + '</span></span>' +
+          '<span style="color:var(--muted)">今日调用 <span class="font-mono" style="color:var(--fg-2)">' + fmt(todayCalls(a.id)) + '</span></span>' +
+        '</div>' +
+        '<div class="flex items-center gap-1 pt-3" style="border-top:1px solid var(--border)">' +
+          '<button class="btn btn-ghost" style="height:28px;padding:4px 10px;font-size:11px" onclick="testAccount(' + a.id + ')">测试</button>' +
+          '<button class="btn btn-ghost" style="height:28px;padding:4px 10px;font-size:11px" onclick="refreshAccountQuota(' + a.id + ')">刷新</button>' +
+          '<button class="btn btn-ghost" style="height:28px;padding:4px 10px;font-size:11px" onclick="toggleAccount(' + a.id + ',' + (!a.enabled) + ')">' + (a.enabled ? '停用' : '启用') + '</button>' +
+          '<button class="btn btn-ghost" style="height:28px;padding:4px 10px;font-size:11px;color:var(--danger);margin-left:auto" onclick="deleteAccount(' + a.id + ')">删除</button>' +
+        '</div>' +
+      '</div>';
+    }).join('') : '<div class="card p-10 col-span-full" style="text-align:center;color:var(--muted)">'+(state.accounts.length ? '没有匹配的账号' : '暂无账号，请点击"添加账号"或通过"导入"上传 account.json')+'</div>';
     var counts = { active:0, exhausted:0, error:0, offline:0, disabled:0 };
     state.accounts.forEach(function (a) { var st = effectiveStatus(a); if (counts[st] !== undefined) counts[st]++; });
-    var rings = document.querySelectorAll('#page-pools .ring-stat .value');
-    if (rings[0]) rings[0].textContent = counts.active; if (rings[1]) rings[1].textContent = counts.exhausted; if (rings[2]) rings[2].textContent = counts.error; if (rings[3]) rings[3].textContent = counts.disabled;
     var poolTotal = state.accounts.length;
-    ['active', 'exhausted', 'error', 'offline', 'disabled'].forEach(function (k) {
-      var el = document.querySelector('#page-pools [data-pool-big="' + k + '"]');
-      if (el) el.textContent = poolTotal ? Math.round(counts[k] / poolTotal * 100) + '%' : '0%';
+    ['active', 'exhausted', 'error', 'disabled'].forEach(function (k) {
+      var c = document.querySelector('#page-pools [data-pool-count="' + k + '"]');
+      if (c) c.textContent = counts[k];
+      var p = document.querySelector('#page-pools [data-pool-pct="' + k + '"]');
+      if (p) p.textContent = poolTotal ? Math.round(counts[k] / poolTotal * 100) + '%' : '0%';
     });
     var cnt = document.getElementById('poolCount');
     if (cnt) cnt.textContent = '共 ' + pg.total + ' 条' + (pg.pages > 1 ? ' · 第 ' + pg.page + '/' + pg.pages + ' 页' : '');
@@ -1402,7 +1433,6 @@
       .catch(function(e){toast(e.message);});
   };
   window.refreshData = function () { loadAll().then(function () { toast('数据已刷新'); }); };
-  window.syncStatus = function () { loadAll().then(function () { toast('状态已同步'); }); };
   window.refreshQuota = function () {
     toast('正在探测账号额度…');
     api('/api/refresh-quota', { method: 'POST', body: '{}' }).then(function (d) {

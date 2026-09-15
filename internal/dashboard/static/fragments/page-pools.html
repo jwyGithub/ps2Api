@@ -16,10 +16,6 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
             导出
           </button>
-          <button class="btn btn-ghost" onclick="syncStatus()">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>
-            同步状态
-          </button>
           <button class="btn btn-primary" onclick="openDrawer()">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
             添加账号
@@ -27,57 +23,34 @@
         </div>
       </div>
 
-      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        <div class="card p-5 flex items-center gap-4">
-          <div class="ring-stat">
-            <svg width="80" height="80"><circle cx="40" cy="40" r="32" stroke="var(--bg-2)" stroke-width="6" fill="none"/><circle cx="40" cy="40" r="32" stroke="var(--success)" stroke-width="6" fill="none" stroke-dasharray="201" stroke-dashoffset="20" stroke-linecap="round"/></svg>
-            <div class="value">38</div>
-          </div>
-          <div>
-            <div class="text-[11px] uppercase tracking-wider" style="color: var(--muted);">在线</div>
-            <div class="font-display text-[20px] font-medium mt-1" data-pool-big="active">—</div>
-            <div class="text-[11px]" style="color: var(--success);">实时统计</div>
-          </div>
+      <div class="card p-4 mb-4 flex items-center gap-x-5 gap-y-3 flex-wrap">
+        <div class="flex items-center gap-2">
+          <span class="dot dot-online"></span>
+          <span class="text-[11px]" style="color: var(--muted);">在线</span>
+          <span class="font-mono font-semibold text-[14px]" data-pool-count="active">0</span>
+          <span class="text-[11px] font-mono" style="color: var(--muted);" data-pool-pct="active">0%</span>
         </div>
-        <div class="card p-5 flex items-center gap-4">
-          <div class="ring-stat">
-            <svg width="80" height="80"><circle cx="40" cy="40" r="32" stroke="var(--bg-2)" stroke-width="6" fill="none"/><circle cx="40" cy="40" r="32" stroke="var(--warning)" stroke-width="6" fill="none" stroke-dasharray="201" stroke-dashoffset="170" stroke-linecap="round"/></svg>
-            <div class="value">3</div>
-          </div>
-          <div>
-            <div class="text-[11px] uppercase tracking-wider" style="color: var(--muted);">额度耗尽</div>
-            <div class="font-display text-[20px] font-medium mt-1" data-pool-big="exhausted">—</div>
-            <div class="text-[11px]" style="color: var(--warning);">实时统计</div>
-          </div>
+        <div class="flex items-center gap-2">
+          <span class="dot dot-idle"></span>
+          <span class="text-[11px]" style="color: var(--muted);">额度耗尽</span>
+          <span class="font-mono font-semibold text-[14px]" data-pool-count="exhausted">0</span>
+          <span class="text-[11px] font-mono" style="color: var(--muted);" data-pool-pct="exhausted">0%</span>
         </div>
-        <div class="card p-5 flex items-center gap-4">
-          <div class="ring-stat">
-            <svg width="80" height="80"><circle cx="40" cy="40" r="32" stroke="var(--bg-2)" stroke-width="6" fill="none"/><circle cx="40" cy="40" r="32" stroke="var(--danger)" stroke-width="6" fill="none" stroke-dasharray="201" stroke-dashoffset="186" stroke-linecap="round"/></svg>
-            <div class="value">1</div>
-          </div>
-          <div>
-            <div class="text-[11px] uppercase tracking-wider" style="color: var(--muted);">异常</div>
-            <div class="font-display text-[20px] font-medium mt-1" data-pool-big="error">—</div>
-            <div class="text-[11px]" style="color: var(--danger);">实时统计</div>
-          </div>
+        <div class="flex items-center gap-2">
+          <span class="dot dot-error"></span>
+          <span class="text-[11px]" style="color: var(--muted);">异常</span>
+          <span class="font-mono font-semibold text-[14px]" data-pool-count="error">0</span>
+          <span class="text-[11px] font-mono" style="color: var(--muted);" data-pool-pct="error">0%</span>
         </div>
-        <div class="card p-5 flex items-center gap-4">
-          <div class="ring-stat">
-            <svg width="80" height="80"><circle cx="40" cy="40" r="32" stroke="var(--bg-2)" stroke-width="6" fill="none"/><circle cx="40" cy="40" r="32" stroke="var(--muted)" stroke-width="6" fill="none" stroke-dasharray="201" stroke-dashoffset="201" stroke-linecap="round"/></svg>
-            <div class="value">0</div>
-          </div>
-          <div>
-            <div class="text-[11px] uppercase tracking-wider" style="color: var(--muted);">已停用</div>
-            <div class="font-display text-[20px] font-medium mt-1" data-pool-big="disabled">—</div>
-            <div class="text-[11px]" style="color: var(--muted);">实时统计</div>
-          </div>
+        <div class="flex items-center gap-2">
+          <span class="dot dot-offline"></span>
+          <span class="text-[11px]" style="color: var(--muted);">已停用</span>
+          <span class="font-mono font-semibold text-[14px]" data-pool-count="disabled">0</span>
+          <span class="text-[11px] font-mono" style="color: var(--muted);" data-pool-pct="disabled">0%</span>
         </div>
-      </div>
-
-      <div class="card p-4 mb-4">
-        <div class="flex items-center gap-3 flex-wrap">
-          <input class="input flex-1 min-w-[200px]" placeholder="搜索账号邮箱、来源..." style="height: 36px;" id="poolSearch">
-          <select class="input select w-40" style="height: 36px;" id="poolStatus">
+        <div class="flex items-center gap-2 flex-wrap justify-end ml-auto">
+          <input class="input" style="width: 220px;" placeholder="搜索账号邮箱、来源..." id="poolSearch">
+          <select class="input select" style="width: 150px;" id="poolStatus">
             <option value="ALL">所有状态</option>
             <option value="active">在线</option>
             <option value="exhausted">额度耗尽</option>
@@ -88,23 +61,11 @@
         </div>
       </div>
 
-      <div class="card overflow-hidden">
-        <div class="overflow-x-auto">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th style="width: 40px;"><input type="checkbox"></th>
-                <th>账号</th><th>渠道</th><th>状态</th><th>套餐</th>
-                <th>余量 / 总量</th><th>今日调用</th><th>重置时间</th><th>操作</th>
-              </tr>
-            </thead>
-            <tbody id="poolsBody"></tbody>
-          </table>
-        </div>
-        <div class="flex items-center justify-between px-6 py-4" style="border-top: 1px solid var(--border);">
-          <div class="text-[12px]" style="color: var(--muted);" id="poolCount">共 0 条</div>
-          <div class="flex items-center gap-1" id="poolPager"></div>
-        </div>
+      <div id="poolsCards" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"></div>
+
+      <div class="card mt-4 flex items-center justify-between px-6 py-4">
+        <div class="text-[12px]" style="color: var(--muted);" id="poolCount">共 0 条</div>
+        <div class="flex items-center gap-1" id="poolPager"></div>
       </div>
 
     </div>
