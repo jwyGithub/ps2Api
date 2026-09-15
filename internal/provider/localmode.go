@@ -48,6 +48,47 @@ type nativeToolResponse struct {
 	responses      []map[string]interface{}
 }
 
+// tailToolCallsUntracked 判断待处理的 tool-tail 是否全部是「签发时无 groupID」的调用
+// （thirdParty/proxy-tools 模式，服务端不跟踪 pending 状态）。这类调用无法走 TOOL_RESPONSE，
+// 但 USER_QUERY 续用原会话是安全的——服务端没有挂起待响应的工具调用，续用可让上下文在
+// 服务端累积，避免每轮冷启动全历史折叠（10000 rune 上限下早期工具结果必然滚出窗口）。
+// 返回 false 的情形（native 调用、或重启后注册表丢失的未知调用）维持旧的清空重放行为。
+func (p *Provider) tailToolCallsUntracked(accountID int64, messages []ChatMessage) bool {
+	toolIdx := toolTailIndex(messages)
+	if toolIdx < 0 {
+		return false
+	}
+	any := false
+	for i := toolIdx; i >= 0; i-- {
+		msg := messages[i]
+		if msg.Role == "tool" {
+			if msg.ToolCallID == "" || !p.toolGroupUntracked(accountID, msg.ToolCallID) {
+				return false
+			}
+			any = true
+			continue
+		}
+		if !isAnthropicToolResult(msg) {
+			break
+		}
+		var blocks []map[string]interface{}
+		if json.Unmarshal(msg.Content, &blocks) != nil {
+			return false
+		}
+		for _, b := range blocks {
+			if b["type"] != "tool_result" {
+				continue
+			}
+			id, _ := b["tool_use_id"].(string)
+			if id == "" || !p.toolGroupUntracked(accountID, id) {
+				return false
+			}
+			any = true
+		}
+	}
+	return any
+}
+
 func (p *Provider) nativeToolResponse(accountID int64, messages []ChatMessage) (nativeToolResponse, bool) {
 	toolIdx := toolTailIndex(messages)
 	if toolIdx < 0 {

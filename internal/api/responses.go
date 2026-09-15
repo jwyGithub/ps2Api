@@ -40,14 +40,15 @@ type ResponsesReq struct {
 
 // respInputItem 是 input 数组里的一项(message / function_call / function_call_output / reasoning)。
 type respInputItem struct {
-	Type      string          `json:"type"`
-	Role      string          `json:"role"`
-	Content   json.RawMessage `json:"content"`
-	CallID    string          `json:"call_id"`
-	Name      string          `json:"name"`
-	Arguments string          `json:"arguments"`
-	Output    json.RawMessage `json:"output"`
-	Input     string          `json:"input"` // custom_tool_call 的原始 input(exec 的 JS 文本)
+	Type      string                   `json:"type"`
+	Role      string                   `json:"role"`
+	Content   json.RawMessage          `json:"content"`
+	CallID    string                   `json:"call_id"`
+	Name      string                   `json:"name"`
+	Arguments string                   `json:"arguments"`
+	Output    json.RawMessage          `json:"output"`
+	Input     string                   `json:"input"` // custom_tool_call 的原始 input(自由文本)
+	Tools     []map[string]interface{} `json:"tools"` // additional_tools 项携带的工具声明(namespace 嵌套)
 }
 
 func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
@@ -84,7 +85,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		openAIError(w, 400, unsupportedMediaMessage(kind), "invalid_request_error")
 		return
 	}
-	req := responsesToOpenAI(rr)
+	req, customNames := responsesToOpenAI(rr)
 	req.Endpoint = "openai"
 	req.ClientPath = r.URL.Path
 	req.ClientBody = string(raw)
@@ -101,7 +102,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	// exec custom tool 探测:客户端声明了 exec(type:custom)才把原生工具翻译成 custom_tool_call。
 	execMode := codexExecDeclared(rr.Tools, rr.Input) || codexExecForce
 	if rr.Stream {
-		s.streamResponses(w, r, &req, execMode)
+		s.streamResponses(w, r, &req, execMode, customNames)
 		return
 	}
 	res, _, err := s.Router.Chat(r.Context(), &req)
@@ -110,11 +111,16 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		openAIError(w, upstreamErrorStatus(err), err.Error(), "service_unavailable")
 		return
 	}
-	jsonWrite(w, 200, responsesObject(res, req.Model, "completed", execMode))
+	// 上游回吐的工具名可能被 thirdParty 机制加了 namespace 前缀，渲染前先纠回裸名。
+	registered := registeredToolNames(req.Tools)
+	for i := range res.ToolCalls {
+		res.ToolCalls[i].Function.Name = stripUpstreamToolPrefix(res.ToolCalls[i].Function.Name, registered)
+	}
+	jsonWrite(w, 200, responsesObject(res, req.Model, "completed", execMode, customNames))
 }
 
-// responsesToOpenAI 把 Responses 请求转为内部 ChatRequest。
-func responsesToOpenAI(rr ResponsesReq) provider.ChatRequest {
+// responsesToOpenAI 把 Responses 请求转为内部 ChatRequest，并返回 custom(自由文本)工具名集合。
+func responsesToOpenAI(rr ResponsesReq) (provider.ChatRequest, map[string]bool) {
 	var msgs []provider.ChatMessage
 	if rr.Instructions != "" {
 		b, _ := json.Marshal(rr.Instructions)
@@ -122,11 +128,11 @@ func responsesToOpenAI(rr ResponsesReq) provider.ChatRequest {
 	}
 	// input 可以是纯字符串,或 item 数组。
 	var asString string
+	var items []respInputItem
 	if json.Unmarshal(rr.Input, &asString) == nil {
 		b, _ := json.Marshal(asString)
 		msgs = append(msgs, provider.ChatMessage{Role: "user", Content: b})
 	} else {
-		var items []respInputItem
 		_ = json.Unmarshal(rr.Input, &items)
 		for _, it := range items {
 			if m, ok := respItemToMessage(it); ok {
@@ -134,10 +140,12 @@ func responsesToOpenAI(rr ResponsesReq) provider.ChatRequest {
 			}
 		}
 	}
+	// 合并顶层 tools 与 additional_tools 项（codex 的工具声明所在地），custom 工具桥接成 function 形状。
+	tools, customNames := flattenResponsesTools(rr.Tools, items)
 	req := provider.ChatRequest{
 		Model:             normalizeModel(rr.Model),
 		Messages:          msgs,
-		Tools:             mapsToInterfaces(rr.Tools),
+		Tools:             tools,
 		ToolChoice:        rr.ToolChoice,
 		ParallelToolCalls: rr.ParallelToolCalls,
 		OutputConfig:      rr.OutputConfig,
@@ -146,7 +154,7 @@ func responsesToOpenAI(rr ResponsesReq) provider.ChatRequest {
 	if req.OutputConfig == nil && rr.Reasoning != nil {
 		req.OutputConfig = rr.Reasoning
 	}
-	return req
+	return req, customNames
 }
 
 func respItemToMessage(it respInputItem) (provider.ChatMessage, bool) {
@@ -175,12 +183,13 @@ func respItemToMessage(it respInputItem) (provider.ChatMessage, bool) {
 		b, _ := json.Marshal(content)
 		return provider.ChatMessage{Role: "tool", ToolCallID: it.CallID, Content: b}, it.CallID != ""
 	case "custom_tool_call":
-		// exec custom 工具调用的回显 → 还原成内部 executeShellCommand assistant tool_call,
-		// 内部管道/nativeToolResponse 只认裸名 executeShellCommand。input 的还原是 best-effort
-		// (见 execInputToArgs),不影响 call_id→groupID 续期闭环。
+		// 客户端回显的自由文本工具调用 → 按原名还原 assistant tool_call（对齐 raycast2api：
+		// arguments = JSON 编码的 input）。闭环靠 call_id→groupID(nativeToolResponse 只看 ID)，
+		// 名字只影响折叠历史的可读性；LookupConversation 靠裸 user 前缀兜底命中，不受影响。
 		call := provider.ToolCall{ID: it.CallID, Type: "function"}
-		call.Function.Name = "executeShellCommand"
-		call.Function.Arguments = execInputToArgs(it.Input)
+		call.Function.Name = it.Name
+		b, _ := json.Marshal(it.Input)
+		call.Function.Arguments = string(b)
 		tc, _ := json.Marshal([]provider.ToolCall{call})
 		empty, _ := json.Marshal("")
 		return provider.ChatMessage{Role: "assistant", Content: empty, ToolCalls: tc}, it.CallID != ""
@@ -222,7 +231,10 @@ func extractResponsesText(raw json.RawMessage) string {
 // 流式实现见 responses_stream.go(streamResponses:把内部 Delta 流转成 Responses SSE 事件)。
 
 // responsesObject 构造非流式的 Responses 响应体(output 数组 + usage)。
-func responsesObject(res *provider.Result, model, status string, execMode bool) map[string]interface{} {
+// customNames 是本轮声明的 custom(自由文本)工具名集合：模型调用这些名字时渲染成
+// custom_tool_call，其余走 function_call；execMode 下 executeShellCommand/readFile
+// 仍翻译成 exec custom_tool_call 兜底。
+func responsesObject(res *provider.Result, model, status string, execMode bool, customNames map[string]bool) map[string]interface{} {
 	var output []interface{}
 	if res.ReasoningContent != "" {
 		output = append(output, map[string]interface{}{
@@ -249,6 +261,13 @@ func responsesObject(res *provider.Result, model, status string, execMode bool) 
 				})
 				continue
 			}
+		}
+		if customNames[tc.Function.Name] {
+			output = append(output, map[string]interface{}{
+				"id": newID("ctc_"), "type": "custom_tool_call", "status": "completed",
+				"call_id": tc.ID, "name": tc.Function.Name, "input": customInputOf(args),
+			})
+			continue
 		}
 		output = append(output, map[string]interface{}{
 			"id": newID("fc_"), "type": "function_call", "status": "completed",

@@ -2,7 +2,6 @@ package provider
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 )
@@ -148,45 +147,6 @@ func TestParseSimulatedToolCallDoesNotInventRawArgument(t *testing.T) {
 	}
 }
 
-func TestInjectToolProtocol(t *testing.T) {
-	tools := []interface{}{
-		map[string]interface{}{
-			"type": "function",
-			"function": map[string]interface{}{
-				"name":        "get_weather",
-				"description": "weather",
-				"parameters":  map[string]interface{}{"type": "object"},
-			},
-		},
-	}
-	out := injectToolProtocol("hello", tools)
-	if !strings.Contains(out, "<tool_call>") || !strings.Contains(out, "get_weather") || !strings.Contains(out, "hello") {
-		t.Fatalf("unexpected inject output:\n%s", out)
-	}
-}
-
-func TestInjectToolProtocolKeepsUserRequestWithManyTools(t *testing.T) {
-	tools := make([]interface{}, 100)
-	for i := range tools {
-		tools[i] = map[string]interface{}{
-			"name":        fmt.Sprintf("tool_%03d", i),
-			"description": strings.Repeat("large description ", 100),
-			"input_schema": map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"command": map[string]interface{}{"type": "string", "description": strings.Repeat("large property description ", 100)},
-				},
-				"required": []interface{}{"command"},
-			},
-		}
-	}
-	query := "请分析 employee/list 的组织数据关联"
-	out := injectToolProtocol(query, tools)
-	if !strings.Contains(out, "User request:\n"+query) || !strings.Contains(out, "tool_099(command*:string)") {
-		t.Fatalf("tool protocol lost the user request or tools: len=%d\n%s", len(out), out)
-	}
-}
-
 func TestApplySimulatedToolsSkipsWhenNativePresent(t *testing.T) {
 	res := &Result{ToolCalls: []ToolCall{{ID: "native", Type: "function"}}}
 	text := `<tool_call><name>get_weather</name><arguments>{}</arguments></tool_call>`
@@ -194,23 +154,6 @@ func TestApplySimulatedToolsSkipsWhenNativePresent(t *testing.T) {
 	got := applySimulatedTools(res, text, tools)
 	if got != text || len(res.ToolCalls) != 1 || res.ToolCalls[0].ID != "native" {
 		t.Fatalf("should keep native tool calls")
-	}
-}
-
-func TestAnthropicToolSchema(t *testing.T) {
-	tools := []interface{}{
-		map[string]interface{}{
-			"name":         "lookup",
-			"description":  "find things",
-			"input_schema": map[string]interface{}{"type": "object"},
-		},
-	}
-	proto := buildToolProtocol(tools)
-	if !strings.Contains(proto, "lookup") {
-		t.Fatalf("missing anthropic tool: %s", proto)
-	}
-	if _, err := json.Marshal(tools); err != nil {
-		t.Fatal(err)
 	}
 }
 

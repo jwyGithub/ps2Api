@@ -172,34 +172,8 @@ func execReadFileInput(argsJSON string) (string, bool) {
 	return execCommandJS(cmd, ""), true
 }
 
-// shellSingleQuote 用单引号安全包裹路径,内部单引号按 '\'' 转义,防止路径里的空格/特殊字符
+// shellSingleQuote 用单引号安全包裹路径,内部单引号按 '\” 转义,防止路径里的空格/特殊字符
 // 破坏 shell 命令行。
 func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-// execInputToArgs 把回显的 exec custom_tool_call.input(JS 文本)best-effort 还原成
-// executeShellCommand 参数,供入站历史重建(内部管道只认 executeShellCommand)。
-// 从 `await tools.exec_command({...})` 里抠出 JSON 对象取 cmd/workdir;抠不出就整段当 command。
-// 精确度不影响续期——nativeToolResponse 靠 call_id→groupID 闭环,LookupConversation 在
-// assistant 消息之前的前缀即可命中。
-func execInputToArgs(input string) string {
-	if i := strings.Index(input, "{"); i >= 0 {
-		if j := strings.LastIndex(input, "}"); j > i {
-			var obj struct {
-				Cmd     string `json:"cmd"`
-				Workdir string `json:"workdir"`
-			}
-			if json.Unmarshal([]byte(input[i:j+1]), &obj) == nil && obj.Cmd != "" {
-				out := map[string]interface{}{"command": obj.Cmd}
-				if obj.Workdir != "" {
-					out["projectPath"] = obj.Workdir
-				}
-				b, _ := json.Marshal(out)
-				return string(b)
-			}
-		}
-	}
-	b, _ := json.Marshal(map[string]interface{}{"command": input})
-	return string(b)
 }

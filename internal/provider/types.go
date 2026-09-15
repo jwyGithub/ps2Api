@@ -23,7 +23,11 @@ const (
 	WebProduct     = "workspace_v12"
 
 	RequestTimeout = 300 * time.Second
-	MaxToolDescLen = 512
+	// MaxToolDescLen 限制 thirdParty 工具描述出站长度。codex 的 exec custom 工具描述约
+	// 24KB，其中 512 字节之后才是关键语义(no console、text()/exit() 全局函数)——旧值 512
+	// 恰好把它们截掉，模型写裸 JS 表达式得到空输出、误以为无权限而反复重试。放宽到 32KB
+	// 全量放行；若上游对描述长度有 INPUT_VALIDATION_ERROR 硬限，再按实测收紧。
+	MaxToolDescLen = 32 * 1024
 
 	// MaxUpstreamQueryRunes 是上游 Postman 服务端对 input.query 的硬性校验上限。
 	// 2026-08-25 二分探测实测：10000 字符通过、10001 字符即被 INPUT_VALIDATION_ERROR

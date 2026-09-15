@@ -10,12 +10,14 @@ import (
 func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel string, accountID int64) map[string]interface{} {
 	nativeResponse, useNativeResponse := p.nativeToolResponse(accountID, req.Messages)
 	convID := p.LookupConversation(accountID, req.Messages)
-	// Native tool responses must keep the pending Postman conversation. If the
-	// group ID is unavailable (for example after a process restart), replay the
-	// history instead of sending a tool result as USER_QUERY.
+	// tool-tail 且无 native 响应时，仅当待处理调用「已知无 groupID」（thirdParty/proxy-tools
+	// 模式，服务端不跟踪 pending）才续用 conversationId（2026-09-15 改）：每轮清空导致冷启动
+	// 全历史折叠重放，10000 rune 上限下早期工具结果滚出窗口，模型反复重读重搜同一文件。
+	// 续用后 query 只带最新 tool result（splitMessages 的 hasConv 分支），其余上下文由服务端
+	// 会话累积。native 流程（有真实 groupID）不受影响；重启丢注册表的未知调用维持清空重放。
 	if useNativeResponse {
 		convID = nativeResponse.conversationID
-	} else if toolTail(req.Messages) {
+	} else if toolTail(req.Messages) && !p.tailToolCallsUntracked(accountID, req.Messages) {
 		convID = ""
 	}
 	split := p.splitMessages(req.Messages, convID, req.WafProbe)

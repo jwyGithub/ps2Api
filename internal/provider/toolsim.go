@@ -4,27 +4,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"regexp"
-	"sort"
 	"strings"
 )
-
-const toolProtocolHint = `You can call tools. When you need a tool, reply with ONLY this markup (no extra prose around it):
-
-<tool_call>
-<name>TOOL_NAME</name>
-<arguments>{"arg":"value"}</arguments>
-</tool_call>
-
-Rules:
-- arguments MUST be a single JSON object.
-- You may emit multiple <tool_call> blocks if several tools are needed.
-- After receiving [Tool Result ...], continue the task; call more tools if needed, otherwise answer the user.
-- Do not invent tool names that are not listed below.
-
-Available tools:
-`
 
 var (
 	toolCallBlockRe = regexp.MustCompile(`(?is)<tool_call>\s*<name>\s*([^<]+?)\s*</name>\s*<(?:arguments|parameters?)>\s*([\s\S]*?)\s*</(?:arguments|parameters?)>\s*</(?:tool_call|invoke)>`)
@@ -195,66 +177,6 @@ func extractToolSchema(tool interface{}) interface{} {
 		return m["parameters"]
 	}
 	return map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
-}
-
-func buildToolProtocol(tools []interface{}) string {
-	if len(tools) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString(toolProtocolHint)
-	for _, tool := range tools {
-		name := extractToolName(tool)
-		if name == "" {
-			continue
-		}
-		fmt.Fprintf(&b, "- %s%s\n", name, compactToolSignature(extractToolSchema(tool)))
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-func compactToolSignature(schema interface{}) string {
-	m, _ := schema.(map[string]interface{})
-	properties, _ := m["properties"].(map[string]interface{})
-	if len(properties) == 0 {
-		return "()"
-	}
-	required := map[string]bool{}
-	if list, ok := m["required"].([]interface{}); ok {
-		for _, item := range list {
-			if name, ok := item.(string); ok {
-				required[name] = true
-			}
-		}
-	}
-	names := make([]string, 0, len(properties))
-	for name := range properties {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	parts := make([]string, 0, len(names))
-	for _, name := range names {
-		property, _ := properties[name].(map[string]interface{})
-		typeName, _ := property["type"].(string)
-		if typeName == "" {
-			typeName = "any"
-		}
-		if required[name] {
-			name += "*"
-		}
-		parts = append(parts, name+":"+typeName)
-	}
-	return "(" + strings.Join(parts, ",") + ")"
-}
-
-func injectToolProtocol(query string, tools []interface{}) string {
-	proto := buildToolProtocol(tools)
-	if proto == "" {
-		return query
-	}
-	const separator = "\n\nUser request:\n"
-	// 不做长度截断：上游接受很大的单轮 query，截断协议或用户请求都会造成信息丢失。
-	return proto + separator + query
 }
 
 func normalizeToolJSON(raw string) (string, bool) {

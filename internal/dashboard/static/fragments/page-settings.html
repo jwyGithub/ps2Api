@@ -53,23 +53,23 @@
               <div class="flex items-center justify-between p-3 rounded-lg" style="background: var(--bg);">
                 <div>
                   <div class="text-[13px] font-semibold">/v1/* 接口鉴权</div>
-                  <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">chat/completions、messages、models 需 Authorization: Bearer &lt;API_KEY&gt;，密钥在「API KEY 管理」页创建（未创建任何密钥时关闭鉴权）</div>
+                  <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">chat/completions、responses、messages、models 需 Authorization: Bearer &lt;API_KEY&gt;，密钥在「API KEY 管理」页创建（未创建任何密钥时关闭鉴权）</div>
                 </div>
                 <span class="tag tag-green">已启用</span>
               </div>
               <div class="flex items-center justify-between p-3 rounded-lg" style="background: var(--bg);">
                 <div>
-                  <div class="text-[13px] font-semibold">Dashboard 只读接口</div>
-                  <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">/api/stats、/api/accounts、/api/logs 本机免鉴权</div>
+                  <div class="text-[13px] font-semibold">面板 /api/* 接口</div>
+                  <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">只认 /login 签发的会话 Cookie，API Key 不用于面板；未设 ADMIN_PASSWORD 时开放（建议设置）</div>
                 </div>
-                <span class="tag tag-gray">本机</span>
+                <span class="tag tag-gray">会话</span>
               </div>
               <div class="flex items-center justify-between p-3 rounded-lg" style="background: var(--bg);">
                 <div>
-                  <div class="text-[13px] font-semibold">账号管理接口</div>
-                  <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">账号增删改需 Bearer；token 仅存服务端 SQLite</div>
+                  <div class="text-[13px] font-semibold">账号凭据存储</div>
+                  <div class="text-[12px] mt-0.5" style="color: var(--fg-2);">token 仅存服务端 SQLite，不回显到面板</div>
                 </div>
-                <span class="tag tag-gray">写操作</span>
+                <span class="tag tag-gray">服务端</span>
               </div>
             </div>
           </div><div class="card p-6" id="set-notify">

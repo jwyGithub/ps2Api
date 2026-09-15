@@ -11,8 +11,9 @@ import (
 // Delta 增量流转成 Responses SSE 事件序列(reasoning -> message -> function_call/custom_tool_call)。
 
 // streamResponses 把内部 Delta 流转成 Responses SSE 事件。
-// execMode 开启后,可映射的原生工具翻译成 exec custom_tool_call(见 codex_exec.go)。
-func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *provider.ChatRequest, execMode bool) {
+// execMode 开启后,可映射的原生工具翻译成 exec custom_tool_call(见 codex_exec.go);
+// customNames 里的自由文本工具直接渲染成 custom_tool_call(原名,对齐 raycast2api)。
+func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *provider.ChatRequest, execMode bool, customNames map[string]bool) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		openAIError(w, 500, "stream unsupported", "server_error")
@@ -74,10 +75,13 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *pr
 	type toolAcc struct {
 		id, callID, name, args string
 		index                  int
-		execTool               bool // 该调用翻译成 exec custom_tool_call
+		execTool               bool // 该调用翻译成 exec custom_tool_call(原生工具兜底)
+		custom                 bool // 该调用是客户端声明的 custom(自由文本)工具
 	}
 	tools := map[int]*toolAcc{}
 	var toolOrder []int
+	// 上游回吐的工具名可能被 thirdParty 机制加 namespace 前缀,渲染前先纠回裸名。
+	registered := registeredToolNames(req.Tools)
 
 	closeText := func() {
 		if !msgOpen {
@@ -130,18 +134,22 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *pr
 				acc.callID = tc.ID
 			}
 			if tc.Function != nil && tc.Function.Name != "" {
-				if execMode && execMappable(tc.Function.Name) {
+				name := stripUpstreamToolPrefix(tc.Function.Name, registered)
+				if customNames[name] {
+					acc.custom = true // 客户端声明的 custom 工具 → custom_tool_call(原名)
+				} else if execMode && execMappable(name) {
 					acc.execTool = true // 翻译成 exec custom_tool_call,在收尾时一次性发出
 				}
-				acc.name = tc.Function.Name
+				acc.name = name
 			}
-			// custom_tool_call 的 input 在收尾时按整段 JS 文本一次性发出;此处只累积不 emit。
-			if !exists && !acc.execTool {
+			// custom_tool_call 的 input 在收尾时按整段文本一次性发出;此处只累积不 emit。
+			isCustom := acc.execTool || acc.custom
+			if !exists && !isCustom {
 				emit("response.output_item.added", map[string]interface{}{"output_index": acc.index, "item": map[string]interface{}{"id": acc.id, "type": "function_call", "status": "in_progress", "call_id": acc.callID, "name": acc.name, "arguments": ""}})
 			}
 			if tc.Function != nil && tc.Function.Arguments != "" {
 				acc.args += tc.Function.Arguments
-				if !acc.execTool {
+				if !isCustom {
 					emit("response.function_call_arguments.delta", map[string]interface{}{"item_id": acc.id, "output_index": acc.index, "delta": tc.Function.Arguments})
 				}
 			}
@@ -157,18 +165,30 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *pr
 		if acc.args == "" {
 			acc.args = "{}"
 		}
-		if acc.execTool {
-			if input, ok := execInputFor(acc.name, acc.args); ok {
-				// custom_tool_call 的整项在 added/done 里带全(含 input),客户端从 output_item.done
-				// 重建即可,不再单独发 input delta 事件。
-				item := map[string]interface{}{"id": acc.id, "type": "custom_tool_call", "status": "completed", "call_id": acc.callID, "name": codexExecName, "input": input}
-				emit("response.output_item.added", map[string]interface{}{"output_index": acc.index, "item": item})
-				emit("response.output_item.done", map[string]interface{}{"output_index": acc.index, "item": item})
-				output = append(output, item)
-				continue
+		if acc.custom || acc.execTool {
+			name, input := acc.name, customInputOf(acc.args)
+			if acc.execTool {
+				translated, ok := execInputFor(acc.name, acc.args)
+				if !ok {
+					// 参数解析失败:退回普通 function_call(裸名),至少不丢调用。
+					emit("response.output_item.added", map[string]interface{}{"output_index": acc.index, "item": map[string]interface{}{"id": acc.id, "type": "function_call", "status": "in_progress", "call_id": acc.callID, "name": acc.name, "arguments": ""}})
+					emit("response.function_call_arguments.done", map[string]interface{}{"item_id": acc.id, "output_index": acc.index, "arguments": acc.args})
+					item := map[string]interface{}{"id": acc.id, "type": "function_call", "status": "completed", "call_id": acc.callID, "name": acc.name, "arguments": acc.args}
+					emit("response.output_item.done", map[string]interface{}{"output_index": acc.index, "item": item})
+					output = append(output, item)
+					continue
+				}
+				name, input = codexExecName, translated
 			}
-			// 参数解析失败:退回普通 function_call(裸名),至少不丢调用。
-			emit("response.output_item.added", map[string]interface{}{"output_index": acc.index, "item": map[string]interface{}{"id": acc.id, "type": "function_call", "status": "in_progress", "call_id": acc.callID, "name": acc.name, "arguments": ""}})
+			// custom_tool_call 的完整事件序列(对齐 raycast2api/codex 期望):
+			// added(in_progress) → input.delta → input.done → output_item.done(completed)。
+			emit("response.output_item.added", map[string]interface{}{"output_index": acc.index, "item": map[string]interface{}{"id": acc.id, "type": "custom_tool_call", "status": "in_progress", "call_id": acc.callID, "name": name, "input": ""}})
+			emit("response.custom_tool_call_input.delta", map[string]interface{}{"item_id": acc.id, "output_index": acc.index, "delta": input})
+			emit("response.custom_tool_call_input.done", map[string]interface{}{"item_id": acc.id, "output_index": acc.index, "input": input})
+			item := map[string]interface{}{"id": acc.id, "type": "custom_tool_call", "status": "completed", "call_id": acc.callID, "name": name, "input": input}
+			emit("response.output_item.done", map[string]interface{}{"output_index": acc.index, "item": item})
+			output = append(output, item)
+			continue
 		}
 		emit("response.function_call_arguments.done", map[string]interface{}{"item_id": acc.id, "output_index": acc.index, "arguments": acc.args})
 		item := map[string]interface{}{"id": acc.id, "type": "function_call", "status": "completed", "call_id": acc.callID, "name": acc.name, "arguments": acc.args}

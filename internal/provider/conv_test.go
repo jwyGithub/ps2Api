@@ -638,8 +638,8 @@ func TestFoldedReplayKeepsOriginalTaskUnderOversizedHistory(t *testing.T) {
 	if !strings.Contains(query, "TASK_MARKER") {
 		t.Fatalf("folded replay lost the original task: %q...", query[:200])
 	}
-	if !strings.Contains(query, "[User (original task)]") {
-		t.Fatalf("original task should be rendered with its own label: %q...", query[:200])
+	if !strings.Contains(query, "[User (task)]") {
+		t.Fatalf("task should be rendered with its own label: %q...", query[:200])
 	}
 	// system 消息截预算：保留头尾、省略中段。
 	if !strings.Contains(query, "SYS_HEAD") || !strings.Contains(query, "SYS_TAIL") {
@@ -682,5 +682,89 @@ func TestInvalidateConversationKeepsStickyOwner(t *testing.T) {
 	p.setConversationID(1, turn1, "conv-2")
 	if got := p.LookupConversation(1, next); got != "conv-2" {
 		t.Fatalf("replay on the sticky account should re-bind the conversation, got %q", got)
+	}
+}
+
+// TestFoldedReplayKeepsCurrentTaskInToolLoop 复现 2026-09-15 codex(/v1/responses) 线上形态：
+// 多轮会话 + tool 循环 + 会话粘性断裂降级重放。折叠路径曾把「首条 user 消息」后置保护，
+// 而 codex 的首条 user 消息是环境上下文/旧问题，本轮问题作为普通折叠上下文落入
+// capUpstreamQuery 的中段省略区——模型只看到孤立的最新工具结果，回复「缺少具体任务目标」。
+// 修复契约：tool-tail 重放时后置渲染的是 tool 循环之前最近的 user 消息（本轮问题）。
+func TestFoldedReplayKeepsCurrentTaskInToolLoop(t *testing.T) {
+	p := New()
+	sys := "SYS_HEAD " + strings.Repeat("s", 8000) + " SYS_TAIL" // 撑大头部，逼出中段省略
+	oldTask := "OLD_TASK 当前项目主要实现了什么功能"
+	curTask := "CURRENT_TASK 项目中的utls指纹是如何实现的"
+	msgs := []ChatMessage{
+		mustMsg(t, "system", sys),
+		mustMsg(t, "user", oldTask),
+		mustMsg(t, "assistant", "这是一个 Go 网关项目"),
+		mustMsg(t, "user", curTask),
+		{Role: "assistant", ToolCalls: rawJSON(t, `[{"id":"call_1","type":"function","function":{"name":"exec","arguments":"{}"}}]`)},
+		mustMsg(t, "tool", strings.Repeat("f", 6000)), // 单条大工具结果(读文件)
+	}
+	msgs[5].ToolCallID = "call_1"
+	body := p.buildBody(&ChatRequest{Messages: msgs}, &Tokens{PostmanSID: "sid", UserID: "u", WorkspaceID: "w", WorkspaceSubdomain: "sub"}, "test", 1)
+	query := body["input"].(map[string]interface{})["query"].(string)
+	if n := len([]rune(query)); n > MaxUpstreamQueryRunes {
+		t.Fatalf("query exceeds upstream limit: %d > %d", n, MaxUpstreamQueryRunes)
+	}
+	// 本轮问题必须存活，且落在中段省略之后（cap 的尾部保留区）。
+	pos := strings.Index(query, "CURRENT_TASK")
+	if pos < 0 {
+		t.Fatalf("current task lost in folded replay: %q...", query[:200])
+	}
+	if om := strings.Index(query, "middle context omitted"); om >= 0 && pos < om {
+		t.Fatalf("current task must sit in the tail-preserved region, not the omitted middle")
+	}
+	// 旧问题允许被省略——本轮问题才是待处理 tool results 所回应的任务。
+	if !strings.Contains(query, "Tool Result id=call_1") {
+		t.Fatalf("pending tool result should be labeled in replay query")
+	}
+	if !strings.Contains(query, "Process these tool results") {
+		t.Fatalf("replay instruction missing")
+	}
+}
+
+// TestToolResultUntrackedContinuesConversation 锁定 2026-09-15 的会话续用契约：
+// 签发时无 groupID 的工具调用（web 分支注册 thirdParty/proxy-tools 后，上游对所有调用
+// 均如此）服务端不跟踪 pending 状态——tool-tail 续聊应续用原 conversationId，query 只带
+// 最新 tool result，上下文由服务端会话累积。此前一律清空会话导致每轮冷启动全历史折叠，
+// 10000 rune 上限下早期工具结果滚出窗口，模型反复重读重搜同一文件（codex /v1/responses
+// 线上形态：单 patch 任务伴随 14 次搜索 + 5 次读文件）。
+func TestToolResultUntrackedContinuesConversation(t *testing.T) {
+	p := New()
+	first := []ChatMessage{mustMsg(t, "user", "修改 profile.go 的注释")}
+	res := &Result{ConversationID: "conv-untracked"}
+	res.ToolCalls = []ToolCall{{ID: "call_1", Type: "function", Function: struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}{Name: "exec", Arguments: `{"input":"..."}`}}}
+	// 上游签发时未带 groupID → 登记为 untracked 哨兵（真实路径由 postman.go 调用）。
+	p.rememberToolGroups(1, res.ToolCalls)
+	p.RememberConversation(1, first, res)
+	followup := []ChatMessage{
+		first[0],
+		{Role: "assistant", ToolCalls: rawJSON(t, `[{"id":"call_1","type":"function","function":{"name":"exec","arguments":"{\"input\":\"...\"}"}}]`)},
+		{Role: "tool", ToolCallID: "call_1", Content: rawText(t, "script completed")},
+	}
+	body := p.buildBody(&ChatRequest{Messages: followup}, &Tokens{AccessToken: "x", UserID: "u", WorkspaceID: "w"}, "test", 1)
+	input := body["input"].(map[string]interface{})
+	if input["conversationId"] != "conv-untracked" {
+		t.Fatalf("untracked tool tail must continue the conversation, got %#v", input["conversationId"])
+	}
+	if input["chatType"] != "USER_QUERY" {
+		t.Fatalf("untracked tool tail goes as USER_QUERY, got %#v", input["chatType"])
+	}
+	query := input["query"].(string)
+	if !strings.Contains(query, "[Tool Result id=call_1]") || !strings.Contains(query, "script completed") {
+		t.Fatalf("query should carry the latest tool result: %q", query)
+	}
+	if !strings.Contains(query, "Process these tool results") {
+		t.Fatalf("query should carry the continuation instruction: %q", query)
+	}
+	// 续用会话时不做全历史折叠（历史在服务端），assistant 调用不该被重放进 query。
+	if strings.Contains(query, "[Assistant Tool Call") {
+		t.Fatalf("conversation continuation must not fold full history: %q", query[:200])
 	}
 }

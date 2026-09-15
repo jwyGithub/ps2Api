@@ -207,22 +207,38 @@ func (p *Provider) splitMessages(messages []ChatMessage, convID string, wafProbe
 	}
 	perResultBudget := foldedToolResultBudget(foldedResultCount)
 
-	// 原始任务：折叠范围内首条非 tool-result 的 user 消息。它在时间序上离最新一轮最远，
-	// 中段省略时最先被吃掉，所以从时间序里拎出、后置渲染在 tail 之前，保住任务存活。
-	firstUserIdx := -1
-	for i, msg := range messages {
-		if i == queryIdx || i >= skipFrom {
-			continue
+	// 任务消息：折叠时从时间序拎出、后置渲染在 tail 之前，保住它落在 capUpstreamQuery 的
+	// 尾部保留区。选哪条 user 消息按路径分：
+	//   - tool-tail 重放：tool 循环之前最近的一条 user 消息——正是这批待处理 tool results
+	//     所回应的「本轮问题」。此前误取「首条 user 消息」（多轮会话里往往是环境上下文或
+	//     旧问题），本轮问题作为普通折叠上下文落入中段省略区，模型只看到孤立的工具结果，
+	//     回复「缺少具体任务目标」（2026-09-15 codex /v1/responses 线上形态；/v1/messages
+	//     的同类反馈同根因）。
+	//   - 普通续聊：首条 user 消息（原始任务），与 2026-09-10 事故的修复契约一致。
+	taskIdx := -1
+	if isToolTail {
+		for i := toolIdx; i >= 0; i-- {
+			if messages[i].Role == "user" && !isAnthropicToolResult(messages[i]) {
+				taskIdx = i
+				break
+			}
 		}
-		if msg.Role == "user" && !isAnthropicToolResult(msg) {
-			firstUserIdx = i
-			break
+	}
+	if taskIdx < 0 {
+		for i, msg := range messages {
+			if i == queryIdx || i >= skipFrom {
+				continue
+			}
+			if msg.Role == "user" && !isAnthropicToolResult(msg) {
+				taskIdx = i
+				break
+			}
 		}
 	}
 
 	var contextParts []string
 	for i, msg := range messages {
-		if i == queryIdx || i == firstUserIdx || i >= skipFrom {
+		if i == queryIdx || i == taskIdx || i >= skipFrom {
 			continue
 		}
 		if msg.Role == "tool" || isAnthropicToolResult(msg) {
@@ -254,16 +270,16 @@ func (p *Provider) splitMessages(messages []ChatMessage, convID string, wafProbe
 			contextParts = append(contextParts, block)
 		}
 	}
-	// 折叠：历史在前，原始任务居中（后置渲染，紧贴最新一轮，落在 cap 的尾部保留区），
+	// 折叠：历史在前，任务居中（后置渲染，紧贴最新一轮，落在 cap 的尾部保留区），
 	// 最新一轮在后。重放模式下待处理 tool-tail 也截预算（单条巨结果会吃光尾部窗口）；
 	// 普通对话把最新用户输入标注为 [User] 以保留角色边界。
 	sections := make([]string, 0, 3)
 	if context := strings.Join(contextParts, "\n\n"); context != "" {
 		sections = append(sections, context)
 	}
-	if firstUserIdx >= 0 {
-		if task := ExtractText(messages[firstUserIdx].Content); task != "" {
-			sections = append(sections, "[User (original task)]\n"+truncateMiddleRunes(task, FoldedTextMsgBudgetRunes))
+	if taskIdx >= 0 {
+		if task := ExtractText(messages[taskIdx].Content); task != "" {
+			sections = append(sections, "[User (task)]\n"+truncateMiddleRunes(task, FoldedTextMsgBudgetRunes))
 		}
 	}
 	tail := query

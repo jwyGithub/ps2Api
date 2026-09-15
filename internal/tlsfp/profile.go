@@ -1,7 +1,7 @@
 // Package tlsfp 提供出站 TLS 指纹伪装能力：把一套可配置的 ClientHello 参数
 // （cipher suites / 椭圆曲线 / 扩展顺序 / ALPN 等）抽象成 Profile，运行时用
 // uTLS 的 HelloCustom 握手接管 net/http.Transport 的 TLS 层，从而在不改业务
-// 逻辑的前提下，把出站握手指纹伪装成目标客户端（默认 Node.js / Claude Code）。
+// 逻辑的前提下，把出站握手指纹伪装成目标客户端（默认 Chromium）。
 //
 // 设计要点：
 //   - 只替换握手层（DialTLSContext）。ALPN 提供 h2+http/1.1：协商到 h2 时由 tlsfp
@@ -23,7 +23,7 @@ import (
 // Profile 描述一套完整的 ClientHello 指纹模板。字段全部可序列化，便于持久化到
 // settings 表并在面板热切换。零值不可用，请以 ChromiumDefault() 为基准派生。
 type Profile struct {
-	// Name 模板名（面板展示 / 日志标识），如 "nodejs" / "claude-code"。
+	// Name 模板名（面板展示 / 日志标识），如 "chromium"。
 	Name string `json:"name"`
 
 	// ClientHelloID 指定 uTLS 内置指纹预设的名称（如 "HelloChrome_133"）。
@@ -47,7 +47,7 @@ type Profile struct {
 	// KeyShareCurves key_share 扩展预置的曲线（须为 CurvePreferences 前缀子集）。
 	KeyShareCurves []uint16 `json:"key_share_curves"`
 
-	// EnableECH 是否附带 GREASE ECH 扩展（Node.js 新版本会带）。
+	// EnableECH 是否附带 GREASE ECH 扩展（Chromium 默认指纹会带）。
 	EnableECH bool `json:"enable_ech"`
 
 	// EnableGREASE 是否在 cipher / 扩展 / 曲线 / key_share / supported_versions
@@ -203,7 +203,7 @@ func resolveClientHelloID(name string) (utls.ClientHelloID, bool, error) {
 	return id, true, nil
 }
 
-// buildSpec 由 Profile 构造 uTLS 的 ClientHelloSpec。扩展顺序按 OpenSSL/Node.js
+// buildSpec 由 Profile 构造 uTLS 的 ClientHelloSpec。扩展顺序按 Chromium
 // 常见排布组织，顺序本身是指纹的一部分，改动需对照抓包。
 func (p Profile) buildSpec() *utls.ClientHelloSpec {
 	// GREASE 注入：uTLS 会把 GREASE_PLACEHOLDER 在握手时替换为随机 GREASE 值。

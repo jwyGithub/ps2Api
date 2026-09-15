@@ -192,17 +192,34 @@ func (p *Provider) invalidateIfCorrupt(accountID int64, messages []ChatMessage, 
 
 // ---------- 消息提取 ----------
 
+// untrackedToolGroup 是「签发时上游未下发 toolCallGroupId」的哨兵值：这类调用（web 分支
+// 注册 thirdParty/proxy-tools 后，上游对所有调用均如此）服务端不跟踪 pending 状态，
+// TOOL_RESPONSE 无从回传，但 USER_QUERY 续用原会话是安全的。
+const untrackedToolGroup = "-"
+
 func (p *Provider) rememberToolGroups(accountID int64, calls []ToolCall) {
 	for _, call := range calls {
-		if call.ID != "" && call.GroupID != "" {
+		if call.ID == "" {
+			continue
+		}
+		if call.GroupID != "" {
 			p.convStore.PutToolGroup(accountID, call.ID, call.GroupID)
+		} else {
+			p.convStore.PutToolGroup(accountID, call.ID, untrackedToolGroup)
 		}
 	}
 }
 
 func (p *Provider) lookupToolGroup(accountID int64, toolCallID string) string {
-	if g, ok := p.convStore.GetToolGroup(accountID, toolCallID); ok {
+	if g, ok := p.convStore.GetToolGroup(accountID, toolCallID); ok && g != untrackedToolGroup {
 		return g
 	}
 	return ""
+}
+
+// toolGroupUntracked 报告该 toolCallID 是否已知为「签发时无 groupID」（服务端不跟踪 pending）。
+// 区分「已知无组」与「查不到」（进程重启丢注册表）：前者续用会话安全，后者维持冷启动重放。
+func (p *Provider) toolGroupUntracked(accountID int64, toolCallID string) bool {
+	g, ok := p.convStore.GetToolGroup(accountID, toolCallID)
+	return ok && g == untrackedToolGroup
 }

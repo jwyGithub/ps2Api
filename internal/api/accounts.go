@@ -16,6 +16,9 @@ import (
 )
 
 func (s *Server) accounts(w http.ResponseWriter, r *http.Request) {
+	if !s.auth(w, r) {
+		return
+	}
 	all, err := s.Store.ListAccounts()
 	if err != nil {
 		jsonError(w, 500, err.Error(), "internal_error")
@@ -251,23 +254,18 @@ func (s *Server) testAccount(w http.ResponseWriter, r *http.Request) {
 		emit(map[string]interface{}{"type": "line", "line": line})
 	}
 
-	// service（前端「网关测试」）：回环调用本服务对外端点，带面板 API Key，走完整网关链路。
-	// baseURL 取自当前请求的 Host（即用户正访问的本服务地址），API Key 从 settings 读取。
+	// service（前端「网关测试」）：回环调用本服务对外端点，走完整网关链路。
+	// baseURL 取自当前请求的 Host（即用户正访问的本服务地址）；鉴权用进程内一次性
+	// 回环令牌（见 apikeys.go），不依赖任何业务 API Key 存在。
 	if mode == provider.TestModeService {
 		scheme := "http"
 		if r.TLS != nil {
 			scheme = "https"
 		}
 		baseURL := scheme + "://" + r.Host
-		// 回环测试需要一个有效密钥调自己的 /v1：取第一个启用的 key；无可用密钥则提示。
-		var key string
-		if k, kerr := s.firstUsableKey(); kerr == nil {
-			key = k.Key
-		} else {
-			emit(map[string]interface{}{"type": "done", "error": kerr.Error()})
-			return
-		}
-		result := s.Router.Provider.StreamServiceTest(ctx, baseURL, key, q.Model, q.Prompt, q.Body, onMeta, onLine)
+		tok := s.svcTokenIssue()
+		defer s.svcTokenRevoke(tok)
+		result := s.Router.Provider.StreamServiceTest(ctx, baseURL, tok, q.Model, q.Prompt, q.Body, onMeta, onLine)
 		emit(map[string]interface{}{"type": "done", "result": result})
 		return
 	}

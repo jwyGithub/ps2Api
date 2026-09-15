@@ -40,7 +40,7 @@ func TestResponsesObjectReasoningOrder(t *testing.T) {
 		ToolCalls: []provider.ToolCall{{ID: "call_1", Type: "function"}},
 	}
 	res.ToolCalls[0].Function.Name = "executeShellCommand"
-	obj := responsesObject(res, "gpt-5.6-sol", "completed", false)
+	obj := responsesObject(res, "gpt-5.6-sol", "completed", false, nil)
 	output := obj["output"].([]interface{})
 	if len(output) != 3 {
 		t.Fatalf("want 3 output items (reasoning/message/function_call), got %d", len(output))
@@ -61,7 +61,7 @@ func TestResponsesObjectReasoningOrder(t *testing.T) {
 // 无思考内容时不应产出空的 reasoning 项。
 func TestResponsesObjectNoReasoning(t *testing.T) {
 	res := &provider.Result{Success: true, Content: "hi"}
-	output := responsesObject(res, "m", "completed", false)["output"].([]interface{})
+	output := responsesObject(res, "m", "completed", false, nil)["output"].([]interface{})
 	for _, it := range output {
 		if it.(map[string]interface{})["type"] == "reasoning" {
 			t.Fatal("must not emit reasoning item when ReasoningContent is empty")
@@ -69,8 +69,7 @@ func TestResponsesObjectNoReasoning(t *testing.T) {
 	}
 }
 
-// exec 翻译:executeShellCommand args → exec 的 JS 输入(await tools.exec_command),
-// 以及 input 反向 best-effort 还原成 executeShellCommand 参数。
+// exec 翻译:executeShellCommand args → exec 的 JS 输入(await tools.exec_command)。
 func TestExecInputRoundTrip(t *testing.T) {
 	input, ok := execShellInput(`{"projectPath":"/tmp","command":"ls -la | wc -l"}`)
 	if !ok {
@@ -85,13 +84,6 @@ func TestExecInputRoundTrip(t *testing.T) {
 	}
 	if _, ok := execShellInput(`{"projectPath":"/tmp"}`); ok {
 		t.Fatal("empty command must fail")
-	}
-
-	// 入站 input → executeShellCommand 参数(best-effort)
-	args := execInputToArgs(`await tools.exec_command({"cmd":"echo hi","workdir":"/tmp"})`)
-	var a map[string]interface{}
-	if json.Unmarshal([]byte(args), &a) != nil || a["command"] != "echo hi" || a["projectPath"] != "/tmp" {
-		t.Fatalf("execInputToArgs wrong: %s", args)
 	}
 }
 
@@ -135,25 +127,30 @@ func TestCodexExecDeclared(t *testing.T) {
 	}
 }
 
-// 入站 custom_tool_call / custom_tool_call_output 还原成内部 executeShellCommand 往返。
+// 入站 custom_tool_call / custom_tool_call_output 按原名还原(codex 自由文本工具),
+// 不再硬编码映射成 executeShellCommand;arguments 为 JSON 编码的 input。
 func TestResponsesInboundCustomToolItems(t *testing.T) {
 	input := `[
 	  {"type":"message","role":"user","content":[{"type":"input_text","text":"run ls"}]},
 	  {"type":"custom_tool_call","call_id":"call_x","name":"exec","input":"await tools.exec_command({\"cmd\":\"ls\"})"},
 	  {"type":"custom_tool_call_output","call_id":"call_x","output":"a\nb"}
 	]`
-	req := responsesToOpenAI(ResponsesReq{Model: "gpt-5.6-sol", Input: json.RawMessage(input)})
+	req, custom := responsesToOpenAI(ResponsesReq{Model: "gpt-5.6-sol", Input: json.RawMessage(input)})
 	if len(req.Messages) != 3 {
 		t.Fatalf("want 3 messages, got %d", len(req.Messages))
 	}
 	var calls []provider.ToolCall
-	if err := json.Unmarshal(req.Messages[1].ToolCalls, &calls); err != nil || len(calls) != 1 || calls[0].Function.Name != "executeShellCommand" || calls[0].ID != "call_x" {
-		t.Fatalf("custom_tool_call not mapped to executeShellCommand: %s", req.Messages[1].ToolCalls)
+	if err := json.Unmarshal(req.Messages[1].ToolCalls, &calls); err != nil || len(calls) != 1 || calls[0].Function.Name != "exec" || calls[0].ID != "call_x" {
+		t.Fatalf("custom_tool_call not restored under its own name: %s", req.Messages[1].ToolCalls)
+	}
+	if want := `"await tools.exec_command({\"cmd\":\"ls\"})"`; calls[0].Function.Arguments != want {
+		t.Fatalf("arguments must be the JSON-encoded input, got %s", calls[0].Function.Arguments)
 	}
 	tm := req.Messages[2]
 	if tm.Role != "tool" || tm.ToolCallID != "call_x" || provider.ExtractText(tm.Content) != "a\nb" {
 		t.Fatalf("custom_tool_call_output wrong: %+v", tm)
 	}
+	_ = custom
 }
 
 // execMode 开启时,responsesObject 把 executeShellCommand 发成 custom_tool_call(name:exec)。
@@ -161,7 +158,7 @@ func TestResponsesObjectExecMode(t *testing.T) {
 	res := &provider.Result{Success: true, ToolCalls: []provider.ToolCall{{ID: "call_1", Type: "function"}}}
 	res.ToolCalls[0].Function.Name = "executeShellCommand"
 	res.ToolCalls[0].Function.Arguments = `{"command":"ls"}`
-	output := responsesObject(res, "m", "completed", true)["output"].([]interface{})
+	output := responsesObject(res, "m", "completed", true, nil)["output"].([]interface{})
 	if len(output) != 1 {
 		t.Fatalf("want 1 output item, got %d", len(output))
 	}
@@ -173,7 +170,7 @@ func TestResponsesObjectExecMode(t *testing.T) {
 		t.Fatalf("exec input wrong: %v", item["input"])
 	}
 	// execMode 关闭时应发普通 function_call。
-	off := responsesObject(res, "m", "completed", false)["output"].([]interface{})
+	off := responsesObject(res, "m", "completed", false, nil)["output"].([]interface{})
 	if off[0].(map[string]interface{})["type"] != "function_call" {
 		t.Fatalf("execMode off must emit function_call: %#v", off[0])
 	}
@@ -181,7 +178,7 @@ func TestResponsesObjectExecMode(t *testing.T) {
 
 func TestResponsesToOpenAIStringInput(t *testing.T) {
 	rr := ResponsesReq{Model: "gpt-5.6-sol", Instructions: "be terse", Input: json.RawMessage(`"hello"`)}
-	req := responsesToOpenAI(rr)
+	req, _ := responsesToOpenAI(rr)
 	if len(req.Messages) != 2 {
 		t.Fatalf("want system+user, got %d messages", len(req.Messages))
 	}
@@ -202,7 +199,7 @@ func TestResponsesToOpenAIToolRoundTrip(t *testing.T) {
 	  {"type":"function_call_output","call_id":"call_abc","output":"total 0"}
 	]`
 	rr := ResponsesReq{Model: "gpt-5.6-sol", Input: json.RawMessage(input)}
-	req := responsesToOpenAI(rr)
+	req, _ := responsesToOpenAI(rr)
 	if len(req.Messages) != 3 {
 		t.Fatalf("want 3 messages, got %d", len(req.Messages))
 	}
@@ -233,7 +230,7 @@ func TestResponsesToolsFlatShapeRecognized(t *testing.T) {
 			{"type": "function", "name": "executeShellCommand", "parameters": map[string]interface{}{"type": "object"}},
 		},
 	}
-	req := responsesToOpenAI(rr)
+	req, _ := responsesToOpenAI(rr)
 	if len(req.Tools) != 1 {
 		t.Fatalf("want 1 tool, got %d", len(req.Tools))
 	}
@@ -275,5 +272,105 @@ func TestExecReadFileInput(t *testing.T) {
 	}
 	if execMappable("listCollections") {
 		t.Fatal("listCollections must NOT be mappable")
+	}
+}
+
+// flatten:顶层 tools + additional_tools(namespace 嵌套)合并、custom 桥接、名字收集。
+// 这是 codex 能用工具的前提——codex 把工具声明塞在 additional_tools 里,顶层 tools 为空。
+func TestFlattenResponsesTools(t *testing.T) {
+	rr := ResponsesReq{
+		Model: "gpt-5.6-sol",
+		Input: json.RawMessage(`[
+		  {"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+		  {"type":"additional_tools","role":"developer","tools":[
+		    {"name":"functions","description":"","tools":[
+		      {"type":"custom","name":"exec","description":"Run JS","format":{"type":"grammar","syntax":"lark","definition":"start: WORD"}},
+		      {"type":"function","name":"wait","parameters":{"type":"object","properties":{"ms":{"type":"number"}}}},
+		      {"name":"collab","tools":[{"type":"function","name":"apply_patch"}]}
+		    ]}
+		  ]}
+		]`),
+		Tools: []map[string]interface{}{
+			{"type": "function", "name": "top_tool", "parameters": map[string]interface{}{"type": "object"}},
+		},
+	}
+	req, custom := responsesToOpenAI(rr)
+	if len(req.Tools) != 4 {
+		t.Fatalf("want 4 tools (top_tool + exec + wait + apply_patch), got %d: %s", len(req.Tools), mustJSON(req.Tools))
+	}
+	if !custom["exec"] || custom["wait"] || custom["apply_patch"] {
+		t.Fatalf("custom set must contain only exec: %v", custom)
+	}
+	// 桥接后的 exec 应是单 input string 参数 + 文法折进 description 的 function 形状。
+	var bridged map[string]interface{}
+	for _, tl := range req.Tools {
+		if m := tl.(map[string]interface{}); m["name"] == "exec" {
+			bridged = m
+		}
+	}
+	if bridged == nil {
+		t.Fatal("bridged exec tool not found")
+	}
+	if bridged["type"] != "function" {
+		t.Fatalf("custom tool must bridge to function shape, got type=%v", bridged["type"])
+	}
+	params := bridged["parameters"].(map[string]interface{})
+	props := params["properties"].(map[string]interface{})
+	if _, ok := props["input"]; !ok {
+		t.Fatalf("bridged tool must carry single input param: %s", mustJSON(params))
+	}
+	desc, _ := bridged["description"].(string)
+	if !strings.Contains(desc, "Run JS") || !strings.Contains(desc, "Input grammar:\nstart: WORD") {
+		t.Fatalf("grammar must fold into description: %q", desc)
+	}
+}
+
+// 出站:custom 名渲染成 custom_tool_call(原名 + unwrap 的 input),非 custom 名不受影响。
+func TestResponsesObjectCustomTool(t *testing.T) {
+	res := &provider.Result{Success: true, ToolCalls: []provider.ToolCall{
+		{ID: "c1", Type: "function"},
+		{ID: "c2", Type: "function"},
+	}}
+	res.ToolCalls[0].Function.Name = "exec"
+	res.ToolCalls[0].Function.Arguments = `{"input":"await tools.exec_command({\"cmd\":\"ls\"})"}`
+	res.ToolCalls[1].Function.Name = "wait"
+	res.ToolCalls[1].Function.Arguments = `{"ms":1000}`
+	output := responsesObject(res, "m", "completed", false, map[string]bool{"exec": true})["output"].([]interface{})
+	if len(output) != 2 {
+		t.Fatalf("want 2 items, got %d", len(output))
+	}
+	ctc := output[0].(map[string]interface{})
+	if ctc["type"] != "custom_tool_call" || ctc["name"] != "exec" || ctc["input"] != `await tools.exec_command({"cmd":"ls"})` {
+		t.Fatalf("custom_tool_call item wrong: %#v", ctc)
+	}
+	fc := output[1].(map[string]interface{})
+	if fc["type"] != "function_call" || fc["name"] != "wait" {
+		t.Fatalf("non-custom call must stay function_call: %#v", fc)
+	}
+	// arguments 非单 input 形状时,整段透传为 input。
+	res.ToolCalls[0].Function.Arguments = "raw text"
+	output = responsesObject(res, "m", "completed", false, map[string]bool{"exec": true})["output"].([]interface{})
+	if output[0].(map[string]interface{})["input"] != "raw text" {
+		t.Fatalf("non-JSON args must pass through as input: %#v", output[0])
+	}
+}
+
+// 纠名:上游回吐 functions.exec / functions__exec 时剥回裸名;裸名未注册或名字本身已注册则不动。
+func TestStripUpstreamToolPrefix(t *testing.T) {
+	reg := map[string]bool{"exec": true, "wait": true}
+	cases := []struct{ in, want string }{
+		{"functions.exec", "exec"},
+		{"functions__exec", "exec"},
+		{"exec", "exec"},
+		{"functions.unknown", "functions.unknown"}, // 剥后不在注册集,原样保留
+		{"nosuchtool", "nosuchtool"},
+	}
+	for _, c := range cases {
+		if got := stripUpstreamToolPrefix(c.in, reg); got != c.want {
+			t.Fatalf("stripUpstreamToolPrefix(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	if got := stripUpstreamToolPrefix("functions.exec", nil); got != "functions.exec" {
+		t.Fatalf("empty registered set must not strip, got %q", got)
 	}
 }

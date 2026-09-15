@@ -37,7 +37,7 @@ func TestDirectHandshakeGateway(t *testing.T) {
 	}
 }
 
-// TestJA3Fingerprint 打印经指纹拨号器观测到的 JA3，便于对照真实 Node.js 抓包校准。
+// TestJA3Fingerprint 打印经指纹拨号器观测到的 JA3，便于对照真实 Chromium 抓包校准。
 // 需要外网访问 tls.peet.ws；无网络时自动跳过。
 func TestJA3Fingerprint(t *testing.T) {
 	tr := &http.Transport{

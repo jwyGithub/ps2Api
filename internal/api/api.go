@@ -20,6 +20,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"ps2api/internal/provider"
@@ -35,6 +36,10 @@ type Server struct {
 	probe probeManager
 	// slots 是每 API Key 的进程内并发计数器（见 apikeys.go），traceChat 里 acquire/release。
 	slots keySlots
+	// svcTokens 是「网关测试」回环调用 /v1 用的一次性内部令牌（见 apikeys.go），
+	// 使面板服务测试不依赖任何业务 API Key 存在。
+	svcMu     sync.Mutex
+	svcTokens map[string]struct{}
 }
 
 func New(s *store.Store) *Server {
@@ -120,12 +125,19 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /", s.dashboard)
 }
 
-// auth 统一鉴权入口：/api/* 认面板登录会话（/login 签发的 Cookie）或任一有效 API Key
-// （与旧「单 Key 即面板凭据」同信任模型）；/v1/* 是对外模型协议，只认 Bearer/x-api-key，
-// 不认浏览器会话。api_keys 表为空时全开放（首次创建密钥前的引导态）。
+// auth 统一鉴权入口，按端点家族分流：
+//   - /api/* 面板端点：只认 /login 签发的会话 Cookie，API Key 不再是面板凭据
+//     （密钥只用于对外 /v1 协议）。未设 ADMIN_PASSWORD 时无登录可言，维持开放
+//     引导态（兼容既有无密码部署）。
+//   - /v1/* 对外模型协议：只认 Bearer/x-api-key（resolveKey），不认浏览器会话。
+//     api_keys 表为空时全开放（首次创建密钥前的引导态）。
 func (s *Server) auth(w http.ResponseWriter, r *http.Request) bool {
-	if strings.HasPrefix(r.URL.Path, "/api/") && validSession(r) {
-		return true
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		if !loginEnabled() || validSession(r) {
+			return true
+		}
+		jsonError(w, 401, "未登录或会话已过期", "authentication_error")
+		return false
 	}
 	_, err := s.resolveKey(r)
 	if err == nil {

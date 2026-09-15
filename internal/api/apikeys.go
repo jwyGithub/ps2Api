@@ -85,6 +85,11 @@ func (s *Server) resolveKey(r *http.Request) (*store.APIKey, error) {
 	if pk == "" {
 		return nil, &keyAuthError{401, "Invalid API key", "authentication_error", "invalid_api_key"}
 	}
+	// 「网关测试」回环令牌：面板服务测试带它调自己的 /v1，等价引导态放行
+	// （不挂任何密钥语义：不占并发槽、不计额度）。
+	if s.isSvcToken(pk) {
+		return nil, nil
+	}
 	var k *store.APIKey
 	for _, cand := range keys {
 		if cand.Key == pk {
@@ -126,28 +131,37 @@ func (s *Server) chargeKey(ctx context.Context, res *provider.Result) {
 	_ = s.Store.AddAPIKeyUsage(k.ID, cost)
 }
 
-// firstUsableKey 返回第一个启用且未过期的密钥（testAccount 的 service 回环测试用：
-// 需要一个有效密钥调自己的 /v1）。无可用密钥返回错误。
-func (s *Server) firstUsableKey() (*store.APIKey, error) {
-	keys, err := s.Store.ListAPIKeys()
-	if err != nil {
-		return nil, err
+// ─── 「网关测试」回环令牌 ─────────────────────────────────────────
+// 面板账号测试的 service 模式回环调用本服务 /v1（走完整网关链路），但面板鉴权已与
+// API Key 解耦：测试签发一个进程内一次性随机令牌，resolveKey 认它放行，测试结束即注销。
+// 仅存内存、重启即失效、128 位随机不可猜测；不写库、不占并发槽、不计额度。
+func (s *Server) svcTokenIssue() string {
+	raw := make([]byte, 16)
+	_, _ = rand.Read(raw)
+	tok := "sk-svc-" + hex.EncodeToString(raw)
+	s.svcMu.Lock()
+	if s.svcTokens == nil {
+		s.svcTokens = map[string]struct{}{}
 	}
-	for _, k := range keys {
-		if k.Enabled && (k.ExpiresAt == nil || k.ExpiresAt.After(time.Now())) {
-			return k, nil
-		}
-	}
-	return nil, errNoUsableKey
+	s.svcTokens[tok] = struct{}{}
+	s.svcMu.Unlock()
+	return tok
 }
 
-var errNoUsableKey = &keyMgmtError{"无可用 API Key：请先在「API KEY 管理」页创建一个启用的密钥"}
+func (s *Server) svcTokenRevoke(tok string) {
+	s.svcMu.Lock()
+	delete(s.svcTokens, tok)
+	s.svcMu.Unlock()
+}
 
-type keyMgmtError struct{ msg string }
+func (s *Server) isSvcToken(tok string) bool {
+	s.svcMu.Lock()
+	_, ok := s.svcTokens[tok]
+	s.svcMu.Unlock()
+	return ok
+}
 
-func (e *keyMgmtError) Error() string { return e.msg }
-
-// ─── 管理端点（面板 /api/*，session 或任一有效密钥鉴权） ─────────
+// ─── 管理端点（面板 /api/*，登录会话鉴权） ─────────
 
 func (s *Server) listKeys(w http.ResponseWriter, r *http.Request) {
 	if !s.auth(w, r) {

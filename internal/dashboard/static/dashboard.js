@@ -65,7 +65,6 @@
     });
   }
 
-  function key() { return localStorage.getItem('ps2api_api_key') || ''; }
   function esc(value) { return String(value == null ? '' : value).replace(/[&<>"']/g, function (c) { return ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[c]; }); }
   function fmt(value) { return Number(value || 0).toLocaleString('zh-CN'); }
   function fmtQuota(value) {
@@ -108,20 +107,13 @@
   }
   function api(path, options) {
     options = options || {};
-    options.headers = Object.assign({ 'Authorization': 'Bearer ' + key(), 'Content-Type': 'application/json' }, options.headers || {});
+    options.headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
     return fetch(path, options).then(function (r) {
       return r.text().then(function (text) {
         var data = {}; try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { raw: text }; }
         if (!r.ok) {
-          // 401 且本地没存密钥：弹一次补录框（未设 ADMIN_PASSWORD 的部署清了浏览器存储后的逃生通道）。
-          if (r.status === 401 && !key() && !api._prompted) {
-            api._prompted = true;
-            var k = window.prompt('面板鉴权失败：请输入一个有效的 API Key');
-            if (k && k.trim()) {
-              localStorage.setItem('ps2api_api_key', k.trim());
-              return api(path, options);
-            }
-          }
+          // 面板接口只认 /login 签发的会话 Cookie（同源 fetch 自动携带）；401 即会话失效。
+          if (r.status === 401) { window.location.href = '/login'; throw new Error('登录已过期'); }
           throw new Error(data.error && data.error.message || data.message || 'HTTP ' + r.status);
         }
         return data;
@@ -534,8 +526,6 @@
     }
     api('/api/keys', { method: 'POST', body: JSON.stringify(payload) }).then(function (data) {
       var k = data.key || {};
-      // 无 ADMIN_PASSWORD 的部署：把新建密钥缓存到本地，保证面板后续请求仍能鉴权。
-      if (!key() && k.key) localStorage.setItem('ps2api_api_key', k.key);
       toast('已创建：' + (k.key || ''));
       closeKeyDrawer();
       return loadAll();
@@ -1110,7 +1100,8 @@
   window.deleteAccount = function (id) { if (!confirm('确定删除这个账号？')) return; api('/api/accounts/'+id,{method:'DELETE'}).then(function(){toast('账号已删除');return loadAll();}).catch(function(e){toast(e.message);}); };
   window.exportAccounts = function () {
     if (!confirm('导出文件包含账号密码和登录凭据，确定继续？')) return;
-    fetch('/api/accounts/export', { headers: { 'Authorization': 'Bearer ' + key() } }).then(function (r) {
+    fetch('/api/accounts/export').then(function (r) {
+      if (r.status === 401) { window.location.href = '/login'; throw new Error('登录已过期'); }
       if (!r.ok) return r.json().then(function (d) { throw new Error(d.error && d.error.message || '导出失败'); });
       return r.text();
     }).then(function (content) { download('account.json', content); toast('账号已导出'); }).catch(function (e) { toast(e.message); });
@@ -1490,9 +1481,10 @@
 
     fetch('/api/accounts/' + id + '/test', {
       method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + key(), 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ mode: mode, model: model, prompt: prompt, body: rawBody })
     }).then(function (resp) {
+      if (resp.status === 401) { window.location.href = '/login'; throw new Error('登录已过期'); }
       if (!resp.ok || !resp.body) {
         return resp.text().then(function (t) { throw new Error('HTTP ' + resp.status + ' ' + t); });
       }
