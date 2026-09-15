@@ -381,6 +381,47 @@ func TestStreamBlockedAccountSwitchesAndDisablesBeforeOutput(t *testing.T) {
 	}
 }
 
+// session 失效（guest_unusable / Jwt is missing / 401）：账号离线并停用，从选号池摘除，
+// 立即 failover 到下一个账号。覆盖 chat/responses/messages 三个接口共用的 runAttempts 路径。
+func TestStreamAuthFailedMarksOfflineAndFailsOver(t *testing.T) {
+	r := newTestRouter(t)
+	accounts, err := r.Store.ListAccounts()
+	if err != nil || len(accounts) != 2 {
+		t.Fatalf("accounts=%v err=%v", accounts, err)
+	}
+	for i, account := range accounts {
+		tokens, _ := json.Marshal(provider.Tokens{AccessToken: "token-" + string(rune('1'+i)), UserID: "u", WorkspaceID: "w"})
+		if err := r.Store.UpdateTokens(account.ID, string(tokens)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.Provider.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Header.Get("x-access-token") == "token-1" {
+			h := make(http.Header)
+			h.Set("X-Pm-Error-1", "guest_unusable: Jwt is missing")
+			h.Set("X-Pm-Error-2", "identity_status: sessions returned 401")
+			return &http.Response{StatusCode: 401, Header: h, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+		}
+		body := "data: {\"eventType\":\"usage\",\"data\":{\"limit\":50000,\"usage\":1000,\"usageState\":\"AVAILABLE\"}}\n\n" +
+			"data: {\"eventType\":\"conversation\",\"data\":{\"id\":\"conv-ok\"}}\n\n" +
+			"data: {\"eventType\":\"textChunk\",\"data\":{\"textContent\":\"ok\"}}\n\n" +
+			"data: [DONE]\n\n"
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	})}
+
+	res, account, err := r.Stream(context.Background(), &provider.ChatRequest{
+		Model: "claude-opus-4-8", Messages: []provider.ChatMessage{mustMsg(t, "user", "hello")},
+	}, func(delta provider.Delta) error { return nil })
+	if err != nil || res == nil || !res.Success || account == nil || account.ID != accounts[1].ID {
+		t.Fatalf("stream did not fail over: res=%+v account=%+v err=%v", res, account, err)
+	}
+	// session 失效的账号必须被标 offline 并停用，不再被选号（ActiveAccounts 只取 active+enabled）。
+	dead, err := r.Store.GetAccount(accounts[0].ID)
+	if err != nil || dead.Status != "offline" || dead.Enabled {
+		t.Fatalf("auth-failed account must be offline+disabled: %+v err=%v", dead, err)
+	}
+}
+
 // 网关拦截(Cloudflare 403)诱因是有状态的 WAF/Bot 风控而非账号身份。契约:零特征拦截允许
 // 一次重试后终止(共两次上游),不逐号空转;被拦账号仅进入网关冷却窗口,不判为异常。
 func TestStreamGatewayBlockedReturnsImmediatelyNoRetry(t *testing.T) {

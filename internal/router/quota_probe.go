@@ -98,6 +98,11 @@ func (r *Router) probeAccountQuota(ctx context.Context, acc *store.Account, with
 	// 限流头可能在没有 usage 对象的响应中返回，也要先落库。
 	if res != nil {
 		r.persistQuota(acc, res)
+		// session 失效（guest_unusable / Jwt is missing / 401 等）：账号离线并停用，
+		// 刷新额度页能直观看到哪些号 session 已死。探测通过时 applyUsageState 会自动恢复。
+		if res.AuthFailed {
+			r.markOffline(acc, "session 失效: "+res.Error)
+		}
 		// 依据网关返回的 usageState 同步账号健康：BLOCKED 视为账号异常（error）并停用，
 		// AVAILABLE 视为恢复正常并启用。其它状态（如无 usage）不动账号。
 		r.applyUsageState(acc, res)
@@ -130,6 +135,20 @@ func (r *Router) ProbeAccountQuota(ctx context.Context, id int64) (ProbeResult, 
 		return ProbeResult{}, err
 	}
 	return r.probeAccountQuota(ctx, acc, true), nil
+}
+
+// markOffline 将 session 失效的账号标记为离线（status=offline）并停用（enabled=false），
+// 从选号池（ActiveAccounts 只取 active+enabled）与会话粘性（usableForSticky 要求 enabled）
+// 中摘除：session 已死的号（guest_unusable / Jwt is missing / sessions returned 401 等）
+// 重试、换出口都不会成功，继续选中只会反复失败。恢复路径：单账号「刷新额度」探测通过
+// （usageState=AVAILABLE）时 applyUsageState 自动转回 active 并重新启用。
+func (r *Router) markOffline(acc *store.Account, msg string) {
+	if acc.Status != "offline" {
+		_ = r.Store.SetAccountStatus(acc.ID, "offline", msg)
+	}
+	if acc.Enabled {
+		_ = r.Store.SetAccountEnabled(acc.ID, false)
+	}
 }
 
 // applyUsageState 依据上游网关返回的 usage.usageState 同步账号的健康状态与启用开关：

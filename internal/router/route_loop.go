@@ -175,7 +175,18 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 			}
 			continue
 		}
-		if res.RateLimited || res.AuthFailed || pool.IsTransient(res.Error) {
+		if res.AuthFailed {
+			// session 失效（guest_unusable / Jwt is missing / 401 等）：账号 session 已死，
+			// 属账号自身问题，标离线并停用（markOffline），从选号池与粘性中摘除，立即换号。
+			r.markOffline(acc, "session 失效: "+res.Error)
+			excluded[acc.ID] = true
+			provider.Trace(ctx, "router.auth_failed_offline", plan.trace(map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "error": res.Error}, acc, false))
+			if e, done := abort(); done {
+				return nil, nil, e
+			}
+			continue
+		}
+		if res.RateLimited || pool.IsTransient(res.Error) {
 			r.Pool.MarkTransient(acc.ID, res.Error)
 			if e, done := abort(); done {
 				return nil, nil, e
@@ -188,7 +199,7 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 		// 续聊（Postman 服务端已有会话）遇到「与账号无关」的失败：钉住原账号原地重试，绝不换号。
 		// 换号会让服务端 conversationId 失效，请求被降级为 USER_QUERY 且历史截断到几百字节（失忆），
 		// 之后必然再次失败、并把同一个错误逐个传染给后面的账号——这正是「一次上游抖动毁一批号、
-		// 同时交付一个丢了上下文的答案」的根因。额度耗尽/限流/认证失败是账号自身问题，已在上面
+		// 同时交付一个丢了上下文的答案」的根因。额度耗尽/限流/session 失效是账号自身问题，已在上面
 		// 各自的分支里换号，走不到这里。
 		if provider.HasReusableHistory(req.Messages) {
 			pinnedAcc = acc
