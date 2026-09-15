@@ -77,12 +77,17 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 		return nil, false
 	}
 
+	// noBackoff 标记上一次失败是「摘死号」而非瞬时错误：换下一个账号不需要退避
+	// （失败与负载无关），且死号成堆时（批量会话集中失效）指数退避会先等出几分钟
+	// sleep，把请求拖死在退避而不是上游调用上。
+	noBackoff := false
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		// 每次重试前退避 100*2^attempt ms，缓解瞬时错误(超时/5xx/限流)的雪崩式立即重试。
 		// 流式下同样安全：首个 delta 之前不落 200、不发事件，退避不会影响已开流的连接。
-		if attempt > 0 {
+		if attempt > 0 && !noBackoff {
 			time.Sleep(time.Duration(100*(1<<attempt)) * time.Millisecond)
 		}
+		noBackoff = false
 		acc, poolUsed, err := r.selectAccount(pinnedAcc, excluded, req.Messages, false)
 		if err != nil {
 			provider.Trace(ctx, "router.error", map[string]interface{}{"attempt": attempt + 1, "error": err.Error()})
@@ -163,6 +168,11 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 			if e, done := abort(); done {
 				return nil, nil, e
 			}
+			// 摘被封锁号同「摘死号」口径（见 AuthFailed 分支）：账号已被永久停用，摘号是
+			// 净进展，不占重试预算、换号不退避——「部分 BLOCKED + 部分健康」的风暴下
+			// （封禁逐步蔓延时），预算不能烧在被封号上，要留给活号交付。
+			maxAttempts++
+			noBackoff = true
 			continue
 		}
 		if res.QuotaExhausted {
@@ -184,6 +194,13 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 			if e, done := abort(); done {
 				return nil, nil, e
 			}
+			// 摘死号不占重试预算（gwRetried 同款手法）：每摘一个都是净进展——该号已停用，
+			// 本请求与后续请求都不会再选它。否则死号成堆时（2026-09-15 批量导入会话集中
+			// 失效：75 死号/52 活号）默认 3 次预算全烧在死号上，活号明明还在却对客户端
+			// 报 All accounts failed。终止条件天然存在：号池被摘空后 selectAccount 直接
+			// 报错返回；客户端断开经上方 ctx.Err() 检查即时中止。
+			maxAttempts++
+			noBackoff = true
 			continue
 		}
 		if res.RateLimited || pool.IsTransient(res.Error) {

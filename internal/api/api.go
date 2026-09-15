@@ -126,17 +126,31 @@ func (s *Server) Register(mux *http.ServeMux) {
 }
 
 // auth 统一鉴权入口，按端点家族分流：
-//   - /api/* 面板端点：只认 /login 签发的会话 Cookie，API Key 不再是面板凭据
-//     （密钥只用于对外 /v1 协议）。未设 ADMIN_PASSWORD 时无登录可言，维持开放
-//     引导态（兼容既有无密码部署）。
+//   - /api/accounts*：面板页 + 外部服务 REST 集成（openapi.yaml）共用，双凭据：
+//     /login 会话 Cookie 或任一有效 API Key（Bearer/x-api-key）皆可。openapi.yaml
+//     对外承诺的就是 Bearer/x-api-key，不能收窄成纯会话。
+//   - 其余 /api/* 面板端点：只认 /login 签发的会话 Cookie，API Key 不是面板凭据。
+//     未设 ADMIN_PASSWORD 时无登录可言，维持开放引导态（兼容既有无密码部署）。
 //   - /v1/* 对外模型协议：只认 Bearer/x-api-key（resolveKey），不认浏览器会话。
 //     api_keys 表为空时全开放（首次创建密钥前的引导态）。
 func (s *Server) auth(w http.ResponseWriter, r *http.Request) bool {
 	if strings.HasPrefix(r.URL.Path, "/api/") {
+		// accounts 系列对外（REST 集成）开放 API Key：先按 Key 验，验不过再走会话。
+		accountsAPI := strings.HasPrefix(r.URL.Path, "/api/accounts")
+		if accountsAPI {
+			if _, err := s.resolveKey(r); err == nil {
+				return true
+			}
+		}
 		if !loginEnabled() || validSession(r) {
 			return true
 		}
-		jsonError(w, 401, "未登录或会话已过期", "authentication_error")
+		if accountsAPI {
+			// 集成方没带有效 Key、也没会话：按 openapi.yaml 的错误契约回 401 invalid_api_key。
+			jsonError(w, 401, "Invalid API key", "invalid_api_key")
+		} else {
+			jsonError(w, 401, "未登录或会话已过期", "authentication_error")
+		}
 		return false
 	}
 	_, err := s.resolveKey(r)

@@ -6,8 +6,10 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"ps2api/internal/provider"
 	"ps2api/internal/store"
@@ -419,6 +421,127 @@ func TestStreamAuthFailedMarksOfflineAndFailsOver(t *testing.T) {
 	dead, err := r.Store.GetAccount(accounts[0].ID)
 	if err != nil || dead.Status != "offline" || dead.Enabled {
 		t.Fatalf("auth-failed account must be offline+disabled: %+v err=%v", dead, err)
+	}
+}
+
+// 死号数量超过重试预算时（retry_count 默认 3，这里 4 死 1 活），请求必须穿过死号
+// 找到活号，而不是烧光预算报 All accounts failed（2026-09-15 批量会话集中失效事故：
+// 75 死号/52 活号，每个请求撞 3 个死号即放弃）。摘死号不占预算、换号不退避。
+func TestStreamAuthFailedDeadAccountsExceedRetryBudget(t *testing.T) {
+	r := newTestRouter(t)
+	// 共 5 个账号：a1-a4 死会话（jwt 401），a5 健康。默认 retry_count=3。
+	dead := map[string]bool{}
+	var mu sync.Mutex
+	seen := map[string]bool{}
+	for _, email := range []string{"a3@test.com", "a4@test.com", "a5@test.com"} {
+		acc, err := r.Store.UpsertAccount(email, "", "", "manual")
+		if err != nil || acc == nil {
+			t.Fatalf("upsert %s: %v", email, err)
+		}
+	}
+	accounts, err := r.Store.ListAccounts()
+	if err != nil || len(accounts) != 5 {
+		t.Fatalf("accounts=%d err=%v", len(accounts), err)
+	}
+	for i, account := range accounts {
+		tok, _ := json.Marshal(provider.Tokens{AccessToken: "token-" + string(rune('1'+i)), UserID: "u", WorkspaceID: "w"})
+		if err := r.Store.UpdateTokens(account.ID, string(tok)); err != nil {
+			t.Fatal(err)
+		}
+		dead[account.Email] = i < 4
+	}
+	r.Provider.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		tok := req.Header.Get("x-access-token")
+		mu.Lock()
+		seen[tok] = true
+		mu.Unlock()
+		if strings.HasPrefix(tok, "token-1") ||
+			strings.HasPrefix(tok, "token-2") ||
+			strings.HasPrefix(tok, "token-3") ||
+			strings.HasPrefix(tok, "token-4") {
+			h := make(http.Header)
+			h.Set("X-Pm-Error-1", "guest_unusable: Jwt is missing")
+			h.Set("X-Pm-Error-2", "identity_status: sessions returned 401")
+			return &http.Response{StatusCode: 401, Header: h, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+		}
+		body := "data: {\"eventType\":\"usage\",\"data\":{\"limit\":50000,\"usage\":1000,\"usageState\":\"AVAILABLE\"}}\n\n" +
+			"data: {\"eventType\":\"conversation\",\"data\":{\"id\":\"conv-ok\"}}\n\n" +
+			"data: {\"eventType\":\"textChunk\",\"data\":{\"textContent\":\"ok\"}}\n\n" +
+			"data: [DONE]\n\n"
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	})}
+
+	started := time.Now()
+	res, account, err := r.Stream(context.Background(), &provider.ChatRequest{
+		Model: "claude-opus-4-8", Messages: []provider.ChatMessage{mustMsg(t, "user", "hello")},
+	}, func(delta provider.Delta) error { return nil })
+	if err != nil || res == nil || !res.Success || account == nil {
+		t.Fatalf("stream must reach the healthy account past 4 dead ones: res=%+v account=%+v err=%v", res, account, err)
+	}
+	if account.ID != accounts[4].ID {
+		t.Fatalf("success must come from the healthy account, got %+v", account)
+	}
+	mu.Lock()
+	deadSeen := len(seen) - 1 // token-5 是健康号
+	mu.Unlock()
+	if deadSeen == 0 {
+		t.Fatal("test setup broken: no dead account was attempted")
+	}
+	// 死号被摘除换号且不退避：全程应远小于旧退避路径的 0.2+0.4+0.8+1.6s。
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("dead-account failover took %v; backoff must be skipped on cull", elapsed)
+	}
+	// 被试过的每个死号都必须 offline+disabled（没被轮到的死号不算）。
+	for i := 0; i < 4; i++ {
+		if !seen["token-"+string(rune('1'+i))] {
+			continue
+		}
+		acc, _ := r.Store.GetAccount(accounts[i].ID)
+		if acc == nil || acc.Status != "offline" || acc.Enabled {
+			t.Fatalf("attempted dead account %s must be offline+disabled: %+v", accounts[i].Email, acc)
+		}
+	}
+}
+
+// 「部分 BLOCKED + 部分健康」风暴：被封锁号数量超过重试预算（默认 3，这里 4 封 1 活），
+// 请求必须穿过被封号在活号上交付——摘号不占预算、换号不退避（与 AuthFailed 同口径）。
+func TestStreamBlockedDeadAccountsExceedRetryBudget(t *testing.T) {
+	r := newTestRouter(t)
+	for _, email := range []string{"a3@test.com", "a4@test.com", "a5@test.com"} {
+		if _, err := r.Store.UpsertAccount(email, "", "", "manual"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	accounts, err := r.Store.ListAccounts()
+	if err != nil || len(accounts) != 5 {
+		t.Fatalf("accounts=%d err=%v", len(accounts), err)
+	}
+	for i, account := range accounts {
+		tok, _ := json.Marshal(provider.Tokens{AccessToken: "token-" + string(rune('1'+i)), UserID: "u", WorkspaceID: "w"})
+		if err := r.Store.UpdateTokens(account.ID, string(tok)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.Provider.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body := "data: {\"eventType\":\"usage\",\"data\":{\"limit\":50000,\"usage\":50000,\"usageState\":\"BLOCKED\"}}\n\n"
+		if req.Header.Get("x-access-token") == "token-5" {
+			body = "data: {\"eventType\":\"usage\",\"data\":{\"limit\":50000,\"usage\":1000,\"usageState\":\"AVAILABLE\"}}\n\n" +
+				"data: {\"eventType\":\"conversation\",\"data\":{\"id\":\"conv-ok\"}}\n\n" +
+				"data: {\"eventType\":\"textChunk\",\"data\":{\"textContent\":\"ok\"}}\n\n" +
+				"data: [DONE]\n\n"
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	})}
+
+	started := time.Now()
+	res, account, err := r.Stream(context.Background(), &provider.ChatRequest{
+		Model: "claude-opus-4-8", Messages: []provider.ChatMessage{mustMsg(t, "user", "hello")},
+	}, func(delta provider.Delta) error { return nil })
+	if err != nil || res == nil || !res.Success || account == nil || account.ID != accounts[4].ID {
+		t.Fatalf("stream must reach the healthy account past 4 blocked ones: res=%+v account=%+v err=%v", res, account, err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("blocked-account failover took %v; backoff must be skipped on cull", elapsed)
 	}
 }
 

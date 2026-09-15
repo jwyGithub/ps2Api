@@ -85,18 +85,21 @@ func TestPanelSessionVsV1KeyAuth(t *testing.T) {
 	}
 
 	cases := []struct {
-		name, path, bearer, cookie string
-		want                       int
+		name, method, path, body, bearer, cookie string
+		want                                      int
 	}{
-		{"panel rejects valid api key", "/api/keys", "sk-panel", "", 401},
-		{"panel accepts session", "/api/keys", "", cookie, 200},
-		{"v1 rejects session cookie", "/v1/models", "", cookie, 401},
-		{"v1 accepts api key", "/v1/models", "sk-panel", "", 200},
-		{"v1 accepts svc loopback token", "/v1/models", srv.svcTokenIssue(), "", 200},
+		{"panel rejects valid api key", "GET", "/api/keys", "", "sk-panel", "", 401},
+		{"panel accepts session", "GET", "/api/keys", "", "", cookie, 200},
+		{"accounts accepts api key (REST integration)", "GET", "/api/accounts", "", "sk-panel", "", 200},
+		{"accounts accepts session cookie", "GET", "/api/accounts", "", "", cookie, 200},
+		{"accounts import accepts api key", "POST", "/api/accounts/import", `{"version":1,"accounts":[]}`, "sk-panel", "", 400},
+		{"v1 rejects session cookie", "GET", "/v1/models", "", "", cookie, 401},
+		{"v1 accepts api key", "GET", "/v1/models", "", "sk-panel", "", 200},
+		{"v1 accepts svc loopback token", "GET", "/v1/models", "", srv.svcTokenIssue(), "", 200},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			req := httptest.NewRequest("GET", c.path, nil)
+			req := httptest.NewRequest(c.method, c.path, strings.NewReader(c.body))
 			if c.bearer != "" {
 				req.Header.Set("Authorization", "Bearer "+c.bearer)
 			}

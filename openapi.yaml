@@ -6,12 +6,14 @@ info:
     Postman2API 网关的账号管理接口，供其他服务以标准 REST/JSON 方式集成。
 
     ## 鉴权
-    所有 `/api/accounts*` 端点在**已设置 API Key** 时需要鉴权，支持两种请求头（二选一）：
+    所有 `/api/accounts*` 端点支持两种请求头（二选一）：
       - `Authorization: Bearer <key>`（OpenAI 风格）
       - `x-api-key: <key>`（Anthropic 风格）
 
-    注意：当服务端**未设置** API Key（首次进面板前的引导态）时，这些端点**不鉴权、直接放行**。
-    对外开放前务必先在面板中设置 API Key。
+    面板浏览器会话 Cookie（`/login` 签发）同样有效——面板页与外部服务共用这组端点。
+
+    注意：当服务端**未创建任何 API Key**（引导态）时，这些端点**不鉴权、直接放行**。
+    对外开放前务必先在面板「API KEY 管理」页创建密钥。
 
     ## 核心端点
     `POST /api/accounts/import` 是纯 HTTP + JSON 的批量导入接口，按 `email` UPSERT，
