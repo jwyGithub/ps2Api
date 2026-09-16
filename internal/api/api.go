@@ -84,7 +84,6 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/accounts/{id}/refresh-quota", s.refreshAccountQuota)
 	mux.HandleFunc("POST /api/accounts/{id}/test", s.testAccount)
 	mux.HandleFunc("POST /api/refresh-quota", s.refreshQuota)
-	mux.HandleFunc("POST /api/refresh-quota-exhausted", s.refreshExhaustedQuota)
 
 	// 管理类端点（/api/*）——设置、analytics、代理检查（见 metrics.go）
 	mux.HandleFunc("GET /api/settings", s.getSettings)

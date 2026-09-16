@@ -61,38 +61,6 @@ func (r *Router) ProbeQuotas(ctx context.Context) []ProbeResult {
 	return out
 }
 
-// ProbeExhaustedQuotas 对所有「额度耗尽」（status=exhausted）的账号发起探测刷新，
-// 供号池页「重置刷新」按钮调用：额度周期重置后查证余量是否恢复；探测到 AVAILABLE
-// 且余量 > 0 时 applyUsageState 自动转回 active 并重新启用，恢复入池。不看 enabled——
-// exhausted 账号 enabled 本就保持 true，即便被手动停用，点重置刷新的意图也是想恢复它。
-func (r *Router) ProbeExhaustedQuotas(ctx context.Context) []ProbeResult {
-	accounts, err := r.Store.ListAccounts()
-	if err != nil {
-		return nil
-	}
-	var out []ProbeResult
-	sem := make(chan struct{}, probeConcurrency)
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	for _, acc := range accounts {
-		if acc.Status != "exhausted" {
-			continue
-		}
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(acc *store.Account) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			pr := r.probeAccountQuota(ctx, acc, false)
-			mu.Lock()
-			out = append(out, pr)
-			mu.Unlock()
-		}(acc)
-	}
-	wg.Wait()
-	return out
-}
-
 // ProbeAccountsByIDs 对给定 ID 集合的账号并发探测额度并写库，返回逐账号结果。
 // 供导入后自动刷新额度使用：仅覆盖本次导入的账号子集，比整池 ProbeQuotas 更轻。
 // 与 ProbeQuotas 一致，跳过禁用 / 已耗尽（exhausted）账号——探测拿不到有效数据。
