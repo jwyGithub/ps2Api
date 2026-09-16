@@ -309,7 +309,7 @@
     var counts = { active:0, exhausted:0, error:0, offline:0, disabled:0 };
     state.accounts.forEach(function (a) { var st = effectiveStatus(a); if (counts[st] !== undefined) counts[st]++; });
     var poolTotal = state.accounts.length;
-    ['active', 'exhausted', 'error', 'disabled'].forEach(function (k) {
+    ['active', 'exhausted', 'error', 'offline', 'disabled'].forEach(function (k) {
       var c = document.querySelector('#page-pools [data-pool-count="' + k + '"]');
       if (c) c.textContent = counts[k];
       var p = document.querySelector('#page-pools [data-pool-pct="' + k + '"]');
@@ -1439,6 +1439,15 @@
       var msg = '探测完成：' + (d.ok || 0) + ' 个账号额度已刷新' + ((d.failed || 0) > 0 ? '，' + d.failed + ' 个失败' : '');
       loadAll().then(function () { toast(msg); });
     }).catch(function (e) { toast('探测失败：' + e.message); });
+  };
+  // 重置刷新：对所有「额度耗尽」账号查证额度是否已随周期重置恢复，恢复的自动转回在线。
+  window.resetRefreshQuota = function () {
+    toast('正在查证额度耗尽账号…');
+    api('/api/refresh-quota-exhausted', { method: 'POST', body: '{}' }).then(function (d) {
+      var total = (d.ok || 0) + (d.failed || 0);
+      var msg = total === 0 ? '没有额度耗尽的账号' : '查证完成：' + (d.ok || 0) + ' 个已恢复' + ((d.failed || 0) > 0 ? '，' + d.failed + ' 个仍耗尽或失败' : '');
+      loadAll().then(function () { toast(msg); });
+    }).catch(function (e) { toast('查证失败：' + e.message); });
   };
   // ─── 账号连通性测试（直连 / 网关，完整现场）────────────────
   window.testAccount = function (id) {

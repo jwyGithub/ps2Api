@@ -185,6 +185,24 @@ func (s *Server) refreshQuota(w http.ResponseWriter, r *http.Request) {
 	jsonWrite(w, 200, map[string]interface{}{"ok": ok, "failed": failed, "results": results})
 }
 
+// refreshExhaustedQuota 对所有「额度耗尽」（status=exhausted）的账号发起额度探测，
+// 供号池页「重置刷新」按钮调用：周期重置后查证余量是否恢复，恢复的账号自动转回 active。
+func (s *Server) refreshExhaustedQuota(w http.ResponseWriter, r *http.Request) {
+	if !s.auth(w, r) {
+		return
+	}
+	results := s.Router.ProbeExhaustedQuotas(r.Context())
+	ok, failed := 0, 0
+	for _, pr := range results {
+		if pr.OK {
+			ok++
+		} else {
+			failed++
+		}
+	}
+	jsonWrite(w, 200, map[string]interface{}{"ok": ok, "failed": failed, "results": results})
+}
+
 // refreshAccountQuota 对号池页某一行账号发起单账号额度探测并写库，
 // 供每行「刷新额度」按钮调用；返回该账号最新的 limit/remaining。
 func (s *Server) refreshAccountQuota(w http.ResponseWriter, r *http.Request) {
