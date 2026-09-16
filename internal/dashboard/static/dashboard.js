@@ -14,7 +14,7 @@
     analytics: {}, settings: {}, settingsDefs: [], keys: [],
     cacheProbe: {},
     days: 14, page: 'overview', poolQuery: '', poolStatus: 'ALL',
-    poolPage: 1, quotaPage: 1,
+    poolPage: 1, quotaPage: 1, resetRefreshing: false,
     reqlogs: [], reqlogsPage: 1, reqlogsTotal: 0, reqlogsCollapsed: {},
     waf: { list: [], page: 1, total: 0, currentId: 0, baselineId: '', analysis: null, probePaths: [], probeJob: '', probeTimer: null },
     sqlLast: null
@@ -1441,13 +1441,30 @@
     }).catch(function (e) { toast('探测失败：' + e.message); });
   };
   // 重置刷新：对所有「额度耗尽」账号查证额度是否已随周期重置恢复，恢复的自动转回在线。
+  // 前端逐账号调单账号端点（并发 3），每完成一个就更新 toast 进度——批量端点同步阻塞，
+  // 全部探测完才返回，期间页面毫无反馈；逐账号则进度实时可见。showToast 每次调用
+  // 重置 2.5s 计时器，天然适合当进度提示。
   window.resetRefreshQuota = function () {
-    toast('正在查证额度耗尽账号…');
-    api('/api/refresh-quota-exhausted', { method: 'POST', body: '{}' }).then(function (d) {
-      var total = (d.ok || 0) + (d.failed || 0);
-      var msg = total === 0 ? '没有额度耗尽的账号' : '查证完成：' + (d.ok || 0) + ' 个已恢复' + ((d.failed || 0) > 0 ? '，' + d.failed + ' 个仍耗尽或失败' : '');
+    if (state.resetRefreshing) return;
+    var list = state.accounts.filter(function (a) { return effectiveStatus(a) === 'exhausted'; });
+    if (!list.length) { toast('没有额度耗尽的账号'); return; }
+    state.resetRefreshing = true;
+    var done = 0, recovered = 0, failed = 0, idx = 0;
+    var step = function () {
+      var i = idx++;
+      if (i >= list.length) return Promise.resolve();
+      var a = list[i];
+      toast('重置刷新 ' + (done + 1) + '/' + list.length + '：' + a.email);
+      return api('/api/accounts/' + a.id + '/refresh-quota', { method: 'POST', body: '{}' })
+        .then(function (d) { if (d.ok) recovered++; else failed++; })
+        .catch(function () { failed++; })
+        .then(function () { done++; return step(); });
+    };
+    Promise.all([step(), step(), step()]).then(function () {
+      state.resetRefreshing = false;
+      var msg = '查证完成：' + recovered + ' 个已恢复' + (failed > 0 ? '，' + failed + ' 个仍耗尽或失败' : '');
       loadAll().then(function () { toast(msg); });
-    }).catch(function (e) { toast('查证失败：' + e.message); });
+    });
   };
   // ─── 账号连通性测试（直连 / 网关，完整现场）────────────────
   window.testAccount = function (id) {
