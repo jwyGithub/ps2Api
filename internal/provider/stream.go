@@ -82,6 +82,18 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 			"success": res.Success, "error": res.Error, "conversation_id": res.ConversationID,
 		})
 	}()
+	// 冷启动补种：长会话在无会话命中时先发一轮上下文重建（折叠历史 + 摘要指令），
+	// 在服务端建立带历史的会话，随后主轮恢复增量发送——消除 10000 rune 截断
+	// 造成的答非所问（2026-09-17 设计，docs/superpowers/specs/2026-09-17-context-seed-design.md）。
+	// 任何补种失败都回落单发折叠路径（绝不比无补种更差）；账号级失败
+	// （AuthFailed/QuotaExhausted/RateLimited）上抛给 router 换号重试。
+	if p.shouldSeed(acc.ID, req) {
+		seedRes := p.seedConversation(ctx, acc, req, tokens, postmanModel)
+		if seedRes.AuthFailed || seedRes.QuotaExhausted || seedRes.RateLimited {
+			*res = *seedRes
+			return fmt.Errorf("%s", res.Error)
+		}
+	}
 	body := p.buildBody(req, tokens, postmanModel, acc.ID)
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {

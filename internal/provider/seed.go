@@ -19,6 +19,11 @@ const seedHistoryThresholdMessages = 7
 // 冷启动（无会话命中）、非 tool-tail 重放、历史足够长、开关开启。
 // WafProbe 探针绝不补种（必须逐字复现可疑内容）。
 func (p *Provider) shouldSeed(accID int64, req *ChatRequest) bool {
+	// 补种轮自身（ContextSeed=true，由 seedConversation 递归调 streamInternal）绝不
+	// 再补种——否则同一批消息会无限递归。
+	if req.ContextSeed {
+		return false
+	}
 	if !contextSeedEnabled() || req.WafProbe {
 		return false
 	}

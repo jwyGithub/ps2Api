@@ -146,6 +146,132 @@ func TestSeedConversationStoresPrefixMapping(t *testing.T) {
 	}
 }
 
+// TestStreamInternalSeedsColdStart: 端到端——长会话冷启动时 streamInternal
+// 先发补种轮（query=折叠历史+摘要指令、conversationId=null），
+// 再发主轮（query=仅最新消息、conversationId=补种返回值）。
+func TestStreamInternalSeedsColdStart(t *testing.T) {
+	var bodies []map[string]interface{}
+	srv := mockPostmanServer(t, "conv-e2e", &bodies)
+	p := New()
+	p.Client = &http.Client{Transport: redirectTransport{base: http.DefaultTransport, target: srv.URL}}
+	acc := seedTestAccount(t, srv)
+
+	msgs := []ChatMessage{mustMsg(t, "user", "TASK_MARKER 原始任务描述")}
+	for i := 0; i < 5; i++ {
+		msgs = append(msgs, *assistantFollowup(&Result{Content: strings.Repeat("结论. ", 200)}))
+		msgs = append(msgs, mustMsg(t, "user", strings.Repeat("跟进", 60)))
+	}
+	msgs = append(msgs, mustMsg(t, "user", "最新一轮消息"))
+
+	req := &ChatRequest{Model: "claude-opus-4-8", Messages: msgs}
+	res := p.Chat(context.Background(), acc, req)
+	if !res.Success {
+		t.Fatalf("chat failed: %s", res.Error)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("expected seed + main = 2 upstream calls, got %d", len(bodies))
+	}
+	seedInput := bodies[0]["input"].(map[string]interface{})
+	mainInput := bodies[1]["input"].(map[string]interface{})
+	if seedInput["conversationId"] != nil {
+		t.Fatal("seed call must have conversationId=null")
+	}
+	if got := mainInput["conversationId"]; got != "conv-e2e" {
+		t.Fatalf("main call must carry seeded conversationId, got %v", got)
+	}
+	seedQuery := seedInput["query"].(string)
+	mainQuery := mainInput["query"].(string)
+	if !strings.Contains(seedQuery, "TASK_MARKER") || !strings.Contains(seedQuery, "总结当前任务状态") {
+		t.Fatal("seed query must contain folded history + summary instruction")
+	}
+	if strings.Contains(seedQuery, "最新一轮消息") {
+		t.Fatal("seed query must not leak the latest message")
+	}
+	if !strings.Contains(mainQuery, "最新一轮消息") || strings.Contains(mainQuery, "TASK_MARKER") {
+		t.Fatal("main query must contain only the latest turn")
+	}
+}
+
+// TestStreamInternalSeedFallbackOnFailure: 补种轮非账号级失败（如上游 500）时
+// 回落单发折叠路径——出站共 2 个请求（seed + folded main），主 query 为折叠产物
+// （含最新消息 tail）。注意 403 属账号级失败（AuthFailed），按设计上抛换号、
+// 不回落，故此处用 500 模拟可回落失败。
+func TestStreamInternalSeedFallbackOnFailure(t *testing.T) {
+	var bodies []map[string]interface{}
+	call := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call++
+		var body map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		bodies = append(bodies, body)
+		if call == 1 { // 补种轮 → 500（非账号级，静默回落）
+			w.WriteHeader(500)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "data: {\"eventType\":\"done\",\"postbotNative\":true}\n\n")
+	}))
+	t.Cleanup(srv.Close)
+	p := New()
+	p.Client = &http.Client{Transport: redirectTransport{base: http.DefaultTransport, target: srv.URL}}
+	acc := seedTestAccount(t, srv)
+
+	msgs := []ChatMessage{mustMsg(t, "user", "TASK_MARKER 原始任务")}
+	for i := 0; i < 4; i++ {
+		msgs = append(msgs, *assistantFollowup(&Result{Content: strings.Repeat("结论. ", 100)}))
+		msgs = append(msgs, mustMsg(t, "user", strings.Repeat("跟进", 60)))
+	}
+	msgs = append(msgs, mustMsg(t, "user", "最新消息"))
+
+	req := &ChatRequest{Model: "claude-opus-4-8", Messages: msgs}
+	res := p.Chat(context.Background(), acc, req)
+	_ = res
+	if len(bodies) != 2 {
+		t.Fatalf("fallback path = seed(500) + main(folded) = 2 calls, got %d", len(bodies))
+	}
+	mainQuery := bodies[1]["input"].(map[string]interface{})["query"].(string)
+	if !strings.Contains(mainQuery, "TASK_MARKER") || !strings.Contains(mainQuery, "最新消息") {
+		t.Fatal("fallback main query must be the folded product (history + latest)")
+	}
+}
+
+// TestStreamInternalSeedAccountFailurePropagates: 补种轮 quota 耗尽时
+// 主 res 带 QuotaExhausted（router 据此换号），且主轮不再出站。
+// quota SSE 真实形状（sse.go handleUsage）：eventType=usage，data 即 Usage 对象，
+// usageState ∈ {EXCEEDED, UNAVAILABLE, BLOCKED} 置 QuotaExceeded。
+func TestStreamInternalSeedAccountFailurePropagates(t *testing.T) {
+	var bodies []map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		bodies = append(bodies, body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "data: {\"data\":{\"usageState\":\"EXCEEDED\"},\"eventType\":\"usage\",\"postbotNative\":true}\n\n")
+	}))
+	t.Cleanup(srv.Close)
+	p := New()
+	p.Client = &http.Client{Transport: redirectTransport{base: http.DefaultTransport, target: srv.URL}}
+	acc := seedTestAccount(t, srv)
+
+	msgs := []ChatMessage{mustMsg(t, "user", "TASK 原始任务")}
+	for i := 0; i < 4; i++ {
+		msgs = append(msgs, *assistantFollowup(&Result{Content: "回复"}))
+		msgs = append(msgs, mustMsg(t, "user", "跟进"))
+	}
+	msgs = append(msgs, mustMsg(t, "user", "最新"))
+
+	res := p.Chat(context.Background(), acc, &ChatRequest{Model: "claude-opus-4-8", Messages: msgs})
+	if res.QuotaExhausted != true {
+		t.Fatalf("seed quota exhaustion must propagate to main res, got %+v", res)
+	}
+	if len(bodies) != 1 {
+		t.Fatalf("seed quota failure must abort before main round, got %d calls", len(bodies))
+	}
+	if q := bodies[0]["input"].(map[string]interface{})["query"].(string); !strings.Contains(q, "总结当前任务状态") {
+		t.Fatal("first call must be the seed round (summary instruction in query)")
+	}
+}
+
 // mockPostmanServer 模拟 Postman _gw/chat：记录每个请求体，返回一个带
 // conversationId 与一段正文的成功 SSE 流。
 func mockPostmanServer(t *testing.T, conversationID string, bodies *[]map[string]interface{}) *httptest.Server {
