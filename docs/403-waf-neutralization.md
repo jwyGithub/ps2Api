@@ -246,3 +246,32 @@ ZWSP 版上线后再次出现 403。按第 6 节手册排查，结论与第 6 �
 **修复**：规则 1 统一加分离符容忍（与第 11 节规则 2 同构，一次覆盖全标签组而非逐标签打补丁）：`(?i)(<|<)([\s\\]*[!/?]?[\s\\]*(?:script|iframe|…|doctype)\b)`。单测补 4 用例（`< img src=x onerror=…>`、转义形、tab 分离 iframe、多行分离 img）；并用真实 3414 失败体做离线回归——修复后规则跑一遍，CF 归一化后危险标签零残留。
 
 **方法论沉淀**：叶子 diff 缩小到「文档 + 源码」两个候选后，靠的是**模拟 CF 归一化 + 穷举 `<` token + 与成功对照做差集**完成终判——比逐个探针快一个量级，第 6 节面板的离线分析值得补这一步（「归一化穷举 vs 成功对照差集」直接给出残留形态清单）。
+
+## 12. 排查流程 API 化（2026-09-17，供外部排查代理自助取数）
+
+第 6/11 节的排查全流程已可通过 API Key 自助调用（开放范围与鉴权见
+`docs/superpowers/specs/2026-09-17-ops-api-key-design.md`，端点契约见 openapi.yaml 的 Ops tag）——排查时无需再人工贴 SQL 结果，把 key 与网关地址交给外部排查代理（Claude）即可：
+
+```bash
+K='-H "Authorization: Bearer <key>"'   # 或 x-api-key 头
+BASE=https://<网关>
+
+# 第一步（第 6 节）：找失败行 + 三个判别量（SQL 免写，直接查）
+curl $K "$BASE/api/logs"                              # 最近日志
+curl $K "$BASE/api/request-logs?page=1"               # 按会话分组的完整日志
+
+# 第二步：判别（签名计数 / 对照 diff / 体积分桶，一次调用全出）
+curl $K "$BASE/api/waf/analyze?log_id=<403行id>"                # baseline_id 可选，缺省三级回退
+curl $K "$BASE/api/waf/baselines?log_id=<403行id>"              # 手动挑对照
+curl $K "$BASE/api/waf-signatures"                              # 当前签名表
+
+# 自由 SQL（只读：仅 SELECT/WITH/EXPLAIN，200 行上限）——第 6 节任何判别 SQL 都能跑
+curl $K -X POST "$BASE/api/sql-query" -d '{"sql":"SELECT ..."}'
+
+# 第三步（第 10 节）：在线探针二分（analyze 的 diff[].path 即探针 paths 入参）
+curl $K -X POST "$BASE/api/waf/probe" -d '{"log_id":…,"baseline_id":…,"paths":[…]}'
+curl $K "$BASE/api/waf/probe/<job_id>"                 # 2s 轮询
+curl $K -X DELETE "$BASE/api/waf/probe/<job_id>"       # 中止
+```
+
+排查判读方法论不变（第 6 节三分走 + 第 11 节归一化穷举差集），只是数据获取从「人工贴结果」变成「代理直连」。新增内容签名时，签名探测表（`wafSignatureProbes`）与面板 SQL 预设同源，`/api/waf-signatures` 返回的即最新清单。

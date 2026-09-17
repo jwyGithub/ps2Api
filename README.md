@@ -259,7 +259,6 @@ Base URL：`http://127.0.0.1:1930`。除面板只读接口外，均需 `Authoriz
 | `claude-sonnet-4-6` / `4-5`               | 200K   | 64K      | ✓    |
 | `claude-haiku-4-5`                        | 200K   | 64K      | —    |
 | `gpt-5.6-sol` / `terra` / `luna`          | 128K   | 32K      | ✓    |
-| `codex-mini-latest`                       | 128K   | 32K      | ✓    |
 | `gpt-5.5` / `5.4` / `5.2`                 | 128K   | 32K      | —    |
 | `auto`                                    | 200K   | 64K      | —    |
 

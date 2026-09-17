@@ -12,10 +12,6 @@ var PostmanModelMap = map[string]string{
 	"claude-sonnet-4-5": "CLAUDE_45_SONNET_BEDROCK",
 	"claude-haiku-4-5":  "CLAUDE_45_HAIKU_BEDROCK",
 	"gpt-5.6-sol":       "GPT_56_SOL",
-	// codex-mini-latest:codex 客户端常用的模型名别名,映射到 GPT_56_SOL,上游仍走 gpt-5.6-sol。
-	// 注:工具执行现在靠运行时探测客户端声明的 exec custom 工具(见 api/codex_exec.go),
-	// 与模型名无关;此条目仅为兼容仍以 codex-mini-latest 请求的客户端而保留。
-	"codex-mini-latest": "GPT_56_SOL",
 	"gpt-5.6-terra":     "GPT_56_TERRA",
 	"gpt-5.6-luna":      "GPT_56_LUNA",
 	"gpt-5.5":           "GPT_55",
@@ -61,7 +57,6 @@ var PostmanModels = []ModelInfo{
 	pm("claude-sonnet-4-5", 200000, 64000, true),
 	pm("claude-haiku-4-5", 200000, 64000, false),
 	pm("gpt-5.6-sol", 128000, 32000, true),
-	pm("codex-mini-latest", 128000, 32000, true),
 	pm("gpt-5.6-terra", 128000, 32000, true),
 	pm("gpt-5.6-luna", 128000, 32000, true),
 	pm("gpt-5.5", 128000, 32000, false),
