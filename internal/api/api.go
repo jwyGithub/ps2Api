@@ -133,11 +133,25 @@ func (s *Server) Register(mux *http.ServeMux) {
 //     未设 ADMIN_PASSWORD 时无登录可言，维持开放引导态（兼容既有无密码部署）。
 //   - /v1/* 对外模型协议：只认 Bearer/x-api-key（resolveKey），不认浏览器会话。
 //     api_keys 表为空时全开放（首次创建密钥前的引导态）。
+// opsReadOnlyAPI 报告路径是否属于「排查类」端点：只读分析 + SQL 只读查询 + WAF
+// 在线探针。任何有效 API Key 可调（与 /api/accounts* 同款先例：先 Key 后会话），
+// 供外部排查代理自助取数（见 docs/superpowers/specs/2026-09-17-ops-api-key-design.md）。
+// 白名单制：清单外端点（含 /api/keys、/api/settings 等敏感管理面）不得被 Key 放行。
+func opsReadOnlyAPI(path string) bool {
+	switch path {
+	case "/api/waf/analyze", "/api/waf/baselines", "/api/waf-signatures",
+		"/api/waf/probe", "/api/sql-query", "/api/request-logs", "/api/logs", "/api/stats":
+		return true
+	}
+	return strings.HasPrefix(path, "/api/waf/probe/") // job_id 子路径（GET 进度 / DELETE 中止）
+}
+
 func (s *Server) auth(w http.ResponseWriter, r *http.Request) bool {
 	if strings.HasPrefix(r.URL.Path, "/api/") {
-		// accounts 系列对外（REST 集成）开放 API Key：先按 Key 验，验不过再走会话。
+		// accounts 系列与排查类端点对外（REST 集成）开放 API Key：先按 Key 验，验不过再走会话。
 		accountsAPI := strings.HasPrefix(r.URL.Path, "/api/accounts")
-		if accountsAPI {
+		opsAPI := opsReadOnlyAPI(r.URL.Path)
+		if accountsAPI || opsAPI {
 			if _, err := s.resolveKey(r); err == nil {
 				return true
 			}
@@ -145,7 +159,7 @@ func (s *Server) auth(w http.ResponseWriter, r *http.Request) bool {
 		if !loginEnabled() || validSession(r) {
 			return true
 		}
-		if accountsAPI {
+		if accountsAPI || opsAPI {
 			// 集成方没带有效 Key、也没会话：按 openapi.yaml 的错误契约回 401 invalid_api_key。
 			jsonError(w, 401, "Invalid API key", "invalid_api_key")
 		} else {

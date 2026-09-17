@@ -120,3 +120,55 @@ func TestChargeKey(t *testing.T) {
 		t.Fatalf("no-op charge changed usage: %d", got.QuotaUsed)
 	}
 }
+
+// TestOpsAPIKeyAuth 钉住排查端点的 Key 放行：有效 Key 直接过（先 Key 后会话），
+// 无 Key + 已设密码时 401，清单外端点不得被 Key 放行。
+func TestOpsAPIKeyAuth(t *testing.T) {
+	srv := &Server{Store: newTestStore(t)}
+	if _, err := srv.Store.CreateAPIKey("sk-ops", "排查", nil, 0, 0, 1); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ADMIN_PASSWORD", "pw") // 开登录：逼出「只认会话」的默认分支
+
+	ops := []struct{ method, path string }{
+		{"GET", "/api/waf/analyze?log_id=1"},
+		{"GET", "/api/waf/baselines?log_id=1"},
+		{"GET", "/api/waf-signatures"},
+		{"POST", "/api/waf/probe"},
+		{"GET", "/api/waf/probe/probe-1"},
+		{"DELETE", "/api/waf/probe/probe-1"},
+		{"POST", "/api/sql-query"},
+		{"GET", "/api/request-logs"},
+		{"GET", "/api/logs"},
+		{"GET", "/api/stats"},
+	}
+	for _, c := range ops {
+		req := httptest.NewRequest(c.method, c.path, nil)
+		req.Header.Set("Authorization", "Bearer sk-ops")
+		w := httptest.NewRecorder()
+		if !srv.auth(w, req) {
+			t.Fatalf("%s %s 带有效 Key 应放行，got %d %s", c.method, c.path, w.Code, w.Body.String())
+		}
+	}
+	// 无 Key：401（已设密码、无会话）。
+	req := httptest.NewRequest("POST", "/api/sql-query", nil)
+	w := httptest.NewRecorder()
+	ok := srv.auth(w, req)
+	if ok || w.Code != 401 {
+		t.Fatalf("无 Key 应 401，got ok=%v code=%d", ok, w.Code)
+	}
+	// 清单外端点不得被 Key 放行（敏感管理面）。
+	for _, p := range []string{"/api/keys", "/api/settings", "/api/analytics", "/api/proxy-check"} {
+		req := httptest.NewRequest("GET", p, nil)
+		req.Header.Set("Authorization", "Bearer sk-ops")
+		w := httptest.NewRecorder()
+		if srv.auth(w, req) {
+			t.Fatalf("%s 不得被 Key 放行", p)
+		}
+	}
+	// 引导态（无密码、无 Key）：放行不变。
+	boot := &Server{Store: newTestStore(t)}
+	if !boot.auth(httptest.NewRecorder(), httptest.NewRequest("GET", "/api/sql-query", nil)) {
+		t.Fatal("引导态应开放")
+	}
+}
