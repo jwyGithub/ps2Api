@@ -67,7 +67,16 @@ const (
 	// ≈ 6150 < cap 尾部窗口 ≈ 6800，任务永远存活。
 	//
 	// FoldedSystemBudgetRunes 限制折叠路径里单条 system 消息的渲染长度（保头保尾、中段省略）。
+	// skills 清单（foldedSystemParts 识别压缩）不占这个预算：清单是模型调用 skills 的唯一依据，
+	// 用独立上限（见 FoldedSkillListRunes）——2000 预算装不下真实 Claude Code 会话 89 条 ~28K
+	// 字符的清单（2026-09-17 线上：经网关的模型从不调用 skills，直连正常，根因即此）。
 	FoldedSystemBudgetRunes = 2000
+	// FoldedSkillListRunes 是折叠路径里 skills 清单压缩后的独立预算：每条压成
+	// "- name: 描述首句(≤80 rune)"，条目数不定，总量兜底。预算内装不下的尾部条目
+	// 降级为「- name」（名字即 Skill 工具的调用参数，模型至少知道存在哪些 skill），
+	// 名字也放不下才丢弃。2800 对齐 capUpstreamQuery 头部 30% 保留区（3000 rune）：
+	// skills 段恒置 query 最前（见 splitMessagesSeed），预算超头部窗口就会被中段省略切尾。
+	FoldedSkillListRunes = 2800
 	// FoldedTextMsgBudgetRunes 限制折叠路径里单条历史 user/assistant 文本消息的渲染长度，
 	// 也是「原始任务」后置渲染时的长度上限。
 	FoldedTextMsgBudgetRunes = 2000

@@ -3,6 +3,7 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -119,6 +120,100 @@ func foldedToolResultParts(msg ChatMessage, budget int) []string {
 		}
 	}
 	return parts
+}
+
+// foldedSystemParts 把一条折叠路径里的 system 消息拆成「清单块 + 其余文本」两部分：
+//   - skills 清单（连续 ≥minSkillBlockLines 行的 "- name: description" 行块）压成
+//     "- name: 描述首句"——清单是模型调用 skills 的唯一依据，按 FoldedSkillListRunes
+//     独立预算兜底（2026-09-17 线上：89 条 ~28K 的清单在 FoldedSystemBudgetRunes=2000
+//     的保头保尾下全丢，经网关的模型整个会话都看不到 skills）。块可多处出现，全部收集；
+//     行数门槛把 ponytail 强度表（1-2 行）等杂散 kebab 列表排除在外。
+//   - 其余文本走原 FoldedSystemBudgetRunes 保头保尾。
+//
+// 没有清单时返回 (nil, 原文)，调用方按原路径渲染。
+func foldedSystemParts(text string) (skillLines []string, rest string) {
+	lines := strings.Split(text, "\n")
+	const minSkillBlockLines = 4
+	var outLines []string
+	var curBlock []string
+	flush := func() {
+		if len(curBlock) >= minSkillBlockLines {
+			skillLines = append(skillLines, curBlock...)
+		} else {
+			outLines = append(outLines, curBlock...)
+		}
+		curBlock = nil
+	}
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if m := skillEntryRe.FindStringSubmatch(trimmed); m != nil {
+			desc := m[2]
+			// 描述截到首个句号（含），再兜底 rune 上限——保留触发语境的最短可读形态。
+			if i := strings.Index(desc, ". "); i > 0 {
+				desc = desc[:i+1]
+			}
+			curBlock = append(curBlock, "- "+m[1]+": "+truncateRunes(desc, 80))
+			continue
+		}
+		if len(curBlock) > 0 {
+			flush()
+		}
+		outLines = append(outLines, line)
+	}
+	if len(curBlock) > 0 {
+		flush()
+	}
+	if len(skillLines) == 0 {
+		return nil, text
+	}
+	return skillLines, strings.Join(outLines, "\n")
+}
+
+// skillEntryRe 匹配 skills 清单条目："- name: 描述"。name 限 kebab-case（Claude Code
+// 清单的实际形态），避免把 markdown 普通列表误当清单压缩。
+var skillEntryRe = regexp.MustCompile(`^- ([a-z0-9][a-z0-9-]{1,60}): (.+)$`)
+
+// foldSkillList 把压缩后的清单条目按 FoldedSkillListRunes 兜底。策略：名字优先——
+// 先全量写「- name」（名字即 Skill 工具的调用参数，全部在场是底线），剩余预算再按序
+// 把条目升级为「- name: 描述」（前段条目优先，与清单字母序一致）。
+func foldSkillList(entries []string) string {
+	bare := make([]string, len(entries))
+	for i, e := range entries {
+		name := strings.TrimPrefix(e, "- ")
+		if j := strings.Index(name, ": "); j > 0 {
+			name = name[:j]
+		}
+		bare[i] = "- " + name
+	}
+	fixed := 0
+	for _, b := range bare {
+		fixed += len([]rune(b)) + 1
+	}
+	if fixed > FoldedSkillListRunes {
+		// 名字都放不下：按序截尾（字母序在先的条目保留）。
+		var b strings.Builder
+		for _, bLine := range bare {
+			if b.Len()+len([]rune(bLine))+1 > FoldedSkillListRunes {
+				break
+			}
+			b.WriteString(bLine)
+			b.WriteString("\n")
+		}
+		return strings.TrimRight(b.String(), "\n")
+	}
+	// 名字全保后，剩余预算按序升级为带描述形态。
+	var b strings.Builder
+	left := FoldedSkillListRunes - fixed
+	for i, e := range entries {
+		if left >= len([]rune(e))-len([]rune(bare[i])) {
+			b.WriteString(e)
+			left -= len([]rune(e)) - len([]rune(bare[i]))
+		} else {
+			b.WriteString(bare[i])
+		}
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // splitMessagesSeed 带补种标志的折叠/切分主逻辑。
@@ -238,6 +333,7 @@ func (p *Provider) splitMessagesSeed(messages []ChatMessage, convID string, wafP
 	}
 
 	var contextParts []string
+	var skillsBlock string // skills 清单段：前置渲染（见 sections 组装处的 cap 头部保留区契约）
 	for i, msg := range messages {
 		if i == queryIdx || i == taskIdx || i >= skipFrom {
 			continue
@@ -254,7 +350,15 @@ func (p *Provider) splitMessagesSeed(messages []ChatMessage, convID string, wafP
 		switch msg.Role {
 		case "system":
 			if text != "" {
-				contextParts = append(contextParts, "[System]\n"+truncateMiddleRunes(text, FoldedSystemBudgetRunes))
+				// skills 清单独立压缩（独立预算），其余文本走常规保头保尾——
+				// 清单是模型调用 skills 的唯一依据，不能被散文预算挤掉。
+				skillLines, rest := foldedSystemParts(text)
+				if len(skillLines) > 0 {
+					skillsBlock = "[System skills]\n" + foldSkillList(skillLines)
+				}
+				if strings.TrimSpace(rest) != "" {
+					contextParts = append(contextParts, "[System]\n"+truncateMiddleRunes(rest, FoldedSystemBudgetRunes))
+				}
 			}
 		case "user":
 			if text != "" {
@@ -278,12 +382,18 @@ func (p *Provider) splitMessagesSeed(messages []ChatMessage, convID string, wafP
 	// 时间序正确，且恒落 capUpstreamQuery 头部 30% 保留区（与尾部同样安全）。
 	// 重放模式下待处理 tool-tail 也截预算（单条巨结果会吃光尾部窗口）；
 	// 普通对话把最新用户输入标注为 [User] 以保留角色边界。
-	sections := make([]string, 0, 3)
+	sections := make([]string, 0, 4)
 	taskBlock := ""
 	if taskIdx >= 0 {
 		if task := ExtractText(messages[taskIdx].Content); task != "" {
 			taskBlock = "[User (task)]\n" + truncateMiddleRunes(task, FoldedTextMsgBudgetRunes)
 		}
+	}
+	// skills 清单段恒置最前：落在 capUpstreamQuery 头部 30% 保留区，永不落入中段省略区——
+	// 折叠总量超 10000 时（如长会话 64K tool results），中段里的清单照样会被 cap 掐尾，
+	// 模型只看到半个名单（2026-09-17 端到端重放实测：[System skills] 在中段时尾部条目丢失）。
+	if skillsBlock != "" {
+		sections = append(sections, skillsBlock)
 	}
 	if !isToolTail && taskBlock != "" {
 		sections = append(sections, taskBlock)
