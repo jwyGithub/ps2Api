@@ -121,7 +121,13 @@ func foldedToolResultParts(msg ChatMessage, budget int) []string {
 	return parts
 }
 
+// splitMessages 保留原签名：非补种请求的入口。
 func (p *Provider) splitMessages(messages []ChatMessage, convID string, wafProbe bool) splitResult {
+	return p.splitMessagesSeed(messages, convID, wafProbe, false)
+}
+
+// splitMessagesSeed 带补种标志的折叠/切分主逻辑。
+func (p *Provider) splitMessagesSeed(messages []ChatMessage, convID string, wafProbe, contextSeed bool) splitResult {
 	toolIdx := toolTailIndex(messages)
 	isToolTail := toolIdx >= 0
 	hasConv := convID != ""
@@ -294,7 +300,11 @@ func (p *Provider) splitMessages(messages []ChatMessage, convID string, wafProbe
 		sections = append(sections, taskBlock)
 	}
 	tail := query
-	if isToolTail {
+	if contextSeed {
+		// 补种轮：tail 不渲染最新消息（服务端还不需要它），改为摘要指令——
+		// 模型复述任务状态即建立会话，第二轮增量带上最新消息。
+		tail = seedSummaryInstruction
+	} else if isToolTail {
 		tail = truncateMiddleRunes(query, FoldedTailToolResultRunes)
 	} else if queryIdx >= 0 && query != "" {
 		// 探针请求不加 “[User]\n” 角色标注：探针必须逐字复现可疑内容，任何前缀
@@ -326,3 +336,7 @@ func capUpstreamQuery(q string) string {
 	tailLen := limit - head - len([]rune(marker))
 	return string(runes[:head]) + marker + string(runes[len(runes)-tailLen:])
 }
+
+// seedSummaryInstruction 是补种轮的 tail 指令：让模型对折叠历史做一段话总结，
+// 不执行操作。摘要会留在服务端会话里供第二轮参照（折叠原文 + 摘要都在）。
+const seedSummaryInstruction = "[User]\n以上是此前对话的完整上下文。请用一段话总结当前任务状态与最近进展，不要执行任何操作、不要调用任何工具。"

@@ -130,6 +130,10 @@ type ChatRequest struct {
 	// Cloudflare 拦截——中和会掐灭已知特征（叶子轮假阴性），截断会破坏二分切片的
 	// 等长 padding（方法论：唯一变量是内容形状，不是长度）。
 	WafProbe bool `json:"-"`
+	// ContextSeed 标记本请求是「上下文补种」轮：冷启动折叠时把 tail（最新消息渲染）
+	// 替换为一段摘要指令，让上游模型复述任务状态后在服务端建立带完整历史的会话。
+	// 由 streamInternal 的补种逻辑注入，客户端不可见（json:"-"）。
+	ContextSeed bool `json:"-"`
 }
 
 type Result struct {
