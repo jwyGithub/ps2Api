@@ -37,6 +37,13 @@ func TestWafNeutralize(t *testing.T) {
 		{"< s c r i p t src=x>", "<" + zwsp + " s c r i p t src=x>"},
 		{"</ script>", "<" + zwsp + "/ script>"},
 		{"</script>", "<" + zwsp + "/script>"}, // 闭合形仍由规则 1 命中，不双重插入
+		// 分离形不只 script：规则 1 对全标签组统一容忍 < 与标签名之间的空白/反斜杠
+		//（2026-09-17 二次回归：WAF 文档第 3 节表格里的 `< img src=x onerror=…>`
+		// 示例经 CF 归一化剥空格还原为 <img…，成功/失败对照仅此一形态差异）。
+		{"< img src=x onerror=alert(1)>", "<" + zwsp + " img src=x onerror" + zwsp + "=alert(1)>"},
+		{"\\u003c img src=x", "\\u003c" + zwsp + " img src=x"},
+		{"<\tiframe src=x>", "<" + zwsp + "\tiframe src=x>"},
+		{"< img\nsrc=x>", "<" + zwsp + " img\nsrc=x>"},
 		// bin/cat 形（2026-09-11 实测）：cat 前缀词跟在 bin/ 后被 Cloudflare 当作
 		// cat 命令执行路径（./bin/catpaw2api、/bin/cat、大写均 403；bin/ls、bin/sh、
 		// bin/rm、bin/python、bin/curl、./cat、裸 cat 均放行——cat 是唯一触发命令）。
@@ -145,7 +152,7 @@ func TestWafSignatureProbesAndCounts(t *testing.T) {
 	if WafSignatureProbes()[0] == "mutated" {
 		t.Fatal("WafSignatureProbes must return a copy")
 	}
-	// 计数：bin/cat ×1、onerror= ×1，其余不出现；转义形 <script 也计数
+	// 计数：bin/cat ×1、onerror= ×1、<img ×1，其余不出现；转义形 <script 也计数
 	body := `{"q":"./bin/catpaw2api -config x","h":"<img onerror=alert(1)>","e":"\\u003cscript\\u003e"}`
 	got := WafSignatureCounts(body)
 	if got["bin/cat"] != 1 {
@@ -157,7 +164,10 @@ func TestWafSignatureProbesAndCounts(t *testing.T) {
 	if got["<script"] != 1 {
 		t.Fatalf("escaped <script should count as 1, got %v", got)
 	}
-	if len(got) != 3 {
+	if got["<img"] != 1 {
+		t.Fatalf("<img should count as 1 (2026-09-17 regression), got %v", got)
+	}
+	if len(got) != 4 {
 		t.Fatalf("only nonzero probes expected, got %v", got)
 	}
 	if n := len(WafSignatureCounts("干净文本，无特征")); n != 0 {
@@ -167,7 +177,7 @@ func TestWafSignatureProbesAndCounts(t *testing.T) {
 		t.Fatalf("empty body should give empty counts, got %d", n)
 	}
 	// 与既有总数口径一致：各特征计数之和 == WafSignatureHitCount
-	if total := WafSignatureHitCount(body); got["bin/cat"]+got["onerror="]+got["<script"] != total {
+	if total := WafSignatureHitCount(body); got["bin/cat"]+got["onerror="]+got["<script"]+got["<img"] != total {
 		t.Fatalf("per-probe sum should equal WafSignatureHitCount: %v vs %d", got, total)
 	}
 }

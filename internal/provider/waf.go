@@ -25,7 +25,7 @@ var wafNeutralizeRules = []struct {
 	pattern *regexp.Regexp
 	replace string
 }{
-	{regexp.MustCompile(`(?i)(<|\\u003c)([!/?]?(?:script|iframe|svg|template|object|embed|form|style|link|meta|base|img|input|body|html|doctype)\b)`), "${1}" + wafBreak + "${2}"},
+	{regexp.MustCompile(`(?i)(<|\\u003c)([\s\\]*[!/?]?[\s\\]*(?:script|iframe|svg|template|object|embed|form|style|link|meta|base|img|input|body|html|doctype)\b)`), "${1}" + wafBreak + "${2}"},
 	// script 分离形（2026-09-17 回归实测）：CF 归一化剥掉空白与反斜杠后，
 	// < script / <scr ipt / <\script 全部还原为 <script 确定性 403（2026-09-09
 	// 探针表早已钉住），而上面的规则在 < 与标签名之间不容忍任何字符，全部穿透。

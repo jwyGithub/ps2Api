@@ -119,7 +119,7 @@ func TestSeedConversationStoresPrefixMapping(t *testing.T) {
 	msgs := []ChatMessage{mustMsg(t, "user", "TASK 原始任务")}
 	for i := 0; i < 4; i++ {
 		msgs = append(msgs, *assistantFollowup(&Result{Content: "回复" + strings.Repeat("y", 100)}))
-		msgs = append(msgs, mustMsg(t, "user", "跟进" + strings.Repeat("z", 100)))
+		msgs = append(msgs, mustMsg(t, "user", "跟进"+strings.Repeat("z", 100)))
 	}
 	msgs = append(msgs, mustMsg(t, "user", "最新消息"))
 	req := &ChatRequest{Model: "claude-opus-4-8", Messages: msgs}
@@ -291,7 +291,7 @@ func mockPostmanServer(t *testing.T, conversationID string, bodies *[]map[string
 }
 
 // seedTestAccount 构造指向 mock server 的账号。
-func seedTestAccount(t *testing.T, srv *httptest.Server) *store.Account {
+func seedTestAccount(t *testing.T, _ *httptest.Server) *store.Account {
 	t.Helper()
 	tokens, _ := json.Marshal(map[string]string{
 		"access_token": "x", "user_id": "u", "workspace_id": "w",

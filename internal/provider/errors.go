@@ -93,6 +93,10 @@ var wafSignatureProbes = []string{
 	// bin/cat：cat 前缀词跟在 bin/ 后被当作 cat 命令执行路径（2026-09-11 实测
 	// 确认的第二类内容签名，如 ./bin/catpaw2api -config …；详见 waf.go 注释）。
 	"bin/cat",
+	// img 分离形（2026-09-17 二次回归）：文档第 3 节的 `< img src=x onerror=…>`
+	// 示例经 CF 归一化剥空格还原为 <img… 触发 403——注意 09-09 实测裸 img 曾放行，
+	// 同形态如今被拦，说明 CF 托管规则已演进，该行结论过时。
+	"<img",
 	// script 分离形：CF 归一化剥空白/反斜杠后还原为 <script（2026-09-17 由本仓库
 	// WAF 文档自身触发回归确认）。中和规则已逐字母容忍分离符，此探针钉住该形态，
 	// 让 raw_sig 判别不再漏报。
