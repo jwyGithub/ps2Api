@@ -265,6 +265,7 @@ paths:
                         createdAt: { type: string }
                         requestBytes: { type: integer }
                         accountEmail: { type: string }
+                        conversationId: { type: string }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
 
@@ -284,6 +285,16 @@ paths:
               schema:
                 type: object
                 properties:
+                  log:
+                    type: object
+                    properties:
+                      id: { type: integer }
+                      createdAt: { type: string }
+                      accountEmail: { type: string }
+                      model: { type: string }
+                      requestBytes: { type: integer }
+                      errorMessage: { type: string, nullable: true }
+                      conversationId: { type: string }
                   signatureCounts:
                     type: object
                     additionalProperties: { type: integer }
@@ -366,7 +377,7 @@ paths:
           description: 已中止
           content:
             application/json:
-              schema: { type: object, properties: { success: { type: boolean } } }
+              schema: { type: object, properties: { status: { type: string, description: job 实际状态（running/aborted/done/error），对已结束 job 中止是 no-op，返回实际状态 } } }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/sql-query:
@@ -419,6 +430,7 @@ paths:
                   total: { type: integer }
                   page: { type: integer }
                   pageSize: { type: integer }
+                  grouped: { type: boolean, description: 恒为 true（按指纹会话分组） }
 
   /api/logs:
     get:
