@@ -48,6 +48,14 @@ var wafNeutralizeRules = []struct {
 	// bin/ls、bin/sh、bin/rm、bin/python、bin/curl、`./cat`、裸 `cat` 均放行，
 	// 即特征是字面量 bin/cat（cat 是唯一触发命令），ZWSP 插在 bin/ 与 cat 之间。
 	{regexp.MustCompile(`(?i)(s?bin/)(cat)`), "${1}" + wafBreak + "${2}"},
+	// shell 命令行注入形（2026-09-17 20:15 实测，线上体行级二分 ~20 轮定位）：
+	// 反引号/代码围栏上下文里的 curl/wget + 单连字符 flag + 参数 触发 CF
+	// 命令注入托管规则——`curl -o f url`、```\ncurl -o f url\n```（无语言标注）、
+	// ` wget -O f url` 均 403；`curl "y"`、`curl -o`（flag 无值）、`--longflag`、
+	// -o-f 紧连、```bash\n…（有语言标注）、无 backtick 的裸 curl、ls/cat/rm/git
+	// 等 200。ZWSP 插在 cu/wg 词内（实测词内与词后/backtick 后均放行，词内最稳、
+	// 与 bin/cat 同款）。backtick 群与 curl 之间允许空格（` curl 也拦），幂等。
+	{regexp.MustCompile("(?s)(`{1,3})([^`]{0,40}?)(cu[\\w]*rl|wg[\\w]*et)(\\s+-[^\\s-][^\\s]*\\s+[^\\s])"), "${1}${2}" + wafBreak + "${3}${4}"},
 }
 
 // wafNeutralizeEnabled 是中和的 kill-switch：GATEWAY_DISABLE_WAF_NEUTRALIZE=1 时关闭
