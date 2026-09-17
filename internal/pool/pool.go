@@ -102,13 +102,16 @@ func quotaExhausted(acc *store.Account) bool {
 // skipExhausted 为真时额外跳过 AI 用量额度已耗尽（quotaExhausted）的账号——这类号即便
 // 速率窗口新鲜（RateRemaining 高）也发不出有效结果，若不跳会在 403 换号「选额度最满」策略里
 // 反被优先选中，白白浪费重试预算。
-//   - mode=RoundRobin（默认/普通选号）：从轮询起点 (last+1) 出发，以 inFlight 负载升序为主键、
-//     「是否仍在软预留窗口内」升序为次键挑账号——即同等负载下优先挑没被别的客户端占用的号，
-//     把多客户端摊到不同账号上；仅当命中「负载 0 且未被预留」的理想账号才提前返回。预留只是
-//     软避让、永不淘汰账号：全被预留时最优候选照样是某个被预留号，不影响可用性。
+//   - mode=RoundRobin（默认/普通选号）：先按「从未用过优先」分层——LastUsedAt 为 nil 的号
+//     （从没承接过任何请求）整体压过用过的号，同层按轮询起点（即 id 升序，ListAccounts
+//     固定 ORDER BY id）取最早者，把新号先消耗一轮再进入常规轮询；同层内仍以 inFlight 负载
+//     升序为主键、「是否仍在软预留窗口内」升序为次键——即同等负载下优先挑没被别的客户端
+//     占用的号，把多客户端摊到不同账号上；仅当命中「负载 0 且未被预留」的理想账号才提前返回。
+//     预留只是软避让、永不淘汰账号：全被预留时最优候选照样是某个被预留号，不影响可用性。
 //   - mode=Ratio/Absolute（403 换号）：以剩余额度（比例或绝对值）降序为主键、
 //     inFlight 负载升序为次键，必须遍历全部账号以找出额度最高者（不能提前 break）。
-//     额度同、负载同时由轮询起点决定先后。软预留避让只作用于 RoundRobin，不介入 403 换号
+//     额度并列时「从未用过」的号优先（三元并列再比负载），避免刚重置/新导入的号
+//     被老号长期压制。软预留避让只作用于 RoundRobin，不介入 403 换号
 //     （那一步的目标是切到「最新鲜、余量最满」的号，与占用避让正交）。
 func (p *Pool) pickIndex(accounts []*store.Account, excluded map[int64]bool, now time.Time, skipCooldown, skipExhausted bool, mode QuotaMode) int {
 	start := (p.last + 1) % len(accounts)
@@ -116,6 +119,16 @@ func (p *Pool) pickIndex(accounts []*store.Account, excluded map[int64]bool, now
 	bestLoad := int(^uint(0) >> 1)
 	bestReserved := 2 // 0=未预留,1=预留中；初值 2 保证首个候选必被采纳
 	bestRemaining, bestLimit := -1, 0
+	bestNeverUsed := false
+	// 池子里是否还有从未用过的号：决定提前收工条件是否适用（已用层的理想号
+	// 不能提前收工，否则会漏看后面的未用号）。
+	anyNeverUsed := false
+	for _, acc := range accounts {
+		if acc.LastUsedAt == nil {
+			anyNeverUsed = true
+			break
+		}
+	}
 	for i := 0; i < len(accounts); i++ {
 		idx := (start + i) % len(accounts)
 		acc := accounts[idx]
@@ -131,35 +144,45 @@ func (p *Pool) pickIndex(accounts []*store.Account, excluded map[int64]bool, now
 			continue
 		}
 		load := p.inFlight[acc.ID]
+		neverUsed := acc.LastUsedAt == nil
 		if mode != QuotaModeRoundRobin {
 			if best == -1 {
-				best, bestRemaining, bestLimit, bestLoad = idx, acc.RateRemaining, acc.RateLimit, load
+				best, bestRemaining, bestLimit, bestLoad, bestNeverUsed = idx, acc.RateRemaining, acc.RateLimit, load, neverUsed
 				continue
 			}
 			switch quotaCmp(mode, acc.RateRemaining, acc.RateLimit, bestRemaining, bestLimit) {
 			case 1:
-				best, bestRemaining, bestLimit, bestLoad = idx, acc.RateRemaining, acc.RateLimit, load
+				best, bestRemaining, bestLimit, bestLoad, bestNeverUsed = idx, acc.RateRemaining, acc.RateLimit, load, neverUsed
 			case 0:
-				if load < bestLoad {
-					best, bestRemaining, bestLimit, bestLoad = idx, acc.RateRemaining, acc.RateLimit, load
+				if (neverUsed && !bestNeverUsed) || (neverUsed == bestNeverUsed && load < bestLoad) {
+					best, bestRemaining, bestLimit, bestLoad, bestNeverUsed = idx, acc.RateRemaining, acc.RateLimit, load, neverUsed
 				}
 			}
 			continue
 		}
-		// 主键 inFlight 负载升序、次键「软预留」升序：同等负载下优先未被占用的号。
-		reserved := 0
-		if until, ok := p.reservedUntil[acc.ID]; ok && now.Before(until) {
-			reserved = 1
+		// 主键「从未用过优先」、次键 inFlight 负载升序、三键「软预留」升序：
+		// 池子里还有从没承接过请求的号时先消耗它们（用最老的：accounts 按 id 升序，
+		// 从起点轮转天然先碰到 id 小的）；全部用过一轮后回到常规负载轮询。
+		// 同分下从起点轮转取先到者，即最早注册的号。
+		if best == -1 || neverUsed && !bestNeverUsed ||
+			(neverUsed == bestNeverUsed && (load < bestLoad || (load == bestLoad && reservedOf(p, acc.ID, now) < bestReserved))) {
+			best, bestLoad, bestReserved, bestNeverUsed = idx, load, reservedOf(p, acc.ID, now), neverUsed
 		}
-		if load < bestLoad || (load == bestLoad && reserved < bestReserved) {
-			best, bestLoad, bestReserved = idx, load, reserved
-		}
-		// 仅「负载 0 且未被预留」才是理想账号，可提前收工；否则继续找更优的。
-		if load == 0 && reserved == 0 {
+		// 仅「未用层（或无未用号时的当前层）、负载 0 且未被预留」才是理想账号，可提前收工；
+		// 否则继续找更优的（包括更高优先层的未用号）。
+		if neverUsed == bestNeverUsed && (neverUsed || !anyNeverUsed) && load == 0 && bestReserved == 0 {
 			break
 		}
 	}
 	return best
+}
+
+// reservedOf 返回账号当前是否处于软预留窗口内（0=否,1=是）。
+func reservedOf(p *Pool, id int64, now time.Time) int {
+	if until, ok := p.reservedUntil[id]; ok && now.Before(until) {
+		return 1
+	}
+	return 0
 }
 
 // quotaCmp 按 mode 比较两账号的剩余额度，返回 1(a 更优)/-1(b 更优)/0(相等)。

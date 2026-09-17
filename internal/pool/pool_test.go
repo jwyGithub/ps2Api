@@ -253,3 +253,66 @@ func TestReservationExpiresRestoresAvailability(t *testing.T) {
 		t.Fatalf("expired reservation should no longer avoid a1(%d); got %d", ids["a1@test.com"], acc.ID)
 	}
 }
+
+// 普通轮询应优先选用从未承接过请求（LastUsedAt 为 nil）的号，且从最老的 id 开始；
+// 全部用过一轮后回到常规轮询。
+func TestNextPrefersNeverUsedAccounts(t *testing.T) {
+	s, ids := newTestStore(t)
+	p := New(s)
+	// 标记 a1 已用过（其他两个保持 nil）。
+	if err := s.MarkUsed(ids["a1@test.com"]); err != nil {
+		t.Fatal(err)
+	}
+
+	// 第一次：a2(最小 id 的未用号)应胜过已用过的 a1 和未用的 a3。
+	acc, err := p.Next(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acc.ID != ids["a2@test.com"] {
+		t.Fatalf("expected never-used a2(%d), got %d", ids["a2@test.com"], acc.ID)
+	}
+	if err := s.MarkUsed(acc.ID); err != nil {
+		t.Fatal(err)
+	}
+	p.Done(acc.ID)
+
+	// 第二次：a3 是剩下的唯一未用号。
+	acc, err = p.Next(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acc.ID != ids["a3@test.com"] {
+		t.Fatalf("expected never-used a3(%d), got %d", ids["a3@test.com"], acc.ID)
+	}
+	if err := s.MarkUsed(acc.ID); err != nil {
+		t.Fatal(err)
+	}
+	p.Done(acc.ID)
+
+	// 全部用过一轮后：回到常规轮询，从 last+1 起点选到 a1。
+	acc, err = p.Next(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acc.ID != ids["a1@test.com"] {
+		t.Fatalf("all used; expected round-robin a1(%d), got %d", ids["a1@test.com"], acc.ID)
+	}
+}
+
+// 403 换号的额度优先路径：额度并列时从未用过的号优先。
+func TestNextByQuotaPrefersNeverUsedOnTie(t *testing.T) {
+	s, ids := newTestStore(t)
+	p := New(s)
+	// a1 已用过，a2/a3 未用；三者剩余额度相同（默认都是 0/0，quotaCmp 判为并列）。
+	if err := s.MarkUsed(ids["a1@test.com"]); err != nil {
+		t.Fatal(err)
+	}
+	acc, err := p.NextByQuota(nil, QuotaModeAbsolute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acc.ID != ids["a2@test.com"] {
+		t.Fatalf("quota tie: expected never-used a2(%d), got %d", ids["a2@test.com"], acc.ID)
+	}
+}
