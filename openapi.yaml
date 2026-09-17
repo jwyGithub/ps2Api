@@ -6,7 +6,7 @@ info:
     Postman2API 网关的账号管理接口，供其他服务以标准 REST/JSON 方式集成。
 
     ## 鉴权
-    所有 `/api/accounts*` 端点支持两种请求头（二选一）：
+    所有 `/api/accounts*` 与排查类端点（WAF 检测、SQL 查询、请求日志等，见 Ops tag）支持两种请求头（二选一）：
       - `Authorization: Bearer <key>`（OpenAI 风格）
       - `x-api-key: <key>`（Anthropic 风格）
 
@@ -27,6 +27,8 @@ servers:
 tags:
   - name: Accounts
     description: 账号池的增删查、导入导出、启停与额度刷新
+  - name: Ops
+    description: 运维排查只读端点 + WAF 在线探针（任何有效 API Key 可调，与 Accounts 同款鉴权）
 
 security:
   - BearerAuth: []
@@ -220,6 +222,228 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /api/waf-signatures:
+    get:
+      tags: [Ops]
+      summary: WAF 签名子串表
+      description: 返回 403 取证用的特征子串表副本（全小写、大小写不敏感计数）。
+      responses:
+        "200":
+          description: 签名列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  signatures:
+                    type: array
+                    items: { type: string }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/waf/baselines:
+    get:
+      tags: [Ops]
+      summary: 指定失败日志的对照候选
+      description: 返回与目标 403 行可对照的成功日志候选（自动三级回退 + 手动下拉源）。
+      parameters:
+        - { name: log_id, in: query, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: 对照候选列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer }
+                        createdAt: { type: string }
+                        requestBytes: { type: integer }
+                        accountEmail: { type: string }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/waf/analyze:
+    get:
+      tags: [Ops]
+      summary: 对一条 403 日志做离线分析
+      description: 返回签名计数、对照 diff（baseline_id 缺省三级回退自动挑）、当天体积分桶。零出站请求。
+      parameters:
+        - { name: log_id, in: query, required: true, schema: { type: integer } }
+        - { name: baseline_id, in: query, required: false, schema: { type: integer } }
+      responses:
+        "200":
+          description: 分析结果（signatureCounts / baseline / diff / sizeBuckets）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  signatureCounts:
+                    type: object
+                    additionalProperties: { type: integer }
+                  baseline:
+                    type: object
+                    nullable: true
+                  diff:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        path: { type: string }
+                        kind: { type: string, enum: [added, changed, removed] }
+                        baselineLen: { type: integer }
+                        targetLen: { type: integer }
+                        baselinePreview: { type: string }
+                        targetPreview: { type: string }
+                  sizeBuckets:
+                    type: array
+                    items: { type: object }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/waf/probe:
+    post:
+      tags: [Ops]
+      summary: 发起 WAF 在线探针（叶子二分）
+      description: |
+        对差异叶子逐个/二分向上游发探针请求验证触发行。单飞：已有 job 运行中回 409。
+        job 不持久化（重启即丢）。removed 叶子不可探测；叶子全文超上游 query 上限回 400。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [log_id, baseline_id, paths]
+              properties:
+                log_id: { type: integer }
+                baseline_id: { type: integer }
+                paths:
+                  type: array
+                  items: { type: string }
+                  description: 差异叶子路径（waf/analyze 的 diff[].path）
+                account_id: { type: integer, description: 缺省取首个活跃账号 }
+                model: { type: string, description: 缺省 claude-opus-4-8 }
+      responses:
+        "200":
+          description: job 已发起
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id: { type: string }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/InvalidRequest" }
+
+  /api/waf/probe/{job_id}:
+    get:
+      tags: [Ops]
+      summary: 探针 job 进度轮询
+      parameters:
+        - { name: job_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: job 快照（status/phase/variants/hits/conclusions/summary）
+          content:
+            application/json:
+              schema: { type: object }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Ops]
+      summary: 中止探针 job
+      parameters:
+        - { name: job_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: 已中止
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/sql-query:
+    post:
+      tags: [Ops]
+      summary: SQLite 只读查询
+      description: 仅接受 SELECT/WITH/EXPLAIN；写操作与 PRAGMA 一律拒绝。最多 200 行，单元格超长截断。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sql]
+              properties:
+                sql: { type: string }
+      responses:
+        "200":
+          description: 查询结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  columns: { type: array, items: { type: string } }
+                  rows:
+                    type: array
+                    items: { type: array }
+                  count: { type: integer }
+                  truncated: { type: boolean }
+                  elapsedMs: { type: integer }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+
+  /api/request-logs:
+    get:
+      tags: [Ops]
+      summary: 请求日志（按指纹会话分组分页）
+      parameters:
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: pageSize, in: query, schema: { type: integer, default: 20, maximum: 100 } }
+      responses:
+        "200":
+          description: 分组日志
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { type: object } }
+                  total: { type: integer }
+                  page: { type: integer }
+                  pageSize: { type: integer }
+
+  /api/logs:
+    get:
+      tags: [Ops]
+      summary: 最近调用日志
+      responses:
+        "200":
+          description: 日志列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { type: object } }
+
+  /api/stats:
+    get:
+      tags: [Ops]
+      summary: 网关统计
+      responses:
+        "200":
+          description: 统计对象
+          content:
+            application/json:
+              schema: { type: object }
 
 components:
   securitySchemes:
