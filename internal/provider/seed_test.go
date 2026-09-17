@@ -67,6 +67,30 @@ func TestShouldSeed(t *testing.T) {
 		t.Fatal("short history must not seed")
 	}
 
+	// 恰好 7 条含 assistant 的历史 → true（len > 6 即触发）
+	exactly7 := []ChatMessage{mustMsg(t, "user", "任务")}
+	for i := 0; i < 2; i++ {
+		exactly7 = append(exactly7, *assistantFollowup(&Result{Content: "回复"}))
+		exactly7 = append(exactly7, mustMsg(t, "user", "跟进"))
+	}
+	exactly7 = append(exactly7, *assistantFollowup(&Result{Content: "回复"}))
+	exactly7 = append(exactly7, mustMsg(t, "user", "最新")) // 共 7 条
+	if len(exactly7) != 7 {
+		t.Fatalf("fixture must have exactly 7 messages, got %d", len(exactly7))
+	}
+	if !p.shouldSeed(2, &ChatRequest{Messages: exactly7}) {
+		t.Fatal("exactly 7 messages with assistant history should seed")
+	}
+
+	// 纯 user 的 9 条历史（无 assistant/tool）→ false（白种配额）
+	userOnly := make([]ChatMessage, 0, 9)
+	for i := 0; i < 9; i++ {
+		userOnly = append(userOnly, mustMsg(t, "user", "u"))
+	}
+	if p.shouldSeed(1, &ChatRequest{Messages: userOnly}) {
+		t.Fatal("user-only history must not seed")
+	}
+
 	// WafProbe → false
 	reqProbe := &ChatRequest{Messages: history, WafProbe: true}
 	if p.shouldSeed(1, reqProbe) {

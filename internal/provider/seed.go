@@ -10,9 +10,10 @@ import (
 // contextSeedEnabled 报告冷启动补种开关。默认开启；GATEWAY_CONTEXT_SEED=0 关闭。
 func contextSeedEnabled() bool { return os.Getenv("GATEWAY_CONTEXT_SEED") != "0" }
 
-// seedHistoryMinMessages 是触发补种的最小历史消息数（含最新消息）。
+// seedHistoryThresholdMessages 是触发补种的最小历史消息数（含最新消息），
+// 严格大于才触发：len > 6 即 7 条起补种。
 // 更短的会话折叠产物不超 10000 rune，补种白花一次上游配额。
-const seedHistoryMinMessages = 7
+const seedHistoryThresholdMessages = 7
 
 // shouldSeed 报告本次请求是否应做上下文补种。四个条件全满足：
 // 冷启动（无会话命中）、非 tool-tail 重放、历史足够长、开关开启。
@@ -24,7 +25,12 @@ func (p *Provider) shouldSeed(accID int64, req *ChatRequest) bool {
 	if toolTail(req.Messages) {
 		return false
 	}
-	if len(req.Messages) <= seedHistoryMinMessages {
+	// 纯 user 历史（无 assistant/tool）在 LookupConversation 的 hasReusableHistory
+	// 前置下第二轮映射永不命中，补种纯浪费一次上游配额，直接否决。
+	if !hasReusableHistory(req.Messages) {
+		return false
+	}
+	if len(req.Messages) < seedHistoryThresholdMessages {
 		return false
 	}
 	return p.LookupConversation(accID, req.Messages) == ""
