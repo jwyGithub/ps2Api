@@ -270,17 +270,28 @@ func (p *Provider) splitMessages(messages []ChatMessage, convID string, wafProbe
 			contextParts = append(contextParts, block)
 		}
 	}
-	// 折叠：历史在前，任务居中（后置渲染，紧贴最新一轮，落在 cap 的尾部保留区），
-	// 最新一轮在后。重放模式下待处理 tool-tail 也截预算（单条巨结果会吃光尾部窗口）；
+	// 折叠分段顺序。tool-tail 重放：历史在前，本轮任务居中（紧贴待处理 tool 结果，
+	// 落在 cap 的尾部保留区），2026-09-15 契约。普通续聊：原始任务置于最前——
+	// 2026-09-17 线上事故：任务「后置渲染」紧贴最新消息，时间序等价于 assistant 答完后
+	// 用户又下达了原始任务，模型把首任务读成新指令与最新消息并列，答非所问。前置则
+	// 时间序正确，且恒落 capUpstreamQuery 头部 30% 保留区（与尾部同样安全）。
+	// 重放模式下待处理 tool-tail 也截预算（单条巨结果会吃光尾部窗口）；
 	// 普通对话把最新用户输入标注为 [User] 以保留角色边界。
 	sections := make([]string, 0, 3)
+	taskBlock := ""
+	if taskIdx >= 0 {
+		if task := ExtractText(messages[taskIdx].Content); task != "" {
+			taskBlock = "[User (task)]\n" + truncateMiddleRunes(task, FoldedTextMsgBudgetRunes)
+		}
+	}
+	if !isToolTail && taskBlock != "" {
+		sections = append(sections, taskBlock)
+	}
 	if context := strings.Join(contextParts, "\n\n"); context != "" {
 		sections = append(sections, context)
 	}
-	if taskIdx >= 0 {
-		if task := ExtractText(messages[taskIdx].Content); task != "" {
-			sections = append(sections, "[User (task)]\n"+truncateMiddleRunes(task, FoldedTextMsgBudgetRunes))
-		}
+	if isToolTail && taskBlock != "" {
+		sections = append(sections, taskBlock)
 	}
 	tail := query
 	if isToolTail {

@@ -658,6 +658,60 @@ func TestFoldedReplayKeepsOriginalTaskUnderOversizedHistory(t *testing.T) {
 	}
 }
 
+// TestFoldedReplayKeepsRecentAssistantContext 复现 2026-09-17 线上事故：
+// 长会话 + 账号 quota 耗尽换号 → 冷启动折叠重放。原始任务被「后置渲染」在
+// 最近一轮 assistant 回复之后、最新消息之前，时间序上等价于「assistant 答完后
+// 用户又下达了原始任务」——模型把「授权平台」读成新指令，与最新消息并列当成
+// 两个并行任务，答非所问。
+// 修复契约：普通续聊折叠时原始任务置于 query 最前（时间序正确 + 恒落 cap 的
+// 头部保留区）；tool-tail 重放路径不变（本轮问题仍紧贴待处理工具结果）。
+func TestFoldedReplayKeepsRecentAssistantContext(t *testing.T) {
+	p := New()
+	// 首条 user 消息即原始任务（多轮普通续聊的典型形态：首条=首任务）。
+	msgs := []ChatMessage{
+		mustMsg(t, "user", "TASK_MARKER 设备管理导入 drawer 增加授权平台字段"),
+	}
+	// 多轮历史：中间大量 assistant/user 轮次把折叠产物撑过 10000 rune，
+	// 且最后一轮 assistant 明确留下「我可以再调 X」的承诺。
+	assistantFollowUps := []string{}
+	for i := 0; i < 8; i++ {
+		res := &Result{Content: strings.Repeat("分析过程与结论. ", 400)} // ~3.6K runes/轮
+		asst := assistantFollowup(res)
+		if asst == nil {
+			t.Fatal("assistantFollowup returned nil")
+		}
+		msgs = append(msgs, *asst)
+		assistantFollowUps = append(assistantFollowUps, res.Content)
+		msgs = append(msgs, mustMsg(t, "user", fmt.Sprintf("继续调整第 %d 轮", i)))
+	}
+	lastAssistant := &Result{Content: "改完了。一点提醒:如果你想让永久有效的记录直接只显示「永久有效」，我可以再调详情弹窗和列表列。LAST_COMMITMENT"}
+	msgs = append(msgs, *assistantFollowup(lastAssistant))
+	msgs = append(msgs, mustMsg(t, "user", "详情弹窗和列表列(只判断 effectiveTo == null 就显示「永久有效」)"))
+
+	body := p.buildBody(&ChatRequest{Messages: msgs}, &Tokens{PostmanSID: "sid", UserID: "u", WorkspaceID: "w", WorkspaceSubdomain: "sub"}, "test", 1)
+	query := body["input"].(map[string]interface{})["query"].(string)
+	if n := len([]rune(query)); n > MaxUpstreamQueryRunes {
+		t.Fatalf("query exceeds upstream limit: %d > %d", n, MaxUpstreamQueryRunes)
+	}
+
+	// 原始任务必须存活（09-10 契约），且必须位于 query 最前（时间序修复）。
+	if !strings.Contains(query, "TASK_MARKER") {
+		t.Fatalf("folded replay lost the original task")
+	}
+	taskPos := strings.Index(query, "TASK_MARKER")
+	lastCommittedPos := strings.Index(query, "LAST_COMMITMENT")
+	if lastCommittedPos == -1 {
+		t.Fatalf("recent assistant commitment must survive folding")
+	}
+	if taskPos > lastCommittedPos {
+		t.Fatalf("original task rendered AFTER recent assistant reply: task@%d > commitment@%d — model reads it as a new instruction", taskPos, lastCommittedPos)
+	}
+	// 最新消息必须在最后。
+	if !strings.HasSuffix(strings.TrimSpace(query), "「永久有效」)") {
+		t.Fatalf("latest user message must be the final section, got tail: %q", query[len(query)-100:])
+	}
+}
+
 // TestInvalidateConversationKeepsStickyOwner 验证会话失效的株连范围：
 // 死会话只删 (账号,指纹)→conversationId 映射，保留 指纹→账号 的粘性归属——
 // 会话损坏丢的是服务端上下文，不该连带换号。下一轮仍粘回原账号重放一轮、
