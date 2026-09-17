@@ -20,7 +20,7 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 	} else if toolTail(req.Messages) && !p.tailToolCallsUntracked(accountID, req.Messages) {
 		convID = ""
 	}
-	split := p.splitMessages(req.Messages, convID, req.WafProbe)
+	split := p.splitMessagesSeed(req.Messages, convID, req.WafProbe, req.ContextSeed)
 	tools, toolInstruction := selectedTools(req.Tools, req.ToolChoice)
 	if len(tools) > 0 {
 		if toolInstruction != "" {
