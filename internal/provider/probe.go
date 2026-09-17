@@ -25,7 +25,7 @@ func (p *Provider) ProbeQuota(ctx context.Context, acc *store.Account) *Result {
 		return res
 	}
 	req := &ChatRequest{
-		Model:    "claude-haiku-4-5",
+		Model:    "claude-opus-4-8",
 		Messages: []ChatMessage{{Role: "user", Content: json.RawMessage(`"ping"`)}},
 	}
 	postmanModel, _ := ResolvePostmanModel(req.Model)

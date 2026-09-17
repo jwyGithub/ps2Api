@@ -231,7 +231,7 @@ func (s *Server) wafProbeStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Model == "" {
-		body.Model = "claude-haiku-4-5"
+		body.Model = "claude-opus-4-8"
 	}
 	target, err := s.Store.GetRequestLog(body.LogID)
 	if err != nil {

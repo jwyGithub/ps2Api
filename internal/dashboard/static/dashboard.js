@@ -785,7 +785,7 @@
     var modelEl = document.getElementById('wafProbeModel');
     var accId = accEl ? accEl.value.trim() : '';
     var model = modelEl ? modelEl.value.trim() : '';
-    if (!model) model = 'claude-haiku-4-5';
+    if (!model) model = 'claude-opus-4-8';
     if (!confirm('发起在线探针：' + (1 + paths.length) + ' 个变体（对照 1 + 叶子 ' + paths.length +
       '），每变体 2 次真实请求；命中后另有行级二分（约 log2(行数) 轮）。\n账号：' +
       (accId ? '#' + accId : '自动（首个活跃号）') + '\n模型：' + model +

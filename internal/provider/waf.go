@@ -26,6 +26,14 @@ var wafNeutralizeRules = []struct {
 	replace string
 }{
 	{regexp.MustCompile(`(?i)(<|\\u003c)([!/?]?(?:script|iframe|svg|template|object|embed|form|style|link|meta|base|img|input|body|html|doctype)\b)`), "${1}" + wafBreak + "${2}"},
+	// script 分离形（2026-09-17 回归实测）：CF 归一化剥掉空白与反斜杠后，
+	// < script / <scr ipt / <\script 全部还原为 <script 确定性 403（2026-09-09
+	// 探针表早已钉住），而上面的规则在 < 与标签名之间不容忍任何字符，全部穿透。
+	// 触发载荷是本仓库 WAF 排查文档自身——文中引用的「插空格无效」示例成了真实
+	// 出站内容。分离符（[\s\\]，恰为归一化剥掉的字符集）只逐字母容忍 script：
+	// script 家族是唯一实测标签签名，其余标签的分离形未见真实流量（需要时同法扩词）。
+	// 幂等：ZWSP 不属于 [\s\\]，破坏后的形态不再命中。
+	{regexp.MustCompile(`(?i)(<|\\u003c)([\s\\]*[!/?]?[\s\\]*s[\s\\]*c[\s\\]*r[\s\\]*i[\s\\]*p[\s\\]*t)`), "${1}" + wafBreak + "${2}"},
 	{regexp.MustCompile(`(?i)(\bon[a-z]+)(\s*=)`), "${1}" + wafBreak + "${2}"},
 	{regexp.MustCompile(`(?i)(javascript|vbscript)(:)`), "${1}" + wafBreak + "${2}"},
 	{regexp.MustCompile(`(?i)(v-on|@)(:|click)`), "${1}" + wafBreak + "${2}"},

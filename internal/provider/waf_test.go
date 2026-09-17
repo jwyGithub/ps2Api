@@ -27,6 +27,16 @@ func TestWafNeutralize(t *testing.T) {
 		// 转义形：wrap 的 json.Marshal / 客户端双重编码产生的 "<" 字面量转义序列。
 		{"\\u003cscript\\u003ex\\u003c/script\\u003e",
 			"\\u003c" + zwsp + "script\\u003ex\\u003c" + zwsp + "/script\\u003e"},
+		// script 分离形（2026-09-17 回归）：本仓库 WAF 文档里「插空格无效」示例
+		// 作为真实出站内容触发 403——CF 归一化剥空白/反斜杠后还原为 <script。
+		// 规则须逐字母容忍分离符，ZWSP 插在 < 与首个字母之间。
+		{"< script>", "<" + zwsp + " script>"},
+		{"<scr ipt>", "<" + zwsp + "scr ipt>"},
+		{"<\\script", "<" + zwsp + "\\script"},
+		{"\\u003c script\\u003e", "\\u003c" + zwsp + " script\\u003e"},
+		{"< s c r i p t src=x>", "<" + zwsp + " s c r i p t src=x>"},
+		{"</ script>", "<" + zwsp + "/ script>"},
+		{"</script>", "<" + zwsp + "/script>"}, // 闭合形仍由规则 1 命中，不双重插入
 		// bin/cat 形（2026-09-11 实测）：cat 前缀词跟在 bin/ 后被 Cloudflare 当作
 		// cat 命令执行路径（./bin/catpaw2api、/bin/cat、大写均 403；bin/ls、bin/sh、
 		// bin/rm、bin/python、bin/curl、./cat、裸 cat 均放行——cat 是唯一触发命令）。
@@ -171,14 +181,14 @@ func TestBuildBodyWafProbeBypass(t *testing.T) {
 	// 大于 10000 rune 验证截断旁路；含 <script> 验证中和旁路。
 	long := "<script>alert(1)</script>" + strings.Repeat("x", 10100)
 
-	probeReq := &ChatRequest{Model: "claude-haiku-4-5", WafProbe: true,
+	probeReq := &ChatRequest{Model: "claude-opus-4-8", WafProbe: true,
 		Messages: []ChatMessage{{Role: "user", Content: rawText(t, long)}}}
 	probeQuery := p.buildBody(probeReq, tokens, "CLAUDE_HAIKU", 1)["input"].(map[string]interface{})["query"].(string)
 	if probeQuery != long {
 		t.Fatalf("probe query must be verbatim (no neutralize, no cap): got %d bytes, want %d", len(probeQuery), len(long))
 	}
 
-	normalReq := &ChatRequest{Model: "claude-haiku-4-5",
+	normalReq := &ChatRequest{Model: "claude-opus-4-8",
 		Messages: []ChatMessage{{Role: "user", Content: rawText(t, long)}}}
 	normalQuery := p.buildBody(normalReq, tokens, "CLAUDE_HAIKU", 1)["input"].(map[string]interface{})["query"].(string)
 	if len(normalQuery) >= len(long) {

@@ -63,7 +63,7 @@
 **执行模型**：后台 job。
 
 - `POST /api/waf/probe`：参数 log_id、baseline_id、选中叶子路径列表、账号 id（可选，
-  缺省自动挑活跃号）、模型（默认 claude-haiku-4-5）。返回 job_id；
+  缺省自动挑活跃号）、模型（默认 claude-opus-4-8）。返回 job_id；
 - `GET /api/waf/probe/{job_id}`：轮询进度——已完成变体、每变体结果（放行/403/其他、
   Ray ID）、当前收敛区间；完成后返回"触发子串"结论；
 - 页面轮询展示（复用现有 dashboard 轮询模式），完成后展示结论与证据表。

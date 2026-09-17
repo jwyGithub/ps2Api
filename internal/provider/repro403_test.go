@@ -16,7 +16,7 @@ package provider
 //	DATABASE_PATH=./data/gateway.db \
 //	REPRO_403_REPS=3 \
 //	REPRO_403_SIZE=4000 \
-//	REPRO_403_MODEL=claude-haiku-4-5 \
+//	REPRO_403_MODEL=claude-opus-4-8 \
 //	REPRO_403_PROXY=0 \
 //	go test ./internal/provider -run TestRepro403ContentSignature -v -count=1 -timeout 20m
 //
@@ -382,7 +382,7 @@ func TestRepro403ContentSignature(t *testing.T) {
 	size := envInt("REPRO_403_SIZE", 4000)
 	model := os.Getenv("REPRO_403_MODEL")
 	if model == "" {
-		model = "claude-haiku-4-5"
+		model = "claude-opus-4-8"
 	}
 
 	s, err := store.Open(dbPath)

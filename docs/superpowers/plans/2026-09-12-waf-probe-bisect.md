@@ -47,14 +47,14 @@ func TestBuildBodyWafProbeBypass(t *testing.T) {
 	// 大于 10000 rune 验证截断旁路；含 <script> 验证中和旁路。
 	long := "<script>alert(1)</script>" + strings.Repeat("x", 10100)
 
-	probeReq := &ChatRequest{Model: "claude-haiku-4-5", WafProbe: true,
+	probeReq := &ChatRequest{Model: "claude-opus-4-8", WafProbe: true,
 		Messages: []ChatMessage{{Role: "user", Content: rawText(t, long)}}}
 	probeQuery := p.buildBody(probeReq, tokens, "CLAUDE_HAIKU", 1)["input"].(map[string]interface{})["query"].(string)
 	if probeQuery != long {
 		t.Fatalf("probe query must be verbatim (no neutralize, no cap): got %d bytes, want %d", len(probeQuery), len(long))
 	}
 
-	normalReq := &ChatRequest{Model: "claude-haiku-4-5",
+	normalReq := &ChatRequest{Model: "claude-opus-4-8",
 		Messages: []ChatMessage{{Role: "user", Content: rawText(t, long)}}}
 	normalQuery := p.buildBody(normalReq, tokens, "CLAUDE_HAIKU", 1)["input"].(map[string]interface{})["query"].(string)
 	if len(normalQuery) >= len(long) {
@@ -869,7 +869,7 @@ func (s *Server) wafProbeStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Model == "" {
-		body.Model = "claude-haiku-4-5"
+		body.Model = "claude-opus-4-8"
 	}
 	target, err := s.Store.GetRequestLog(body.LogID)
 	if err != nil {
@@ -1160,7 +1160,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
           <h3 class="font-display text-[16px] font-medium">在线探针 <span class="font-mono text-[13px]" id="wafProbeMeta" style="color: var(--muted);"></span></h3>
           <div class="flex items-center gap-2">
             <input id="wafProbeAccount" class="input" style="width:110px;" placeholder="账号ID(可选)">
-            <input id="wafProbeModel" class="input" style="width:170px;" value="claude-haiku-4-5" placeholder="模型">
+            <input id="wafProbeModel" class="input" style="width:170px;" value="claude-opus-4-8" placeholder="模型">
             <button class="btn btn-ghost text-[12px]" onclick="wafProbeAbort()">中止</button>
           </div>
         </div>
@@ -1225,7 +1225,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
     var modelEl = document.getElementById('wafProbeModel');
     var accId = accEl ? accEl.value.trim() : '';
     var model = modelEl ? modelEl.value.trim() : '';
-    if (!model) model = 'claude-haiku-4-5';
+    if (!model) model = 'claude-opus-4-8';
     if (!confirm('发起在线探针：' + (1 + paths.length) + ' 个变体（对照 1 + 叶子 ' + paths.length +
       '），每变体 2 次真实请求；命中后另有行级二分（约 log2(行数) 轮）。\n账号：' +
       (accId ? '#' + accId : '自动（首个活跃号）') + '\n模型：' + model +

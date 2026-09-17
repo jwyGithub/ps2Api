@@ -93,6 +93,10 @@ var wafSignatureProbes = []string{
 	// bin/cat：cat 前缀词跟在 bin/ 后被当作 cat 命令执行路径（2026-09-11 实测
 	// 确认的第二类内容签名，如 ./bin/catpaw2api -config …；详见 waf.go 注释）。
 	"bin/cat",
+	// script 分离形：CF 归一化剥空白/反斜杠后还原为 <script（2026-09-17 由本仓库
+	// WAF 文档自身触发回归确认）。中和规则已逐字母容忍分离符，此探针钉住该形态，
+	// 让 raw_sig 判别不再漏报。
+	"< script", "<scr ipt", "<\\script",
 }
 
 // normalizeWafBody 做小写化并还原 Go json.Marshal 对 < > & 的六字符 unicode 转义，
