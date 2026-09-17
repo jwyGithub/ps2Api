@@ -44,6 +44,11 @@ func TestWafNeutralize(t *testing.T) {
 		{"\\u003c img src=x", "\\u003c" + zwsp + " img src=x"},
 		{"<\tiframe src=x>", "<" + zwsp + "\tiframe src=x>"},
 		{"< img\nsrc=x>", "<" + zwsp + " img\nsrc=x>"},
+		// 无 \b 前缀命中（2026-09-17 三次回归）：CF 归一化是纯前缀匹配，标签名后紧跟
+		// 词字符也拦——11.1 节引用归一化形态时写下的 <imgsrc=… 成为真实出站内容 403。
+		{"<imgsrc=xonerror", "<" + zwsp + "imgsrc=xonerror"},
+		{"\\u003cimgsrc=x", "\\u003c" + zwsp + "imgsrc=x"},
+		{"<scriptx=1", "<" + zwsp + "scriptx=1"},
 		// bin/cat 形（2026-09-11 实测）：cat 前缀词跟在 bin/ 后被 Cloudflare 当作
 		// cat 命令执行路径（./bin/catpaw2api、/bin/cat、大写均 403；bin/ls、bin/sh、
 		// bin/rm、bin/python、bin/curl、./cat、裸 cat 均放行——cat 是唯一触发命令）。

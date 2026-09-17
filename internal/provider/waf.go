@@ -25,7 +25,12 @@ var wafNeutralizeRules = []struct {
 	pattern *regexp.Regexp
 	replace string
 }{
-	{regexp.MustCompile(`(?i)(<|\\u003c)([\s\\]*[!/?]?[\s\\]*(?:script|iframe|svg|template|object|embed|form|style|link|meta|base|img|input|body|html|doctype)\b)`), "${1}" + wafBreak + "${2}"},
+	// 无 \b 词边界（2026-09-17 三次回归）：CF 归一化剥空格后是纯前缀匹配——
+	// <imgsrc=、<imgonerror 这类「标签名后紧跟词字符」的形态，\b 不命中但 CF 照拦
+	//（实测 3427 出站体 `<imgsrc=xonerror…` 403，同体去掉它即过）。改前缀命中即插
+	// ZWSP：误伤面（<imgx 之类非标签词）只多一个不可见字符，阅读无损；漏伤代价是 403。
+	// 词内连续性由 CF 归一化定义，不由 HTML 规范定义，边界必须跟它对齐。
+	{regexp.MustCompile(`(?i)(<|\\u003c)([\s\\]*[!/?]?[\s\\]*(?:script|iframe|svg|template|object|embed|form|style|link|meta|base|img|input|body|html|doctype))`), "${1}" + wafBreak + "${2}"},
 	// script 分离形（2026-09-17 回归实测）：CF 归一化剥掉空白与反斜杠后，
 	// < script / <scr ipt / <\script 全部还原为 <script 确定性 403（2026-09-09
 	// 探针表早已钉住），而上面的规则在 < 与标签名之间不容忍任何字符，全部穿透。
