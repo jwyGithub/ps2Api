@@ -121,11 +121,6 @@ func foldedToolResultParts(msg ChatMessage, budget int) []string {
 	return parts
 }
 
-// splitMessages 保留原签名：非补种请求的入口。
-func (p *Provider) splitMessages(messages []ChatMessage, convID string, wafProbe bool) splitResult {
-	return p.splitMessagesSeed(messages, convID, wafProbe, false)
-}
-
 // splitMessagesSeed 带补种标志的折叠/切分主逻辑。
 func (p *Provider) splitMessagesSeed(messages []ChatMessage, convID string, wafProbe, contextSeed bool) splitResult {
 	toolIdx := toolTailIndex(messages)
