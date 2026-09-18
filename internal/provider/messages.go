@@ -11,6 +11,14 @@ type splitResult struct {
 	Query string
 }
 
+// querySection 是折叠路径的一个渲染段，携带丢弃权重：3=高（skills/task/tail，
+// 永不丢）、2=中（system 段）、1=低（历史 user/assistant/tool-result 段，从最旧
+// 开始丢）。cap 超限时按权重整段丢弃，替代旧的固定 30% 中段切除。
+type querySection struct {
+	Text   string
+	Weight int
+}
+
 func toolTail(messages []ChatMessage) bool {
 	return toolTailIndex(messages) >= 0
 }
@@ -343,7 +351,9 @@ func (p *Provider) splitMessagesSeed(messages []ChatMessage, convID string, wafP
 		}
 	}
 
-	var contextParts []string
+	// contextParts 逐条携带丢弃权重（见 querySection）：system 段 Weight 2（中），
+	// 历史 user/assistant/tool-result 段 Weight 1（低，时间越早价值越低，丢弃从最旧开始）。
+	var contextParts []querySection
 	var skillsBlock string // skills 清单段：前置渲染（见 sections 组装处的 cap 头部保留区契约）
 	for i, msg := range messages {
 		if i == queryIdx || i == taskIdx || i >= skipFrom {
@@ -351,9 +361,11 @@ func (p *Provider) splitMessagesSeed(messages []ChatMessage, convID string, wafP
 		}
 		if msg.Role == "tool" || isAnthropicToolResult(msg) {
 			if parts := foldedToolResultParts(msg, perResultBudget); len(parts) > 0 {
-				contextParts = append(contextParts, parts...)
+				for _, part := range parts {
+					contextParts = append(contextParts, querySection{Text: part, Weight: 1})
+				}
 			} else {
-				contextParts = append(contextParts, "[Previous tool result omitted]")
+				contextParts = append(contextParts, querySection{Text: "[Previous tool result omitted]", Weight: 1})
 			}
 			continue
 		}
@@ -368,12 +380,12 @@ func (p *Provider) splitMessagesSeed(messages []ChatMessage, convID string, wafP
 					skillsBlock = "[System skills]\n" + foldSkillList(skillLines)
 				}
 				if strings.TrimSpace(rest) != "" {
-					contextParts = append(contextParts, "[System]\n"+truncateMiddleRunes(rest, FoldedSystemBudgetRunes))
+					contextParts = append(contextParts, querySection{Text: "[System]\n" + truncateMiddleRunes(rest, FoldedSystemBudgetRunes), Weight: 2})
 				}
 			}
 		case "user":
 			if text != "" {
-				contextParts = append(contextParts, "[User]\n"+truncateMiddleRunes(text, FoldedTextMsgBudgetRunes))
+				contextParts = append(contextParts, querySection{Text: "[User]\n" + truncateMiddleRunes(text, FoldedTextMsgBudgetRunes), Weight: 1})
 			}
 		case "assistant":
 			block := "[Assistant]"
@@ -383,7 +395,7 @@ func (p *Provider) splitMessagesSeed(messages []ChatMessage, convID string, wafP
 			if calls := formatAssistantToolCalls(msg.ToolCalls); calls != "" {
 				block += "\n\n" + calls
 			}
-			contextParts = append(contextParts, block)
+			contextParts = append(contextParts, querySection{Text: block, Weight: 1})
 		}
 	}
 	// 折叠分段顺序。tool-tail 重放：历史在前，本轮任务居中（紧贴待处理 tool 结果，
@@ -393,7 +405,9 @@ func (p *Provider) splitMessagesSeed(messages []ChatMessage, convID string, wafP
 	// 时间序正确，且恒落 capUpstreamQuery 头部 30% 保留区（与尾部同样安全）。
 	// 重放模式下待处理 tool-tail 也截预算（单条巨结果会吃光尾部窗口）；
 	// 普通对话把最新用户输入标注为 [User] 以保留角色边界。
-	sections := make([]string, 0, 4)
+	// 段落权重（见 querySection）：高=task/skills/tail（三次线上事故的存活契约），
+	// 中=system，低=历史文本与工具结果（时间越早价值越低，丢弃从最旧开始）。
+	sections := make([]querySection, 0, 8)
 	taskBlock := ""
 	if taskIdx >= 0 {
 		// 注入块剥离后再截断：2000 rune 预算花在任务句上，而不是 CLAUDE.md。
@@ -405,16 +419,16 @@ func (p *Provider) splitMessagesSeed(messages []ChatMessage, convID string, wafP
 	// 折叠总量超 10000 时（如长会话 64K tool results），中段里的清单照样会被 cap 掐尾，
 	// 模型只看到半个名单（2026-09-17 端到端重放实测：[System skills] 在中段时尾部条目丢失）。
 	if skillsBlock != "" {
-		sections = append(sections, skillsBlock)
+		sections = append(sections, querySection{Text: skillsBlock, Weight: 3})
 	}
 	if !isToolTail && taskBlock != "" {
-		sections = append(sections, taskBlock)
+		sections = append(sections, querySection{Text: taskBlock, Weight: 3})
 	}
-	if context := strings.Join(contextParts, "\n\n"); context != "" {
-		sections = append(sections, context)
-	}
+	// context 逐段入列（而非整段拼一块）：丢弃粒度到「段内单条历史消息」，Task 5 的
+	// cap 按权重从最旧一段开始丢。"\n\n".join 结合律保证逐段入列与旧的整段拼接字节一致。
+	sections = append(sections, contextParts...)
 	if isToolTail && taskBlock != "" {
-		sections = append(sections, taskBlock)
+		sections = append(sections, querySection{Text: taskBlock, Weight: 3})
 	}
 	tail := query
 	if contextSeed {
@@ -433,9 +447,19 @@ func (p *Provider) splitMessagesSeed(messages []ChatMessage, convID string, wafP
 		}
 	}
 	if tail != "" {
-		sections = append(sections, tail)
+		sections = append(sections, querySection{Text: tail, Weight: 3})
 	}
-	return splitResult{Query: strings.Join(sections, "\n\n")}
+	return splitResult{Query: joinWeightedSections(sections)}
+}
+
+// joinWeightedSections 按 section 顺序拼接出站 query。当前 cap 阶段（Task 5）
+// 之前，权重只随结构传递，拼接行为与旧 strings.Join 一致。
+func joinWeightedSections(sections []querySection) string {
+	parts := make([]string, len(sections))
+	for i, s := range sections {
+		parts[i] = s.Text
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // capUpstreamQuery 把出站 query 压进上游 MaxUpstreamQueryRunes（10000 字符）校验上限。

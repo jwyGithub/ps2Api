@@ -101,3 +101,25 @@ func TestFoldedTaskBlockStripsSystemReminders(t *testing.T) {
 		t.Fatal("system-reminder body must be stripped from folded task block")
 	}
 }
+
+// TestFoldedSectionOrderUnchanged: sections 化改造后折叠产物与原拼接顺序一致：
+// skills 最前（普通续聊无 skills 时 task 最前）、context 居中、tail 最后。
+// 本测试钉住拼接顺序，防止 sections 化时悄悄换位。
+func TestFoldedSectionOrderUnchanged(t *testing.T) {
+	p := New()
+	msgs := []ChatMessage{mustMsg(t, "user", "原始任务AAA")}
+	msgs = append(msgs, *assistantFollowup(&Result{Content: "中间回复BBB"}))
+	msgs = append(msgs, mustMsg(t, "user", "最新一轮CCC"))
+
+	split := p.splitMessagesSeed(msgs, "", false, false)
+	q := split.Query
+	iTask := strings.Index(q, "原始任务AAA")
+	iHist := strings.Index(q, "中间回复BBB")
+	iTail := strings.Index(q, "最新一轮CCC")
+	if iTask < 0 || iHist < 0 || iTail < 0 {
+		t.Fatalf("all sections must be present: %d/%d/%d", iTask, iHist, iTail)
+	}
+	if !(iTask < iHist && iHist < iTail) {
+		t.Fatalf("order must be task < history < tail: %d/%d/%d", iTask, iHist, iTail)
+	}
+}
