@@ -177,3 +177,33 @@ func TestCapUpstreamQuerySections(t *testing.T) {
 		t.Errorf("result must stay under limit, got %d runes", got)
 	}
 }
+
+// TestFoldedProbeQueryUncapped: 探针请求（WafProbe）折叠产物不经 cap/剥离/
+// 权重丢弃——逐字复现可疑内容是探针的存在意义（见 ChatRequest.WafProbe 注释）。
+// 出站旁路发生在 request.go（query = upstreamQuery 原样），本测试钉住
+// splitMessagesSeed 层面探针 tail 不加 [User] 前缀的既有契约不因 sections 化回归。
+//
+// 折叠路径（convID==""）把任务段/历史段渲染在逐字 tail 之前，故断言钉住 tail 本身：
+// 整条折叠 query 以 probe 原文结尾（probe 以 PROBE_MARKER 开头 → tail 逐字、未被
+// cap/中和），且 tail 不带 [User] 角色前缀。断言针对 tail 而非整条 query 的前缀。
+func TestFoldedProbeQueryUncapped(t *testing.T) {
+	p := New()
+	probe := "PROBE_MARKER 精确字节形态\n\n<script>alert(1)</script>"
+	msgs := []ChatMessage{mustMsg(t, "user", "原始任务")}
+	msgs = append(msgs, *assistantFollowup(&Result{Content: "回复"}))
+	msgs = append(msgs, mustMsg(t, "user", probe))
+
+	// splitMessagesSeed(messages, convID, wafProbe, contextSeed)：第三个 bool 为
+	// wafProbe，置 true 触发探针路径。
+	split := p.splitMessagesSeed(msgs, "", true, false)
+	if !strings.HasSuffix(split.Query, probe) {
+		suffix := split.Query
+		if len(suffix) > 60 {
+			suffix = suffix[len(suffix)-60:]
+		}
+		t.Fatalf("probe tail must be verbatim at query end, got suffix %q", suffix)
+	}
+	if strings.Contains(split.Query, "[User]\nPROBE_MARKER") {
+		t.Fatal("probe tail must not carry [User] prefix")
+	}
+}
