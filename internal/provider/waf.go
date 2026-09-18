@@ -53,9 +53,12 @@ var wafNeutralizeRules = []struct {
 	// 命令注入托管规则——`curl -o f url`、```\ncurl -o f url\n```（无语言标注）、
 	// ` wget -O f url` 均 403；`curl "y"`、`curl -o`（flag 无值）、`--longflag`、
 	// -o-f 紧连、```bash\n…（有语言标注）、无 backtick 的裸 curl、ls/cat/rm/git
-	// 等 200。ZWSP 插在 cu/wg 词内（实测词内与词后/backtick 后均放行，词内最稳、
-	// 与 bin/cat 同款）。backtick 群与 curl 之间允许空格（` curl 也拦），幂等。
-	{regexp.MustCompile("(?s)(`{1,3})([^`]{0,40}?)(cu[\\w]*rl|wg[\\w]*et)(\\s+-[^\\s-][^\\s]*\\s+[^\\s])"), "${1}${2}" + wafBreak + "${3}${4}"},
+	// 等 200。ZWSP 插在 cu|rl / wg|et 词内（实测词内与词后/backtick 后均放行，词内
+	// 最稳、与 bin/cat 同款）。词内插入同时保证幂等：下一轮该位置是 ZWSP 而非 l/t，
+	// 匹配不再成立（2026-09-18 issue 修复——旧「词前插入」写法每处理一遍多插一个
+	// ZWSP，上游回显内容经多轮中和会无界累加）。backtick 群与 curl 之间允许空格。
+	{regexp.MustCompile("(?s)(`{1,3}[^`]{0,40}?cu[\\w]*r)(l)(\\s+-[^\\s-][^\\s]*\\s+[^\\s])"), "${1}" + wafBreak + "${2}${3}"},
+	{regexp.MustCompile("(?s)(`{1,3}[^`]{0,40}?wg[\\w]*e)(t)(\\s+-[^\\s-][^\\s]*\\s+[^\\s])"), "${1}" + wafBreak + "${2}${3}"},
 }
 
 // wafNeutralizeEnabled 是中和的 kill-switch：GATEWAY_DISABLE_WAF_NEUTRALIZE=1 时关闭

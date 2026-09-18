@@ -18,7 +18,7 @@ func skillsSystemMsg(t *testing.T) ChatMessage {
 	b.WriteString("- claude: Catch-all agent for tasks.\n\n")
 	// 89 条 skills 清单：描述长度贴近真实（首句 40-70 字符）
 	for i := 0; i < 89; i++ {
-		b.WriteString(fmt.Sprintf("- skill-%02d: Use this skill when doing task %d. It has extra detail that goes on longer than the first sentence would carry.", i, i) + "\n")
+		fmt.Fprintf(&b, "- skill-%02d: Use this skill when doing task %d. It has extra detail that goes on longer than the first sentence would carry.\n", i, i)
 	}
 	b.WriteString("\n<total_tokens>15000000 tokens left</total_tokens>\n")
 	return mustMsg(t, "system", b.String())
