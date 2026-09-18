@@ -160,6 +160,47 @@ func TestSeedConversationStoresPrefixMapping(t *testing.T) {
 	}
 }
 
+// TestSeedConversationToolTailPrefixMapping: tool-tail 请求补种成功后，按
+// messages[:toolIdx] 前缀存映射——客户端重试同一批 messages 时
+// LookupConversation 的前缀循环在 i==toolIdx 处命中，恢复增量模式。
+func TestSeedConversationToolTailPrefixMapping(t *testing.T) {
+	var bodies []map[string]interface{}
+	srv := mockPostmanServer(t, "conv-toolseed-9", &bodies)
+	client := &http.Client{Transport: redirectTransport{base: http.DefaultTransport, target: srv.URL}}
+	p := New()
+	p.Client = client
+	acc := seedTestAccount(t, srv)
+
+	msgs := []ChatMessage{mustMsg(t, "user", "TASK 原始任务")}
+	for i := 0; i < 3; i++ {
+		tc := ToolCall{ID: "tc-" + fmt.Sprint(i), Type: "function"}
+		tc.Function.Name = "Bash"
+		tc.Function.Arguments = "ls"
+		msgs = append(msgs, *assistantFollowup(&Result{ToolCalls: []ToolCall{tc}}))
+		msgs = append(msgs, ChatMessage{Role: "tool", ToolCallID: "tc-" + fmt.Sprint(i), Content: mustJSON(t, "输出"+fmt.Sprint(i))})
+	}
+	req := &ChatRequest{Model: "claude-opus-4-8", Messages: msgs}
+	tokens := &Tokens{AccessToken: "x", UserID: "u", WorkspaceID: "w"}
+
+	res := p.seedConversation(context.Background(), acc, req, tokens, "CLAUDE_OPUS_48_BEDROCK")
+	if !res.Success {
+		t.Fatalf("seed failed: %s", res.Error)
+	}
+	if got := p.LookupConversation(acc.ID, msgs); got != "conv-toolseed-9" {
+		t.Fatalf("retried tool-tail must hit seeded conversation, got %q", got)
+	}
+	// 补种请求出站体：tool-tail 重放的待处理结果（toolTailIndex 处的最后一条 tool 结果
+	// 输出2）不出现在补种轮——它被摘要指令替换为 tail；toolTailIndex 之前的历史结果
+	// （输出0/输出1）作为折叠上下文正常保留，供模型总结。
+	q := bodies[0]["input"].(map[string]interface{})["query"].(string)
+	if strings.Contains(q, "输出2") {
+		t.Fatal("seed query must not include pending tool results in tail")
+	}
+	if !strings.Contains(q, "总结当前任务状态") {
+		t.Fatal("seed query must contain summary instruction")
+	}
+}
+
 // TestStreamInternalSeedsColdStart: 端到端——长会话冷启动时 streamInternal
 // 先发补种轮（query=折叠历史+摘要指令、conversationId=null），
 // 再发主轮（query=仅最新消息、conversationId=补种返回值）。

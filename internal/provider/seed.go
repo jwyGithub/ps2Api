@@ -41,8 +41,9 @@ func (p *Provider) shouldSeed(accID int64, req *ChatRequest) bool {
 }
 
 // seedConversation 发起补种轮：复用折叠路径把全部历史发往上游（conversationId=null），
-// 模型按摘要指令复述任务状态后在服务端建立会话。成功后按「去掉最新消息的前缀指纹」
-// 存映射——第二轮请求的 LookupConversation 前缀循环恰好命中它，恢复增量模式。
+// 模型按摘要指令复述任务状态后在服务端建立会话。成功后按前缀指纹存映射（普通续聊=去掉
+// 最新 user 消息；tool-tail=待处理 tool results 之前的全部历史）——第二轮/重放请求的
+// LookupConversation 前缀循环恰好命中它，恢复增量模式。
 func (p *Provider) seedConversation(ctx context.Context, acc *store.Account, req *ChatRequest, tokens *Tokens, postmanModel string) *Result {
 	seedReq := *req
 	seedReq.ContextSeed = true
@@ -51,19 +52,26 @@ func (p *Provider) seedConversation(ctx context.Context, acc *store.Account, req
 	if !seedRes.Success || seedRes.ConversationID == "" {
 		return seedRes
 	}
-	// 前缀指纹：messages[:queryIdx]（去掉最新 user 消息）。第二轮完整 messages
-	// 的 LookupConversation 循环在 i==queryIdx 时命中此键。
-	queryIdx := -1
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		if req.Messages[i].Role == "user" && !isAnthropicToolResult(req.Messages[i]) {
-			queryIdx = i
-			break
+	// 前缀指纹：普通续聊=去掉最新 user 消息；tool-tail=待处理 tool results 之前的
+	// 全部历史。第二轮/重放的完整 messages 经 LookupConversation 前缀循环恰好命中此键。
+	// 前缀切点按请求形态分：普通续聊取「最后一条纯 user 消息」之后（第二轮完整
+	// messages 的前缀循环恰好命中）；tool-tail 重放取 toolTailIndex 位置——待处理
+	// tool results 之前的全部历史（含它们所回应的 assistant 调用）作为前缀指纹。
+	prefixEnd := -1
+	if toolIdx := toolTailIndex(req.Messages); toolIdx >= 0 {
+		prefixEnd = toolIdx
+	} else {
+		for i := len(req.Messages) - 1; i >= 0; i-- {
+			if req.Messages[i].Role == "user" && !isAnthropicToolResult(req.Messages[i]) {
+				prefixEnd = i
+				break
+			}
 		}
 	}
-	if queryIdx < 0 {
+	if prefixEnd < 0 {
 		return seedRes
 	}
-	fp := conversationFingerprint(req.Messages[:queryIdx])
+	fp := conversationFingerprint(req.Messages[:prefixEnd])
 	p.convStore.PutConversation(acc.ID, fp, seedRes.ConversationID)
 	p.convStore.PutOwner(fp, acc.ID)
 	return seedRes
