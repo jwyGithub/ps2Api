@@ -3,6 +3,7 @@ package provider
 import (
 	"os"
 	"regexp"
+	"strings"
 )
 
 // wafBreak 是特征破坏字符（零宽空格 U+200B）。实测（2026-09-09，经网关直连上游验证）：
@@ -78,4 +79,17 @@ func wafNeutralize(s string) string {
 		s = rule.pattern.ReplaceAllString(s, rule.replace)
 	}
 	return s
+}
+
+// wafStripBreak 剥离响应文本里的零宽空格（wafBreak）。出站中和让模型读到带 ZWSP 的
+// 代码（如 `cu​rl`）；模型在 Edit.new_string / Write 内容里原样回显时，若不剥离就会
+// 随 agent 写回落进源码，造成不可见的持续污染（2026-09-18 风险评审：响应侧此前
+// 零防护，handleTextChunk/normalizeArguments 均直传）。在 Delta 产生处统一剥离，
+// 流式/非流式/三种协议端点一次收口。ZWSP 只由中和规则引入，剥离对干净文本是
+// no-op；不含 ZWSP 的文本快路径返回原串，零拷贝。
+func wafStripBreak(s string) string {
+	if !strings.ContainsRune(s, 0x200b) {
+		return s
+	}
+	return strings.ReplaceAll(s, wafBreak, "")
 }

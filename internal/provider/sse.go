@@ -184,7 +184,9 @@ func (r *StreamReader) handleTextChunk(data json.RawMessage) []Delta {
 	r.applyMeta(d.Metadata)
 	if d.TextContent != "" {
 		r.sawText = true
-		return []Delta{{Content: d.TextContent}}
+		// 剥离中和引入的 ZWSP（模型可能原样回显读到的带破坏点代码；不剥离会随
+		// agent 写回落进源码——见 wafStripBreak 注释）。
+		return []Delta{{Content: wafStripBreak(d.TextContent)}}
 	}
 	return nil
 }
@@ -267,14 +269,15 @@ func (r *StreamReader) handleToolCallChunk(data json.RawMessage) []Delta {
 }
 
 // normalizeArguments 把上游可能以对象/数组/数字形式返回的 arguments 规整成 JSON 字符串，
-// 符合 OpenAI function calling 对 arguments 必须是字符串的要求。
+// 符合 OpenAI function calling 对 arguments 必须是字符串的要求。统一经 wafStripBreak 剥离
+// ZWSP：Edit/Write 类工具的 new_string/content 里带回破坏点会污染源码（见 wafStripBreak 注释）。
 func normalizeArguments(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
-		return s
+		return wafStripBreak(s)
 	}
 	var v interface{}
 	if json.Unmarshal(raw, &v) == nil && v != nil {

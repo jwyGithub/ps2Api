@@ -76,7 +76,7 @@
 |---|---|---|
 | 空白分离形（`< script>` / `<scr ipt>`） | 不覆盖 | 真实代码不存在此形态，不修 |
 | 86KB 多 tool 的 .vue 真实场景 | **未验证** | 需真实 agent 流量回归；见第 6 节判定 |
-| 零宽字符被模型回显进编辑块 | 理论风险 | 编辑不匹配重试自愈，接受 |
+| 零宽字符被模型回显进编辑块 | **已修（2026-09-18）** | 响应侧 `wafStripBreak` 统一剥离（见第 13 节），不再依赖编辑重试自愈 |
 | 单条 tool content 上限 | 已有 16KB/条（`MaxToolResponseContentLen`） | 若体积因素坐实，需加**总量**预算 |
 
 ## 6. 排查运行手册（86KB 场景失败时）
@@ -311,3 +311,21 @@ curl $K -X DELETE "$BASE/api/waf/probe/<job_id>"       # 中止
 ```
 
 排查判读方法论不变（第 6 节三分走 + 第 11 节归一化穷举差集），只是数据获取从「人工贴结果」变成「代理直连」。新增内容签名时，签名探测表（`wafSignatureProbes`）与面板 SQL 预设同源，`/api/waf-signatures` 返回的即最新清单。
+
+## 13. ZWSP 回写污染防线：响应侧统一剥离（2026-09-18）
+
+**风险**（用户评审指出，成立）：出站中和让模型读到带 ZWSP 的代码（`cu​rl`）；模型在 `Edit.new_string` / `Write.content` 里**原样回显**时，ZWSP 会随 agent 写回落进源码——不可见、持续污染（污染文件再被读时又经中和，叠加暴露）。响应侧此前零防护：`handleTextChunk`/`normalizeArguments` 均直传。
+
+第二层风险（模型对打断 token 理解变差）维持既有评估：ZWSP 对 tokenizer 基本不可见（第 2.3 节选型依据）；出站中和只作用于 query/toolResponses，模型生成的响应本身不经中和，理解损失限于「按字节精确匹配回读内容」的场景（Edit old_string 不匹配重试自愈）。
+
+**修复**（[waf.go](../internal/provider/waf.go) `wafStripBreak` + [sse.go](../internal/provider/sse.go) 两处接线）：
+
+- `wafStripBreak`：剥离 ZWSP；不含 ZWSP 快路径零拷贝返回（对干净响应无开销）；
+- `handleTextChunk`：textChunk 事件的正文 Delta 产出点统一剥离——流式/非流式/三种协议端点全部收口（均经 StreamReader）；
+- `normalizeArguments`：工具 arguments（Edit/Write 的载荷就在这里）字符串形态剥离。
+
+**防线语义**：不管模型何时/何处回显 ZWSP（正文、工具参数、代码块），客户端拿到的永远干净——回写污染在网关层根除，不依赖模型自觉或 agent 端清洗。模拟工具路径（`parseSimulatedToolCalls` 从已剥离的 content 提取 arguments）天然继承。
+
+**测试**：`TestWafStripBreak`（快路径/单点/多点/纯 ZWSP）+ `TestStreamTextChunkStripsZWSP`（textChunk 端到端）+ `TestNormalizeArgumentsStripsZWSP`（Edit new_string 形态端到端）。
+
+**幂等性顺带修复（同日）**：backtick+curl/wget 规则旧「词前插入」写法不幂等（issue 复现：每中和一遍多插一个 ZWSP，上游回显内容多轮无界累加），改为词内插入（`cu|rl`/`wg|et` 拆分两条规则）+ `TestWafNeutralizeIdempotent` 全规则 3 轮幂等钉死。
