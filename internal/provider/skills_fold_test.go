@@ -178,14 +178,15 @@ func TestCapUpstreamQuerySections(t *testing.T) {
 	}
 }
 
-// TestFoldedProbeQueryUncapped: 探针请求（WafProbe）折叠产物不经 cap/剥离/
-// 权重丢弃——逐字复现可疑内容是探针的存在意义（见 ChatRequest.WafProbe 注释）。
-// 出站旁路发生在 request.go（query = upstreamQuery 原样），本测试钉住
-// splitMessagesSeed 层面探针 tail 不加 [User] 前缀的既有契约不因 sections 化回归。
+// TestFoldedProbeQueryUncapped 只钉 seed 层契约：探针请求（wafProbe=true）经
+// splitMessagesSeed 折叠后，可疑内容作为逐字 tail 落在整条 query 结尾、且不被加上
+// [User] 角色前缀——保证 sections 化改造不重新引入角色前缀污染（见 ChatRequest.WafProbe）。
+// 本测试不覆盖出站层的 cap/中和旁路：那发生在 request.go 的 !req.WafProbe 守卫，
+// 由既有 TestBuildBodyWafProbeBypass 以 >10000 rune 输入验证；勿据本测试推断"未被 cap/中和"。
 //
-// 折叠路径（convID==""）把任务段/历史段渲染在逐字 tail 之前，故断言钉住 tail 本身：
-// 整条折叠 query 以 probe 原文结尾（probe 以 PROBE_MARKER 开头 → tail 逐字、未被
-// cap/中和），且 tail 不带 [User] 角色前缀。断言针对 tail 而非整条 query 的前缀。
+// 折叠路径（convID==""）段序为 [任务段, 历史段, tail]，逐字 tail 在最后，故本测试断言：
+// 断言1 HasSuffix(query, probe)——tail 逐字落在结尾、结尾未被截断/追加；
+// 断言2 !Contains("[User]\nPROBE_MARKER")——tail 未被加 [User] 角色前缀。
 func TestFoldedProbeQueryUncapped(t *testing.T) {
 	p := New()
 	probe := "PROBE_MARKER 精确字节形态\n\n<script>alert(1)</script>"

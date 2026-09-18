@@ -40,7 +40,9 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 	// 先中和再 cap，保证中和后的长度仍受 10000 rune 上限约束。
 	// 探针请求（req.WafProbe）两条都跳过：见 ChatRequest.WafProbe 注释。
 	// 折叠路径的权重丢弃已在 splitMessagesSeed 内完成（capUpstreamQuerySections）；
-	// 此处 capUpstreamQuery 对折叠产物是幂等直通，对增量/首轮路径仍是唯一 cap。
+	// 此处 capUpstreamQuery 是「先中和再 cap」链路的最终安全网——wafNeutralize 会按
+	// 特征插入零宽空格令 rune 数回涨，贴近上限的折叠产物中和后可能越过 10000，由它
+	// 兜底截断（并非无条件直通）；对增量（hasConv）路径它则是唯一的 cap 点。
 	upstreamQuery := split.Query
 	if wafNeutralizeEnabled() && !req.WafProbe {
 		upstreamQuery = wafNeutralize(upstreamQuery)
