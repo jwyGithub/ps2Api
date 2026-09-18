@@ -16,6 +16,15 @@ func mustMsg(t *testing.T, role, text string) ChatMessage {
 	return ChatMessage{Role: role, Content: raw}
 }
 
+func mustJSON(t *testing.T, s string) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return json.RawMessage(b)
+}
+
 func TestLookupConversationNewChatReturnsEmpty(t *testing.T) {
 	p := New()
 	msgs := []ChatMessage{mustMsg(t, "user", "hello")}

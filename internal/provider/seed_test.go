@@ -97,6 +97,20 @@ func TestShouldSeed(t *testing.T) {
 		t.Fatal("probe request must never seed")
 	}
 
+	// tool-tail 请求 + 冷启动 + 长历史 → true（2026-09-18 改：会话失效后的
+	// 重放轮也补种，消除 128 条消息裸折叠被中段省略吞掉方案的事故）。
+	toolTailHistory := []ChatMessage{mustMsg(t, "user", "任务")}
+	for i := 0; i < 3; i++ {
+		tc := ToolCall{ID: "tc-" + fmt.Sprint(i), Type: "function"}
+		tc.Function.Name = "Bash"
+		tc.Function.Arguments = "ls"
+		toolTailHistory = append(toolTailHistory, *assistantFollowup(&Result{ToolCalls: []ToolCall{tc}}))
+		toolTailHistory = append(toolTailHistory, ChatMessage{Role: "tool", ToolCallID: "tc-" + fmt.Sprint(i), Content: mustJSON(t, "输出"+fmt.Sprint(i))})
+	}
+	if !p.shouldSeed(3, &ChatRequest{Messages: toolTailHistory}) {
+		t.Fatal("cold-start tool-tail with long history should seed")
+	}
+
 	// 开关关闭 → false
 	t.Setenv("GATEWAY_CONTEXT_SEED", "0")
 	if p.shouldSeed(1, req) {

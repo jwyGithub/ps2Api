@@ -15,8 +15,10 @@ func contextSeedEnabled() bool { return os.Getenv("GATEWAY_CONTEXT_SEED") != "0"
 // 更短的会话折叠产物不超 10000 rune，补种白花一次上游配额。
 const seedHistoryThresholdMessages = 7
 
-// shouldSeed 报告本次请求是否应做上下文补种。四个条件全满足：
-// 冷启动（无会话命中）、非 tool-tail 重放、历史足够长、开关开启。
+// shouldSeed 报告本次请求是否应做上下文补种。条件全满足：
+// 冷启动（无会话命中）、历史足够长、开关开启。tool-tail 重放也补种（2026-09-18 改）：
+// 会话失效后的重放轮若不补种，128 条消息裸折叠进 10000 rune，中段省略会吞掉
+// 已批准方案等关键上下文（2026-09-18 线上事故，见设计文档）。
 // WafProbe 探针绝不补种（必须逐字复现可疑内容）。
 func (p *Provider) shouldSeed(accID int64, req *ChatRequest) bool {
 	// 补种轮自身（ContextSeed=true，由 seedConversation 递归调 streamInternal）绝不
@@ -25,9 +27,6 @@ func (p *Provider) shouldSeed(accID int64, req *ChatRequest) bool {
 		return false
 	}
 	if !contextSeedEnabled() || req.WafProbe {
-		return false
-	}
-	if toolTail(req.Messages) {
 		return false
 	}
 	// 纯 user 历史（无 assistant/tool）在 LookupConversation 的 hasReusableHistory
