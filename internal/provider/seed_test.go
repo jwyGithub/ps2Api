@@ -160,10 +160,14 @@ func TestSeedConversationStoresPrefixMapping(t *testing.T) {
 	}
 }
 
-// TestSeedConversationToolTailPrefixMapping: tool-tail 请求补种成功后，按
-// messages[:toolIdx] 前缀存映射——客户端重试同一批 messages 时
-// LookupConversation 的前缀循环在 i==toolIdx 处命中，恢复增量模式。
-func TestSeedConversationToolTailPrefixMapping(t *testing.T) {
+// TestSeedConversationToolTailSkipsPrefixMapping: tool-tail 请求补种成功后【绝不】存
+// 前缀指纹（v0.0.76 回归修复，方案 1）。补种轮仍照常发生——只是它在服务端建立的是纯
+// 文本会话，供模型拿到上下文；但不存映射。这样客户端重试同一批 messages 时
+// LookupConversation 落空，重放继续走折叠 USER_QUERY（把待处理 tool_result 折进 query
+// 文本），绝不对文本会话翻转成增量 TOOL_RESPONSE。否则 thirdParty/proxy-tools 的「已知
+// 无组」待处理调用会让 buildBody 续用这个文本会话走增量，上游报 "No tool call found" /
+// "Upstream returned an empty completion"（事故 4023-4027）。
+func TestSeedConversationToolTailSkipsPrefixMapping(t *testing.T) {
 	var bodies []map[string]interface{}
 	srv := mockPostmanServer(t, "conv-toolseed-9", &bodies)
 	client := &http.Client{Transport: redirectTransport{base: http.DefaultTransport, target: srv.URL}}
@@ -186,13 +190,20 @@ func TestSeedConversationToolTailPrefixMapping(t *testing.T) {
 	if !res.Success {
 		t.Fatalf("seed failed: %s", res.Error)
 	}
-	if got := p.LookupConversation(acc.ID, msgs); got != "conv-toolseed-9" {
-		t.Fatalf("retried tool-tail must hit seeded conversation, got %q", got)
+	// 关键回归断言：tool-tail 补种绝不留下可命中的前缀映射，重放不翻增量。
+	if got := p.LookupConversation(acc.ID, msgs); got != "" {
+		t.Fatalf("tool-tail seed must NOT store a prefix mapping (would flip the untracked tool-tail replay to an incremental TOOL_RESPONSE against a text-only seed conversation), got %q", got)
 	}
-	// 补种请求出站体：tool-tail 重放的待处理结果（toolTailIndex 处的最后一条 tool 结果
-	// 输出2）不出现在补种轮——它被摘要指令替换为 tail；toolTailIndex 之前的历史结果
-	// （输出0/输出1）作为折叠上下文正常保留，供模型总结。
-	q := bodies[0]["input"].(map[string]interface{})["query"].(string)
+	// 补种轮本身仍照常发生：恰好 1 次出站、conversationId=null、query 携带摘要指令，
+	// 且待处理结果（输出2）被摘要指令替换为 tail、不泄漏进补种轮。
+	if len(bodies) != 1 {
+		t.Fatalf("seed should still issue exactly 1 upstream request, got %d", len(bodies))
+	}
+	input := bodies[0]["input"].(map[string]interface{})
+	if input["conversationId"] != nil {
+		t.Fatalf("seed request must send conversationId=null, got %v", input["conversationId"])
+	}
+	q := input["query"].(string)
 	if strings.Contains(q, "输出2") {
 		t.Fatal("seed query must not include pending tool results in tail")
 	}
