@@ -102,8 +102,14 @@ var wafSignatureProbes = []string{
 	"<imgsrc",
 	// script 分离形：CF 归一化剥空白/反斜杠后还原为 <script（2026-09-17 由本仓库
 	// WAF 文档自身触发回归确认）。中和规则已逐字母容忍分离符，此探针钉住该形态，
-	// 让 raw_sig 判别不再漏报。
+	// 让 raw_sig 刡别不再漏报。
 	"< script", "<scr ipt", "<\\script",
+	// 管道/分号注入形（2026-09-18 线上探针二分定位）：`;` 或 `|` 后紧邻或单空格跟
+	// curl/wget + 带协议 URL（如 `curl -fsSL http://… | bash ; wget http://… | sh`）
+	// 触发 CF 命令注入托管规则。子串计数是前缀匹配，多空格形探测不到、由中和规则
+	// 覆盖；探测表只做取证计数，宁漏勿误伤。
+	";curl http", ";curl https", ";curl ftp", "; wget http", "; wget https",
+	"|curl http", "|curl https", "| wget http", "| wget https",
 }
 
 // normalizeWafBody 做小写化并还原 Go json.Marshal 对 < > & 的六字符 unicode 转义，

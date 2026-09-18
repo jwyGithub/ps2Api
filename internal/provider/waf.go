@@ -8,7 +8,9 @@ import (
 
 // wafBreak 是特征破坏字符（零宽空格 U+200B）。实测（2026-09-09，经网关直连上游验证）：
 // Cloudflare 匹配前做归一化——剥离空白与反斜杠，所以插空格/反斜杠全部无效：
-//   "< script>" / "<scr ipt>" / "</script>" 单独在场即 403，"<\script" 同样 403；
+//
+//	"< script>" / "<scr ipt>" / "</script>" 单独在场即 403，"<\script" 同样 403；
+//
 // 而零宽空格与全角字符保留："<"+零宽空格+"template>…" 类形式正常放行。
 // 另证：裸 "script"、"alert(1)"、"< img src=x onerror=alert(1)>"、"< div>" 均放行——
 // 真正的特征只有 script 家族标签（开/闭都算）；其余规则是保险，零宽字符不可见无损。
@@ -18,10 +20,10 @@ const wafBreak = "\u200b"
 // 零宽空格（wafBreak），归一化后 "<"+零宽空格+"script" 不再是 "<script"，而模型 tokenizer
 // 对零宽空格基本不可见，阅读无损。每条规则用两个捕获组夹住破坏点，replace 模板
 // "${1}"+wafBreak+"${2}" 在组间插入——扩特征只需往交替组里加词。分四类：
-//   1. 危险标签开头（含 json.Marshal HTML 转义产生的 u003c 字面量形）
-//   2. 行内事件处理器 on任意=
-//   3. 危险 URI 指令
-//   4. Vue 指令（v-on: 与 @ 简写；@ 后只认 click/冒号，不误伤邮箱）
+//  1. 危险标签开头（含 json.Marshal HTML 转义产生的 u003c 字面量形）
+//  2. 行内事件处理器 on任意=
+//  3. 危险 URI 指令
+//  4. Vue 指令（v-on: 与 @ 简写；@ 后只认 click/冒号，不误伤邮箱）
 var wafNeutralizeRules = []struct {
 	pattern *regexp.Regexp
 	replace string
@@ -60,6 +62,18 @@ var wafNeutralizeRules = []struct {
 	// ZWSP，上游回显内容经多轮中和会无界累加）。backtick 群与 curl 之间允许空格。
 	{regexp.MustCompile("(?s)(`{1,3}[^`]{0,40}?cu[\\w]*r)(l)(\\s+-[^\\s-][^\\s]*\\s+[^\\s])"), "${1}" + wafBreak + "${2}${3}"},
 	{regexp.MustCompile("(?s)(`{1,3}[^`]{0,40}?wg[\\w]*e)(t)(\\s+-[^\\s-][^\\s]*\\s+[^\\s])"), "${1}" + wafBreak + "${2}${3}"},
+	// 管道/分号注入形（2026-09-18 线上探针二分定位，~15 轮在线对照）：`;` 或 `|` 后
+	// **紧邻或单空格**跟 curl/wget + 带协议的 URL 即触发 CF 命令注入托管规则——
+	// `; curl http://x`、`;curl https://x`、`| wget ftp://x`、`; CURL http://x`、
+	// `; curl -fsSL http://x` 均 403；`&&`、换行、双空格 `;  curl`、URL 无协议
+	//（`curl a.example/x`）、`; curl`（无 URL）、`; curl http`（协议截断）、`; echo`、
+	// `curl … ; echo`（curl 在前）全部放行。分离规则与既有 backtick 形实证一致：
+	// CF 归一化剥空白后 `;  curl http://x` 理应还原为 `;curl http://x` 触发——但实测
+	// 放行，说明该规则对分隔符后空格数敏感（仅容忍 0-1 个），边界跟实测走。ZWSP 插在
+	// cu|rl / wg|et 词内（与规则 7 同款，实测词内破坏放行）。幂等：下一轮该位置是
+	// ZWSP 而非 l/t，匹配不再成立。
+	{regexp.MustCompile(`(?is)([;|][ \t]{0,}cu[\w]*r)(l)([^;|\n]{0,80}?\w+://)`), "${1}" + wafBreak + "${2}${3}"},
+	{regexp.MustCompile(`(?is)([;|][ \t]{0,}wg[\w]*e)(t)([^;|\n]{0,80}?\w+://)`), "${1}" + wafBreak + "${2}${3}"},
 }
 
 // wafNeutralizeEnabled 是中和的 kill-switch：GATEWAY_DISABLE_WAF_NEUTRALIZE=1 时关闭
