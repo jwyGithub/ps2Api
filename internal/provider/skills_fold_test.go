@@ -64,3 +64,40 @@ func TestFoldedSystemKeepsSkillList(t *testing.T) {
 		t.Fatalf("query exceeds upstream limit: %d", len([]rune(query)))
 	}
 }
+
+// TestStripSystemReminders: 剥离 <system-reminder> 注入块（跨行、可多块），
+// 供 [User (task)] 渲染用——CLAUDE.md/gitStatus 等注入块不吃 2000 rune 任务预算。
+func TestStripSystemReminders(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"no block", "普通任务文本", "普通任务文本"},
+		{"single block", "前文\n<system-reminder>\nCLAUDE.md 内容\n多行\n</system-reminder>\n真实任务", "前文\n\n真实任务"},
+		{"multi block", "<system-reminder>\nA\n</system-reminder>\n中段\n<system-reminder>\nB\n</system-reminder>\n尾", "\n中段\n\n尾"},
+		{"unclosed block kept", "文本 <system-reminder>\n未闭合保留原样", "文本 <system-reminder>\n未闭合保留原样"},
+	}
+	for _, c := range cases {
+		if got := stripSystemReminders(c.in); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestFoldedTaskBlockStripsSystemReminders: 折叠路径 [User (task)] 渲染前剥离
+// 注入块——长 CLAUDE.md 挤占预算、任务句掉进中段省略（2026-09-18 事故）。
+func TestFoldedTaskBlockStripsSystemReminders(t *testing.T) {
+	p := New()
+	reminders := "<system-reminder>\n" + strings.Repeat("注入内容。", 800) + "\n</system-reminder>\n"
+	msgs := []ChatMessage{mustMsg(t, "user", reminders+"我需要你修改 database-v2.html 的接口调用方式")}
+	for i := 0; i < 3; i++ {
+		msgs = append(msgs, *assistantFollowup(&Result{Content: "历史回复"}))
+		msgs = append(msgs, mustMsg(t, "user", "跟进"))
+	}
+	msgs = append(msgs, mustMsg(t, "user", "最新一轮"))
+
+	split := p.splitMessagesSeed(msgs, "", false, false)
+	if !strings.Contains(split.Query, "我需要你修改 database-v2.html 的接口调用方式") {
+		t.Fatal("task sentence must survive system-reminder stripping in folded task block")
+	}
+	if strings.Contains(split.Query, "注入内容") {
+		t.Fatal("system-reminder body must be stripped from folded task block")
+	}
+}

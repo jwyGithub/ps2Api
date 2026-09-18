@@ -122,6 +122,17 @@ func foldedToolResultParts(msg ChatMessage, budget int) []string {
 	return parts
 }
 
+// systemReminderRe 匹配 <system-reminder>...</system-reminder> 注入块（跨行、
+// 非贪婪）。Claude Code 客户端把 CLAUDE.md/gitStatus 等注入首条 user 消息，
+// 折叠渲染 [User (task)] 时剥离，让 2000 rune 预算花在真实任务句上。
+var systemReminderRe = regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>`)
+
+// stripSystemReminders 剥掉文本中全部 system-reminder 注入块。未闭合块保留
+// 原样（宁多勿丢）。只改出站渲染，不影响会话指纹。
+func stripSystemReminders(text string) string {
+	return systemReminderRe.ReplaceAllString(text, "")
+}
+
 // foldedSystemParts 把一条折叠路径里的 system 消息拆成「清单块 + 其余文本」两部分：
 //   - skills 清单（连续 ≥minSkillBlockLines 行的 "- name: description" 行块）压成
 //     "- name: 描述首句"——清单是模型调用 skills 的唯一依据，按 FoldedSkillListRunes
@@ -385,7 +396,8 @@ func (p *Provider) splitMessagesSeed(messages []ChatMessage, convID string, wafP
 	sections := make([]string, 0, 4)
 	taskBlock := ""
 	if taskIdx >= 0 {
-		if task := ExtractText(messages[taskIdx].Content); task != "" {
+		// 注入块剥离后再截断：2000 rune 预算花在任务句上，而不是 CLAUDE.md。
+		if task := stripSystemReminders(ExtractText(messages[taskIdx].Content)); task != "" {
 			taskBlock = "[User (task)]\n" + truncateMiddleRunes(task, FoldedTextMsgBudgetRunes)
 		}
 	}
