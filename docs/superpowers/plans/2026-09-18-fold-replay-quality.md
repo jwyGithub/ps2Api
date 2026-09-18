@@ -29,7 +29,7 @@
 - Consumes: `toolTailIndex(messages []ChatMessage) int`（messages.go，已存在）；`ChatMessage{Role string, ...}`。
 - Produces: `shouldSeed` 签名不变 `(p *Provider, accID int64, req *ChatRequest) bool`，tool-tail 且无会话命中时返回 true。
 
-- [ ] **Step 1: 在 TestShouldSeed 末尾追加失败测试**
+- [x] **Step 1: 在 TestShouldSeed 末尾追加失败测试**
 
 在 `internal/provider/seed_test.go` 的 `TestShouldSeed` 函数体内、最后的 `t.Setenv("GATEWAY_CONTEXT_SEED", "0")` 块之前插入：
 
@@ -63,12 +63,12 @@ func mustJSON(t *testing.T, s string) json.RawMessage {
 
 注意：`assistantFollowup` 只在 `ToolCalls` 非空时 marshal 进 `msg.ToolCalls`；role:"tool" 消息让 `hasReusableHistory` 命中。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `go test ./internal/provider/ -run TestShouldSeed -v`
 Expected: FAIL — `cold-start tool-tail with long history should seed`（现状 shouldSeed 对 toolTail 返回 false）。
 
-- [ ] **Step 3: 修改 shouldSeed**
+- [x] **Step 3: 修改 shouldSeed**
 
 `internal/provider/seed.go` 删除这段（约 30-32 行）：
 
@@ -88,17 +88,17 @@ Expected: FAIL — `cold-start tool-tail with long history should seed`（现状
 // WafProbe 探针绝不补种（必须逐字复现可疑内容）。
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `go test ./internal/provider/ -run TestShouldSeed -v`
 Expected: PASS。
 
-- [ ] **Step 5: 跑全量 provider 测试防回归**
+- [x] **Step 5: 跑全量 provider 测试防回归**
 
 Run: `go test ./internal/provider/`
 Expected: PASS（注意 `TestStreamInternalSeedsColdStart` 等端到端测试若构造了 tool-tail 冷启动会话，可能因新行为多出一轮补种请求而失败——若失败，检查其 mock server 的 bodies 计数断言并更新期望值，行为本身是正确的新契约）。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add internal/provider/seed.go internal/provider/seed_test.go internal/provider/conv_test.go
@@ -117,7 +117,7 @@ git commit -m "feat: allow tool-tail requests to context-seed after session loss
 - Consumes: `toolTailIndex(messages []ChatMessage) int`。
 - Produces: `seedConversation` 签名不变。tool-tail 请求的前缀指纹 = `conversationFingerprint(messages[:toolIdx])`，重试轮 `LookupConversation` 前缀循环命中。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `internal/provider/seed_test.go` 追加：
 
@@ -159,12 +159,12 @@ func TestSeedConversationToolTailPrefixMapping(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `go test ./internal/provider/ -run TestSeedConversationToolTailPrefixMapping -v`
 Expected: FAIL — `LookupConversation` 返回 ""（现状 queryIdx 找不到非 tool_result 的 user 消息时返回，seedConversation 直接 return，不存映射）。
 
-- [ ] **Step 3: 修改 seedConversation**
+- [x] **Step 3: 修改 seedConversation**
 
 `internal/provider/seed.go` 把 queryIdx 段（原 55-66 行）：
 
@@ -207,12 +207,12 @@ Expected: FAIL — `LookupConversation` 返回 ""（现状 queryIdx 找不到非
 
 注释第 55-56 行的「前缀指纹：messages[:queryIdx]（去掉最新 user 消息）」同步改为「前缀指纹：普通续聊=去掉最新 user 消息；tool-tail=待处理 tool results 之前的全部历史」。
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `go test ./internal/provider/ -run 'TestSeedConversation|TestShouldSeed' -v`
 Expected: PASS（新旧两个映射测试都绿——普通续聊路径 prefixEnd 语义与原 queryIdx 相同）。
 
-- [ ] **Step 5: 跑全量 + Commit**
+- [x] **Step 5: 跑全量 + Commit**
 
 Run: `go test ./internal/provider/`
 Expected: PASS。
@@ -234,7 +234,7 @@ git commit -m "feat: seed tool-tail prefix fingerprint at toolTailIndex boundary
 - Consumes: `truncateMiddleRunes(s string, max int) string`（strutil.go）。
 - Produces: `stripSystemReminders(text string) string`。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `internal/provider/skills_fold_test.go` 末尾追加：
 
@@ -277,12 +277,12 @@ func TestFoldedTaskBlockStripsSystemReminders(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `go test ./internal/provider/ -run 'TestStripSystemReminders|TestFoldedTaskBlockStripsSystemReminders' -v`
 Expected: FAIL — `undefined: stripSystemReminders`。
 
-- [ ] **Step 3: 实现 stripSystemReminders 并应用**
+- [x] **Step 3: 实现 stripSystemReminders 并应用**
 
 在 `internal/provider/messages.go` 的 `foldedSystemParts` 之前新增：
 
@@ -316,12 +316,12 @@ func stripSystemReminders(text string) string {
 		}
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `go test ./internal/provider/ -run 'TestStripSystemReminders|TestFoldedTaskBlockStripsSystemReminders' -v`
 Expected: PASS。
 
-- [ ] **Step 5: 跑全量 + Commit**
+- [x] **Step 5: 跑全量 + Commit**
 
 Run: `go test ./internal/provider/`
 Expected: PASS（skills_fold_test.go 现有测试若断言 task 块含 system-reminder 文本会失败——它们断言的是 skills 清单与任务标记存活，剥离不影响）。
@@ -343,7 +343,7 @@ git commit -m "feat: strip system-reminder blocks from folded task block"
 - Consumes: Task 3 的 `stripSystemReminders`；现有段预算常量。
 - Produces: `type querySection struct { Text string; Weight int }`（Weight 3=高 2=中 1=低）；`splitMessagesSeed` 返回的 `splitResult.Query` 语义不变（仍为最终字符串——本 task 内先以 sections 拼接产出，cap 逻辑在 Task 5 接入）。
 
-- [ ] **Step 1: 写失败测试（段落顺序与权重标注不变，出站字符串与现状一致）**
+- [x] **Step 1: 写失败测试（段落顺序与权重标注不变，出站字符串与现状一致）**
 
 在 `internal/provider/skills_fold_test.go` 追加：
 
@@ -371,12 +371,12 @@ func TestFoldedSectionOrderUnchanged(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: 运行确认当前通过（本 task 的护栏测试）**
+- [x] **Step 2: 运行确认当前通过（本 task 的护栏测试）**
 
 Run: `go test ./internal/provider/ -run TestFoldedSectionOrderUnchanged -v`
 Expected: PASS（改造前就该通过——它是防回归护栏）。
 
-- [ ] **Step 3: 新增 querySection 类型与渲染改造**
+- [x] **Step 3: 新增 querySection 类型与渲染改造**
 
 在 `internal/provider/messages.go` 的 `splitResult` 定义后新增：
 
@@ -465,12 +465,12 @@ func joinWeightedSections(sections []querySection) string {
 
 同时把 `contextParts` 相关的 `foldedToolResultParts` 调用产物 append 处同步改为带权重的 querySection（`[Tool Result]`/`[Tool Error]`/`[User]` 混排均为 Weight 1）。
 
-- [ ] **Step 4: 运行护栏与既有折叠测试**
+- [x] **Step 4: 运行护栏与既有折叠测试**
 
 Run: `go test ./internal/provider/ -run 'TestFolded|TestSplitMessages' -v`
 Expected: PASS——`TestSplitMessagesContextSeedReplacesTailWithSummaryInstruction`、`TestFoldedSystemKeepsSkillList`、`TestFoldedTaskBlockStripsSystemReminders`、`TestFoldedSectionOrderUnchanged` 全绿（拼接顺序与内容零变化）。
 
-- [ ] **Step 5: 跑全量 + Commit**
+- [x] **Step 5: 跑全量 + Commit**
 
 Run: `go test ./internal/provider/`
 Expected: PASS。
@@ -492,7 +492,7 @@ git commit -m "refactor: fold replay renders weighted query sections"
 - Consumes: Task 4 的 `[]querySection`；`MaxUpstreamQueryRunes`。
 - Produces: `capUpstreamQuerySections(sections []querySection) string`。`capUpstreamQuery(q string) string` 保留不动（非折叠路径与防御兜底共用）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `internal/provider/skills_fold_test.go` 追加：
 
@@ -518,7 +518,7 @@ func TestCapUpstreamQuerySections(t *testing.T) {
 	}
 	// 2) 超限：低段从最旧开始丢，高段全存。
 	old := strings.Repeat("旧", 2000)
-	older := strings.Repeat("更旧", 2000)
+	older := strings.Repeat("更旧", 3000) // 6000 runes：确保 joined(10024)>limit(9900) 真正超限（原 2000 仅 8024，与本 case 的丢弃断言自相矛盾）
 	mid := strings.Repeat("中", 2000)
 	over := []querySection{
 		{Text: "SKILLS", Weight: 3},
@@ -552,12 +552,12 @@ func TestCapUpstreamQuerySections(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `go test ./internal/provider/ -run TestCapUpstreamQuerySections -v`
 Expected: FAIL — `undefined: capUpstreamQuerySections`。
 
-- [ ] **Step 3: 实现 capUpstreamQuerySections**
+- [x] **Step 3: 实现 capUpstreamQuerySections**
 
 在 `capUpstreamQuery` 之后新增（messages.go）：
 
@@ -650,22 +650,26 @@ func insertOmissionMarker(sections []querySection, keep []bool, marker string) s
 
 注意 `keptJoin`/`insertOmissionMarker` 中 marker 计入长度：`insertOmissionMarker` 的产物也必须 ≤ limit——drop 循环的 `total -= ... + 2` 已留了分隔余量，marker 长度（约 50 rune）从 `limit` 预扣：把 `limit` 的使用改为 `limit-markerReserve`，`const markerReserve = 80`。执行者落地时以「最终产物 rune 数 ≤ limit」为验收，写一个断言进测试（Step 1 测试 3 已有 `> 9900` 检查）。
 
-- [ ] **Step 4: splitMessagesSeed 出站处接线**
+- [x] **Step 4: splitMessagesSeed 出站处接线**
 
-`joinWeightedSections(sections)` 的调用点改为：
+`joinWeightedSections(sections)` 的调用点改为（**探针旁路**：`WafProbe` 请求必须走未截断 join，否则 `request.go` 的探针旁路拿不到逐字原文——它靠 `split.Query` 未截断来还原。cap 只作用于普通请求）：
 
 ```go
+	// 探针需逐字（不中和、不截断），cap 前跳过；契约与 request.go 的 WafProbe 旁路一致。
+	if wafProbe {
+		return splitResult{Query: joinWeightedSections(sections)}
+	}
 	return splitResult{Query: capUpstreamQuerySections(sections)}
 ```
 
-同时删除 `joinWeightedSections` 注释里「当前 cap 阶段之前」的措辞（它现在是 cap 的内部 helper，保留函数供 cap 复用）。
+同时删除 `joinWeightedSections` 注释里「当前 cap 阶段之前」的措辞（它现在是 cap 的内部 helper，探针路径与 cap 兜底共用，保留函数）。
 
-- [ ] **Step 5: 运行测试确认通过**
+- [x] **Step 5: 运行测试确认通过**
 
-Run: `go test ./internal/provider/ -run 'TestCapUpstreamQuerySections|TestFolded|TestSplitMessages' -v`
-Expected: PASS。
+Run: `go test ./internal/provider/ -run 'TestCapUpstreamQuerySections|TestFolded|TestSplitMessages|TestBuildBodyWafProbeBypass' -v`
+Expected: PASS。（`TestBuildBodyWafProbeBypass` 钉住探针逐字旁路——Step 4 的 `wafProbe` 护栏必须让它保持绿。）
 
-- [ ] **Step 6: 跑全量 + Commit**
+- [x] **Step 6: 跑全量 + Commit**
 
 Run: `go test ./internal/provider/`
 Expected: PASS。
@@ -687,7 +691,7 @@ git commit -m "feat: weighted section dropping in capUpstreamQuery"
 - Consumes: Task 5 全部。
 - Produces: 无新接口；本 task 是契约钉子。
 
-- [ ] **Step 1: 写失败测试（钉住探针旁路与旧 cap 路径共存）**
+- [x] **Step 1: 写失败测试（钉住探针旁路与旧 cap 路径共存）**
 
 ```go
 // TestFoldedProbeQueryUncapped: 探针请求（WafProbe）折叠产物不经 cap/剥离/
@@ -712,12 +716,12 @@ func TestFoldedProbeQueryUncapped(t *testing.T) {
 
 若 `min` helper 不存在，用内联 `if len(...) > 60 { ... }` 替代。
 
-- [ ] **Step 2: 运行**
+- [x] **Step 2: 运行**
 
 Run: `go test ./internal/provider/ -run TestFoldedProbeQueryUncapped -v`
 Expected: PASS（探针路径在 sections 化中未触碰——若 FAIL 说明 Task 4/5 改坏探针分支，回去修）。
 
-- [ ] **Step 3: 核对 request.go 出站接线**
+- [x] **Step 3: 核对 request.go 出站接线**
 
 打开 `internal/provider/request.go` 42-49 行确认：
 
@@ -739,7 +743,7 @@ Expected: PASS（探针路径在 sections 化中未触碰——若 FAIL 说明 T
 	// 此处 capUpstreamQuery 对折叠产物是幂等直通，对增量/首轮路径仍是唯一 cap。
 ```
 
-- [ ] **Step 4: 跑全量 + Commit**
+- [x] **Step 4: 跑全量 + Commit**
 
 Run: `go test ./...`
 Expected: PASS（全仓库）。
