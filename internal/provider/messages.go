@@ -449,11 +449,16 @@ func (p *Provider) splitMessagesSeed(messages []ChatMessage, convID string, wafP
 	if tail != "" {
 		sections = append(sections, querySection{Text: tail, Weight: 3})
 	}
-	return splitResult{Query: joinWeightedSections(sections)}
+	// 探针需逐字：cap 前跳过截断，契约与 request.go 的 WafProbe 旁路一致。
+	if wafProbe {
+		return splitResult{Query: joinWeightedSections(sections)}
+	}
+	return splitResult{Query: capUpstreamQuerySections(sections)}
 }
 
-// joinWeightedSections 按 section 顺序拼接出站 query。当前 cap 阶段（Task 5）
-// 之前，权重只随结构传递，拼接行为与旧 strings.Join 一致。
+// joinWeightedSections 按 section 顺序拼接出站 query，拼接行为与旧 strings.Join
+// 一致。它现在是 capUpstreamQuerySections 的内部 helper：cap 先用它算全量长度并在
+// 不超限时直通，超限时再按权重整段丢弃。
 func joinWeightedSections(sections []querySection) string {
 	parts := make([]string, len(sections))
 	for i, s := range sections {
@@ -476,6 +481,95 @@ func capUpstreamQuery(q string) string {
 	head := limit * 3 / 10
 	tailLen := limit - head - len([]rune(marker))
 	return string(runes[:head]) + marker + string(runes[len(runes)-tailLen:])
+}
+
+// capUpstreamQuerySections 把折叠段列表压进上游 10000 rune 校验上限。
+// 语义（设计文档 2026-09-18 改动三）：
+//   - 不超限：按原顺序直通，与旧拼接逐字节一致。
+//   - 超限：先丢低权重段（从最旧开始），不够再丢中权重段；高权重段（skills/
+//     task/tail）永不丢。丢弃以整段为单位，段内不截断（段预算已约束过）。
+//   - 丢弃时在首个被丢段的位置插入 "...[omitted: N older history sections]..." 标记。
+//   - 标记计入长度：丢弃阈值按 limit-markerReserve 预扣，且最终以「含标记产物
+//     ≤ limit」为准返回，保证出站串必定不超上限。
+//   - 防御兜底：只剩高段仍超限（理论不可能：4000+2000+2800=8800），
+//     回退 capUpstreamQuery 字符串硬切。
+func capUpstreamQuerySections(sections []querySection) string {
+	const limit = MaxUpstreamQueryRunes - 100
+	// markerReserve 为省略标记（约 41 rune）加分隔符预留余量，从丢弃阈值里预扣，
+	// 使「含标记的最终产物」而非「仅保留段」落在 limit 内。
+	const markerReserve = 80
+	joined := joinWeightedSections(sections)
+	if len([]rune(joined)) <= limit {
+		return joined
+	}
+	budget := limit - markerReserve
+	// drop 从最旧的「可丢段」（Weight < minWeight）开始丢，直到装得下 budget。
+	drop := func(minWeight int) (keep []bool, dropped int) {
+		keep = make([]bool, len(sections))
+		for i := range keep {
+			keep[i] = true
+		}
+		total := len([]rune(joined))
+		for i := 0; i < len(sections); i++ {
+			if sections[i].Weight >= minWeight {
+				continue // 高于本档的不丢
+			}
+			total -= len([]rune(sections[i].Text)) + 2 // "\n\n" 分隔
+			keep[i] = false
+			dropped++
+			if total <= budget {
+				break
+			}
+		}
+		return keep, dropped
+	}
+	keep, dropped := drop(2) // 丢 Weight<2（即 1）
+	if kept := keptJoin(sections, keep); kept != "" && len([]rune(kept)) > budget {
+		keep, dropped = drop(3) // 中段也超：继续丢 Weight<3（即 1、2）
+	}
+	if dropped > 0 {
+		marker := fmt.Sprintf("...[omitted: %d older history sections]...", dropped)
+		// 标记插在首个被丢段的位置（时间序即位置序），保持前后文邻接关系。
+		withMarker := insertOmissionMarker(sections, keep, marker)
+		if len([]rune(withMarker)) > limit {
+			// 只剩高段仍超（理论不可能）：字符串硬切兜底。
+			return capUpstreamQuery(withMarker)
+		}
+		return withMarker
+	}
+	result := keptJoin(sections, keep)
+	if len([]rune(result)) > limit {
+		return capUpstreamQuery(result)
+	}
+	return result
+}
+
+// keptJoin 只拼接 keep[i]=true 的段。
+func keptJoin(sections []querySection, keep []bool) string {
+	var parts []string
+	for i, s := range sections {
+		if keep[i] {
+			parts = append(parts, s.Text)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// insertOmissionMarker 在首个被丢段的位置插入省略标记后返回最终串。
+func insertOmissionMarker(sections []querySection, keep []bool, marker string) string {
+	var parts []string
+	inserted := false
+	for i, s := range sections {
+		if !keep[i] {
+			if !inserted {
+				parts = append(parts, marker)
+				inserted = true
+			}
+			continue
+		}
+		parts = append(parts, s.Text)
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // seedSummaryInstruction 是补种轮的 tail 指令：让模型对折叠历史做一段话总结，

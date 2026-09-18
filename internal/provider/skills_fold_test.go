@@ -123,3 +123,57 @@ func TestFoldedSectionOrderUnchanged(t *testing.T) {
 		t.Fatalf("order must be task < history < tail: %d/%d/%d", iTask, iHist, iTail)
 	}
 }
+
+// TestCapUpstreamQuerySections: 超限时按权重整段丢弃。
+func TestCapUpstreamQuerySections(t *testing.T) {
+	mk := func(n, weight int, text string) []querySection {
+		out := make([]querySection, n)
+		for i := range out {
+			out[i] = querySection{Text: text, Weight: weight}
+		}
+		return out
+	}
+	// 1) 不超限直通。
+	small := []querySection{
+		{Text: "skills", Weight: 3},
+		{Text: "task", Weight: 3},
+		{Text: strings.Repeat("a", 100), Weight: 1},
+		{Text: "tail", Weight: 3},
+	}
+	if got := capUpstreamQuerySections(small); got != "skills\n\ntask\n\n"+strings.Repeat("a", 100)+"\n\ntail" {
+		t.Fatalf("under limit must pass through verbatim, got %q", got)
+	}
+	// 2) 超限：低段从最旧开始丢，高段全存。
+	old := strings.Repeat("旧", 2000)
+	older := strings.Repeat("更旧", 3000) // 6000 runes: pushes joined over the 9900 limit so drop logic engages
+	mid := strings.Repeat("中", 2000)
+	over := []querySection{
+		{Text: "SKILLS", Weight: 3},
+		{Text: older, Weight: 1},
+		{Text: old, Weight: 1},
+		{Text: mid, Weight: 2},
+		{Text: "TASK", Weight: 3},
+		{Text: "TAIL", Weight: 3},
+	}
+	got := capUpstreamQuerySections(over)
+	for _, keep := range []string{"SKILLS", "TASK", "TAIL", "中"} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("weight-3/2 section must survive: %q", keep)
+		}
+	}
+	if strings.Contains(got, "更旧") {
+		t.Error("oldest low-weight section must be dropped first")
+	}
+	if !strings.Contains(got, "...[omitted:") {
+		t.Errorf("omission marker with count required, got %q", got)
+	}
+	// 3) 全低段超限：丢到剩最新一条低段 + 标记。
+	lows := mk(8, 1, strings.Repeat("x", 2000))
+	got = capUpstreamQuerySections(lows)
+	if !strings.Contains(got, "...[omitted:") {
+		t.Error("marker required when dropping low sections")
+	}
+	if got := len([]rune(got)); got > 9900 {
+		t.Errorf("result must stay under limit, got %d runes", got)
+	}
+}
