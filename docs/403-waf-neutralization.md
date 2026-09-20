@@ -350,4 +350,35 @@ curl $K -X DELETE "$BASE/api/waf/probe/<job_id>"       # 中止
 
 **探测表**（[errors.go](../internal/provider/errors.go)）：补 `;curl http`、`|curl https` 等 8 个子串（小写化计数，前缀匹配；双空格形计数漏、由规则覆盖——探测表只做取证，宁漏勿误伤）。
 
-**验证**：单测 8 新用例（命中 5 / 放行 3）；`go vet` + `go test ./...` 全绿；端到端——线上原触发行 529，同内容词内 ZWSP 破坏后 200。线上部署为旧版二进制，待发版后重放原触发行回归（第 6 节方法论）。
+**验证**：单测 8 新用例（命中 5 / 放行 3）；`go vet` + `go test ./...` 全绿；端到端——线上原触发行 529，同内容词内 ZWSP 破坏后 200。线上部署为旧版二进制，待发版后重放原触发文行回归（第 6 节方法论）。
+
+## 15. 第六类内容签名：/etc/ 敏感文件路径（2026-09-20，第 12 节 API + 直连交叉重放定位）
+
+**案发**：账号 27 同 body（83182）8 连败 403（id 444-450 + 454/455，客户端重试全灭）。判别量 `raw_sig=0`、`zwsp=1`；体积分桶 80K 桶 3 过 3 败交叉，无法定案。
+
+**定位**（本轮新方法论）：
+
+1. **网关内重放会换号，不能当预言机**——首次重放（写日志 id 454/455）复现 403，但后续 bisect 变体因指纹不同走了号池其他账号全部假阳性 PASS（账号 27 期间 quota 耗尽 BLOCKED）。二分必须**直连上游**（真实头 + 真实体交叉重放），变量才受控；
+2. 交叉重放 3 轮全确定性：446 头×446 体 = 403、451 头×446 体 = 403、446 头×451 体 = 200——账号/头/Cookie 排除，内容型坐实；
+3. 叶子 diff → 唯一差异叶子 `toolResponses[0].content`（新增 waf_test.go 源码全文）；行级二分（直连上游，等长 padding）7 轮收敛到 bin/cat 测试用例行；
+4. 行内二分拆出**两个独立触发形态**：已知的 `/bin/cat`（用例左列原文）与新签名 **`/etc/passwd`**（右列已中和的 `/bin/ZWSPcat /etc/passwd` 仍 403，证明独立触发）。
+
+**签名边界**（实测）：
+
+| 形态 | 结果 |
+|---|---|
+| `/etc/passwd`、`/etc/shadow`、`/etc/hosts`、`/etc/group`（大小写不敏感、双引号内命中） | **403** |
+| `/etc/passwdX`、`X/etc/passwd`（前后缀词字符，纯前缀匹配——与 `<imgsrc` 同形） | **403** |
+| `/etc/password`、`/etc/Xpasswd`、`/etc/passw`（截断）、`etc/passwd`（无前导斜杠） | 放行 |
+| `/etc/profile`、`/etc/crontab`、`/etc/resolv.conf`、`/etc/fstab`、`/etc/ssh/…`、`/etc/nginx/…` | 放行 |
+| `/etc/`+ZWSP+`passwd`（词前插入） | **200** |
+
+触发载荷是 [waf_test.go](../internal/provider/waf_test.go) bin/cat 用例里的 passwd 字面量——与 §9/§11 系列同构的「排查载体自噬」：WAF 测试源码本身成了 WAF 载荷。
+
+**修复**（[waf.go](../internal/provider/waf.go) 第 9 条规则，与 bin/cat 同款机制）：
+
+- `(?i)(/etc/)(passwd|shadow|hosts|group)` → `/etc/` 与文件名之间插 ZWSP；
+- 探测表补 `/etc/passwd`、`/etc/shadow`、`/etc/hosts`、`/etc/group` 四项取证；
+- 单测 10 用例（命中 6 / 放行 4，含与 bin/cat 规则叠加的复合行）。
+
+**验证**：`go vet` + `go test ./...` 全绿；离线——真实 446 失败体跑新规则后 CF 归一化零残留（6 处 ZWSP 插入）；端到端——中和后的 446 体直连上游重放 2/2 翻绿（原体 3 轮确定性 403）。

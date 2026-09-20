@@ -110,6 +110,9 @@ var wafSignatureProbes = []string{
 	// 覆盖；探测表只做取证计数，宁漏勿误伤。
 	";curl http", ";curl https", ";curl ftp", "; wget http", "; wget https",
 	"|curl http", "|curl https", "| wget http", "| wget https",
+	// /etc/ 敏感文件路径形（2026-09-20 线上排查定位，第 7 类内容签名）：四个精确
+	// 文件名触发 CF 敏感文件读取规则，详见 waf.go 规则注释。
+	"/etc/passwd", "/etc/shadow", "/etc/hosts", "/etc/group",
 }
 
 // normalizeWafBody 做小写化并还原 Go json.Marshal 对 < > & 的六字符 unicode 转义，

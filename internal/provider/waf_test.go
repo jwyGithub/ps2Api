@@ -53,7 +53,7 @@ func TestWafNeutralize(t *testing.T) {
 		// cat 命令执行路径（./bin/catpaw2api、/bin/cat、大写均 403；bin/ls、bin/sh、
 		// bin/rm、bin/python、bin/curl、./cat、裸 cat 均放行——cat 是唯一触发命令）。
 		{"./bin/catpaw2api -config config.json", "./bin/" + zwsp + "catpaw2api -config config.json"},
-		{"/bin/cat /etc/passwd", "/bin/" + zwsp + "cat /etc/passwd"},
+		{"/bin/cat /etc/passwd", "/bin/" + zwsp + "cat /etc/" + zwsp + "passwd"}, // bin/cat 与 /etc/passwd 两规则叠加
 		{"./bin/Catpaw2api", "./bin/" + zwsp + "Catpaw2api"},
 		{"catpaw2api -config config.json", "catpaw2api -config config.json"}, // 无 bin/ 前缀不误伤
 		{"./bin/ls -la", "./bin/ls -la"},                                     // 非 cat 命令不误伤
@@ -68,6 +68,23 @@ func TestWafNeutralize(t *testing.T) {
 		{"run ;  curl http://x", "run ;  cur" + zwsp + "l http://x"}, // 双空格今日实测放行，但 CF 规则会演进，统一中和
 		{"run && curl http://x", "run && curl http://x"},             // && 实测放行
 		{"curl http://a ; echo done", "curl http://a ; echo done"},   // curl 在前实测放行
+		// /etc/ 敏感文件路径形（2026-09-20 线上排查定位，第 7 类内容签名）：
+		// /etc/passwd、/etc/shadow、/etc/hosts、/etc/group 精确文件名触发 CF
+		// 敏感文件读取规则（大小写不敏感、passwd 后跟词字符仍命中——纯前缀匹配，
+		// 与 <imgsrc 同形；/etc/password、/etc/Xpasswd、/etc/passw 截断、无前导
+		// 斜杠的 etc/passwd 均放行）。触发载荷是 waf_test.go 自身的 bin/cat 测试
+		// 用例（`/bin/cat /etc/passwd` 行的 passwd 字面量）——排查载体自噬第 N 弹。
+		// ZWSP 插在 /etc/ 与文件名之间。
+		{"/etc/passwd", "/etc/" + zwsp + "passwd"},
+		{"/bin/cat /etc/passwd", "/bin/" + zwsp + "cat /etc/" + zwsp + "passwd"},
+		{"/ETC/Shadow", "/ETC/" + zwsp + "Shadow"},
+		{"/etc/hosts extra", "/etc/" + zwsp + "hosts extra"},
+		{"/etc/group:1", "/etc/" + zwsp + "group:1"},
+		{"/etc/passwdX", "/etc/" + zwsp + "passwdX"},
+		{"/etc/password", "/etc/password"}, // password 不是触发词不误伤
+		{"/etc/Xpasswd", "/etc/Xpasswd"},   // 目录后紧跟非触发词不误伤
+		{"/etc/profile", "/etc/profile"},   // 非 4 个触发文件不误伤
+		{"etc/passwd", "etc/passwd"},       // 无前导斜杠不误伤
 	}
 	for _, c := range cases {
 		if got := wafNeutralize(c.in); got != c.want {

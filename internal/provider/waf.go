@@ -51,6 +51,14 @@ var wafNeutralizeRules = []struct {
 	// bin/ls、bin/sh、bin/rm、bin/python、bin/curl、`./cat`、裸 `cat` 均放行，
 	// 即特征是字面量 bin/cat（cat 是唯一触发命令），ZWSP 插在 bin/ 与 cat 之间。
 	{regexp.MustCompile(`(?i)(s?bin/)(cat)`), "${1}" + wafBreak + "${2}"},
+	// /etc/ 敏感文件路径形（2026-09-20 线上排查定位，真实头直连上游交叉重放 + 行级
+	// 二分收敛到 waf_test.go 的 bin/cat 测试用例行）：/etc/passwd、/etc/shadow、
+	// /etc/hosts、/etc/group 四个精确文件名触发 CF 敏感文件读取规则——大小写不敏感、
+	// passwd 后跟词字符仍命中（纯前缀匹配，与 <imgsrc 同形）；/etc/password、
+	// /etc/Xpasswd、截断形、无前导斜杠均放行，其余 /etc/ 路径（profile、crontab、
+	// fstab、nginx/…）实测放行。ZWSP 插在 /etc/ 与文件名之间（实测放行）。幂等：
+	// ZWSP 后文件名不再紧跟 /etc/，匹配不再成立。
+	{regexp.MustCompile(`(?i)(/etc/)(passwd|shadow|hosts|group)`), "${1}" + wafBreak + "${2}"},
 	// shell 命令行注入形（2026-09-17 20:15 实测，线上体行级二分 ~20 轮定位）：
 	// 反引号/代码围栏上下文里的 curl/wget + 单连字符 flag + 参数 触发 CF
 	// 命令注入托管规则——`curl -o f url`、```\ncurl -o f url\n```（无语言标注）、
