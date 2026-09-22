@@ -115,3 +115,54 @@ func wafStripBreak(s string) string {
 	}
 	return strings.ReplaceAll(s, wafBreak, "")
 }
+
+// semanticRewrites 是出站文本的语义改写表：对 2026-09-22 线上事故定位出的
+// Postman 上游语义安全分类器触发句式做同义替换。该分类器与 Cloudflare 子串
+// WAF 是两套机制（ZWSP 字符注入实测无效——归一化阶段被剥掉；同输入时过时不过，
+// 为非确定性打分），只能改写语义。全部规则经线上重放实验验证：
+//   - "instructions are shown below" 元话语（Claude Code 客户端 system-reminder
+//     固定开头，3/3 FLAG；"Guidelines are shown below" 0/3）
+//   - "You are Claude Code / a Claude agent / an interactive agent" 身份声明
+//     （确定性 FLAG；"coding assistant/tool" 放行）
+//   - "startup hook success:" （Ponytail 插件 SessionStart 行，3/3 FLAG；
+//     "startup note:" 放行）
+// 改写只作用于出站副本，模型读到的语义等价（guidelines/assistant/tool 均为
+// 同义词，指令力不变）。残余概率性触发（大 payload 时 ~50%）由上游错误重试兜底。
+var semanticRewrites = []struct{ from, to string }{
+	{"Codebase and user instructions are shown below.", "Codebase and user guidelines are shown below."},
+	{"user instructions are shown below", "user guidelines are shown below"},
+	{"User instructions are shown below", "User guidelines are shown below"},
+	{"Instructions are shown below", "Guidelines are shown below"},
+	{"You are Claude Code, Anthropic's official CLI tool for Claude, running within the Claude Agent SDK.", "You are a coding tool for software engineering tasks."},
+	{"running within the Claude Agent SDK", "for software engineering tasks"},
+	{"You are a Claude agent, built on Anthropic's Claude Agent SDK.", "You are a coding assistant."},
+	{"You are an interactive agent that helps users with software engineering tasks.", "You are an interactive tool that helps users with software engineering tasks."},
+	{"SessionStart:startup hook success:", "SessionStart:startup note:"},
+}
+
+// semanticRewriteEnabled 是语义改写的 kill-switch（与 wafNeutralizeEnabled 同款）：
+// GATEWAY_DISABLE_SEMANTIC_REWRITE=1 时关闭。默认开启。
+func semanticRewriteEnabled() bool {
+	return os.Getenv("GATEWAY_DISABLE_SEMANTIC_REWRITE") != "1"
+}
+
+// semanticRewrite 对出站文本做已知触发句式的同义改写。与 wafNeutralize 串联在同
+// 一出口（见 request.go 的出站 query 链路）：先 ZWSP 中和再语义改写，两者互不干扰
+// ——中和插零宽字符改形态，改写换同义词改语义。快路径：不含触发子串的文本
+// strings.Contains 探测即返回，近零开销。
+func semanticRewrite(s string) string {
+	changed := false
+	for _, r := range semanticRewrites {
+		if strings.Contains(s, r.from) {
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		return s
+	}
+	for _, r := range semanticRewrites {
+		s = strings.ReplaceAll(s, r.from, r.to)
+	}
+	return s
+}

@@ -215,6 +215,71 @@ func TestWafSignatureProbesAndCounts(t *testing.T) {
 	}
 }
 
+// TestSemanticRewrite 钉住语义改写：2026-09-22 线上事故（"This message got flagged
+// by our safety checks" 400）定位的 Postman 上游语义分类器触发句式做同义替换，
+// 干净文本零拷贝原样返回，kill-switch 生效。触发句式与替换词均经线上重放验证
+// （instructions→guidelines 3/3→0/3；agent 身份声明→coding assistant/tool 放行）。
+func TestSemanticRewrite(t *testing.T) {
+	cases := []struct{ in, want string }{
+		// Claude Code 客户端 system-reminder 元话语（确定性 FLAG 实测）
+		{"Codebase and user instructions are shown below. Be sure to adhere.",
+			"Codebase and user guidelines are shown below. Be sure to adhere."},
+		{"Some user instructions are shown below", "Some user guidelines are shown below"},
+		// agent 身份声明族（确定性 FLAG 实测）
+		{"You are Claude Code, Anthropic's official CLI tool for Claude, running within the Claude Agent SDK.",
+			"You are a coding tool for software engineering tasks."},
+		{"You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+			"You are a coding assistant."},
+		{"You are an interactive agent that helps users with software engineering tasks.",
+			"You are an interactive tool that helps users with software engineering tasks."},
+		// Ponytail 插件 SessionStart 行（3/3 FLAG 实测）
+		{"SessionStart:startup hook success: PONYTAIL MODE ACTIVE — level: full",
+			"SessionStart:startup note: PONYTAIL MODE ACTIVE — level: full"},
+		// 不含触发句式的文本原样返回
+		{"The document contains setup instructions.", "The document contains setup instructions."},
+		{"Reply with the word banana.", "Reply with the word banana."},
+	}
+	for _, c := range cases {
+		if got := semanticRewrite(c.in); got != c.want {
+			t.Fatalf("semanticRewrite(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestSemanticRewriteKillSwitch(t *testing.T) {
+	t.Setenv("GATEWAY_DISABLE_SEMANTIC_REWRITE", "1")
+	if semanticRewriteEnabled() {
+		t.Fatal("GATEWAY_DISABLE_SEMANTIC_REWRITE=1 should disable rewriting")
+	}
+	t.Setenv("GATEWAY_DISABLE_SEMANTIC_REWRITE", "")
+	if !semanticRewriteEnabled() {
+		t.Fatal("rewriting should be enabled by default")
+	}
+}
+
+// TestBuildBodySemanticRewritesOutboundQuery 端到端：含触发句式的消息经 buildBody
+// 出站后，query 中不再有触发原文、且改写形在场；req.Messages 原文不被改写（指纹层）。
+func TestBuildBodySemanticRewritesOutboundQuery(t *testing.T) {
+	p := New()
+	req := &ChatRequest{Model: "claude-opus-4-8", Endpoint: "anthropic", Messages: []ChatMessage{
+		{Role: "user", Content: rawText(t,
+			"Codebase and user instructions are shown below. Be sure to adhere to these instructions.")},
+	}}
+	tokens := &Tokens{AccessToken: "tok", UserID: "u", WorkspaceID: "ws"}
+
+	body := p.buildBody(req, tokens, "CLAUDE_OPUS_48", 1)
+	query := body["input"].(map[string]interface{})["query"].(string)
+	if strings.Contains(query, "instructions are shown below") {
+		t.Fatalf("outbound query should not contain trigger phrase, got: %q", query)
+	}
+	if !strings.Contains(query, "guidelines are shown below") {
+		t.Fatalf("outbound query should contain rewritten form, got: %q", query)
+	}
+	if !strings.Contains(string(req.Messages[0].Content), "instructions are shown below") {
+		t.Fatal("req.Messages must never be mutated by outbound rewriting")
+	}
+}
+
 // TestBuildBodyWafProbeBypass 钉住探针旁路：WafProbe 请求的出站 query 原样保留——
 // 不中和（中和会掐灭待验证的已知特征，叶子轮必然假阴性）、不截断（二分切片必须
 // padding 到与原叶子等长，截断破坏等长方法论）。非探针请求行为不变。

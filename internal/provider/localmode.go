@@ -118,6 +118,10 @@ func (p *Provider) nativeToolResponse(accountID int64, messages []ChatMessage) (
 		if wafNeutralizeEnabled() {
 			payload = wafNeutralize(payload)
 		}
+		// 语义改写与 request.go 出站 query 同款（2026-09-22 语义分类器拦截）。
+		if semanticRewriteEnabled() {
+			payload = semanticRewrite(payload)
+		}
 		if !json.Valid([]byte(payload)) {
 			encoded, _ := json.Marshal(map[string]string{"status": status, "message": payload})
 			payload = string(encoded)

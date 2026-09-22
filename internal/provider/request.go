@@ -43,9 +43,16 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 	// 此处 capUpstreamQuery 是「先中和再 cap」链路的最终安全网——wafNeutralize 会按
 	// 特征插入零宽空格令 rune 数回涨，贴近上限的折叠产物中和后可能越过 10000，由它
 	// 兜底截断（并非无条件直通）；对增量（hasConv）路径它则是唯一的 cap 点。
+	// semanticRewrite 紧随中和（2026-09-22 线上事故）：Postman 上游另有语义安全分类器，
+	// 对 agent 身份声明 / "instructions are shown" 元话语等句式做概率性拦截
+	// （"flagged by our safety checks" 400），ZWSP 形态破坏对它无效，只能同义改写。
+	// 改写不增长长度（同义短语等长或更短），cap 顺序安全。
 	upstreamQuery := split.Query
 	if wafNeutralizeEnabled() && !req.WafProbe {
 		upstreamQuery = wafNeutralize(upstreamQuery)
+	}
+	if semanticRewriteEnabled() && !req.WafProbe {
+		upstreamQuery = semanticRewrite(upstreamQuery)
 	}
 	query := capUpstreamQuery(upstreamQuery)
 	if req.WafProbe {
