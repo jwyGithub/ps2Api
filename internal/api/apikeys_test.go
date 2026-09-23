@@ -99,7 +99,8 @@ func TestAPIKeyAuth(t *testing.T) {
 	}
 }
 
-// TestChargeKey 按 (prompt+completion)×倍率 回写用量。
+// TestChargeKey 按 credits×倍率 回写用量（2026-09-23 ad08a82 起计量口径从
+// token 估算改为 AI credits，见 provider.Result.Credits 注释）。
 func TestChargeKey(t *testing.T) {
 	srv := &Server{Store: newTestStore(t)}
 	k, err := srv.Store.CreateAPIKey("sk-charge", "计费", nil, 0, 0, 1.5)
@@ -107,13 +108,15 @@ func TestChargeKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.WithValue(context.Background(), keyCtxKey{}, k)
-	srv.chargeKey(ctx, &provider.Result{PromptTokens: 10, CompletionTokens: 30})
+	// credits=40 → ceil(40×1.5)=60。tokens 字段仍在响应 usage 里报告，但不参与计费。
+	srv.chargeKey(ctx, &provider.Result{Credits: 40, PromptTokens: 10, CompletionTokens: 30})
 	got, _ := srv.Store.GetAPIKey(k.ID)
-	if got.QuotaUsed != 60 { // (10+30)*1.5
+	if got.QuotaUsed != 60 { // ceil(40*1.5)
 		t.Fatalf("quota_used = %d, want 60", got.QuotaUsed)
 	}
-	// 无密钥的 ctx 是 no-op；零 token 也 no-op。
-	srv.chargeKey(context.Background(), &provider.Result{PromptTokens: 1, CompletionTokens: 1})
+	// 无密钥的 ctx 是 no-op；零 credits 也 no-op（旧 token 字段不再触发计费）。
+	srv.chargeKey(context.Background(), &provider.Result{Credits: 1})
+	srv.chargeKey(ctx, &provider.Result{PromptTokens: 10, CompletionTokens: 30})
 	srv.chargeKey(ctx, &provider.Result{})
 	got, _ = srv.Store.GetAPIKey(k.ID)
 	if got.QuotaUsed != 60 {
