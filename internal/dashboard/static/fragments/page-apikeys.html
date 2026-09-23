@@ -4,7 +4,7 @@
         <div>
           <div class="text-[11px] font-semibold tracking-wider uppercase mb-2" style="color: var(--muted);">API Keys</div>
           <h1 class="hero-title">API KEY <em>管理</em></h1>
-          <p class="mt-2 text-[14px]" style="color: var(--fg-2);">对外 /v1 端点的访问密钥：有效期、token 额度、并发限制与计费倍率。</p>
+          <p class="mt-2 text-[14px]" style="color: var(--fg-2);">对外 /v1 端点的访问密钥：有效期、credits 额度、并发限制与计费倍率。</p>
         </div>
         <button class="btn btn-primary" onclick="openKeyDrawer()">新增 API KEY</button>
       </div>
@@ -13,7 +13,7 @@
         <div class="overflow-x-auto">
           <table class="data-table">
             <thead>
-              <tr><th>名称</th><th>密钥</th><th>状态</th><th>额度（token）</th><th>倍率</th><th>并发</th><th>有效期</th><th>创建时间</th><th>操作</th></tr>
+              <tr><th>名称</th><th>密钥</th><th>状态</th><th>额度（credits）</th><th>倍率</th><th>并发</th><th>有效期</th><th>创建时间</th><th>操作</th></tr>
             </thead>
             <tbody id="keysBody"></tbody>
           </table>
@@ -42,7 +42,7 @@
           <input class="input" id="keyFormExpiry" type="number" min="0" placeholder="留空 / 0 = 永不过期">
         </div>
         <div>
-          <label class="text-[12px] font-semibold block mb-1.5">额度限制（token 数，消耗 = tokens × 倍率）</label>
+          <label class="text-[12px] font-semibold block mb-1.5">额度限制（credits 数，消耗 = credits × 倍率）</label>
           <input class="input" id="keyFormQuota" type="number" min="0" placeholder="0 = 不限">
         </div>
         <div>

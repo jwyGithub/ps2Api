@@ -10,8 +10,12 @@ import (
 // logAttempt 把每次上游调用（无论成败）都写入 request_logs，
 // 失败次数、错误率、平均延迟、P95 等指标全部来自真实日志。
 func (r *Router) logAttempt(acc *store.Account, req *provider.ChatRequest, res *provider.Result, started time.Time) {
+	// 计量口径：本次实际消耗的 AI credits（上游累计用量增量），取代旧的 token 估算。
+	// 就地写回 res.Credits，供 API Key 计费（chargeKey）复用同一口径。
+	res.Credits = creditsConsumed(acc, res)
 	l := &store.RequestLog{
 		AccountID:       &acc.ID,
+		Credits:         res.Credits,
 		Model:           req.Model,
 		Endpoint:        req.Endpoint,
 		DurationMs:      time.Since(started).Milliseconds(),
@@ -28,14 +32,35 @@ func (r *Router) logAttempt(acc *store.Account, req *provider.ChatRequest, res *
 	}
 	if res.Success {
 		l.Status = "success"
-		l.PromptTokens = res.PromptTokens
-		l.CompletionTokens = res.CompletionTokens
-		l.TotalTokens = res.PromptTokens + res.CompletionTokens
 	} else {
 		l.Status = "error"
 		l.ErrorMessage = res.Error
 	}
 	_ = r.Store.LogRequest(l)
+}
+
+// creditsConsumed 计算本次请求实际消耗的 AI credits：上游返回的累计用量(usage.Usage)
+// 减去账号本次请求前的用量快照(acc.QuotaUsed)。没有有效 usage、或账号尚无基线
+// (QuotaUsed<=0，通常是首次采集)时记 0，避免把累计值误当单次增量；累计用量单调不减，
+// 负增量(周期重置等)一律归 0。计算后就地把 acc.QuotaUsed 推进到最新累计值，
+// 使同一账号的连续重试不会重复计量。
+func creditsConsumed(acc *store.Account, res *provider.Result) float64 {
+	if res == nil || res.Usage == nil || res.Usage.Limit <= 0 {
+		return 0
+	}
+	if acc.QuotaUsed <= 0 {
+		// 首次没有基线：仅建立基线，本次不计（下次起增量才可信）。
+		if res.Usage.Usage > 0 {
+			acc.QuotaUsed = res.Usage.Usage
+		}
+		return 0
+	}
+	delta := res.Usage.Usage - acc.QuotaUsed
+	acc.QuotaUsed = res.Usage.Usage
+	if delta < 0 {
+		return 0
+	}
+	return delta
 }
 
 // persistQuota 把聊天流 usage 与响应头限流快照写入账号。

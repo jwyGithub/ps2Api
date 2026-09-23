@@ -31,9 +31,22 @@ func (s *Server) accounts(w http.ResponseWriter, r *http.Request) {
 	jsonWrite(w, 200, map[string]interface{}{"data": all})
 }
 
+// addAccountReq 支持 WEB 和 DESKTOP 两种账号类型的字段。
+// WEB  必填：postman_sid、user_id、workspace_id、workspace_subdomain
+// DESKTOP 必填：access_token、user_id、workspace_id；可选：multi_login_token
 type addAccountReq struct {
-	Email  string          `json:"email"`
-	Tokens provider.Tokens `json:"tokens"`
+	Email       string `json:"email"`
+	Password    string `json:"password,omitempty"`
+	AccountType string `json:"account_type"` // WEB | DESKTOP
+	// DESKTOP
+	AccessToken     string `json:"access_token,omitempty"`
+	MultiLoginToken string `json:"multi_login_token,omitempty"`
+	// WEB
+	PostmanSID         string `json:"postman_sid,omitempty"`
+	WorkspaceSubdomain string `json:"workspace_subdomain,omitempty"`
+	// 公共
+	UserID      string `json:"user_id"`
+	WorkspaceID string `json:"workspace_id"`
 }
 
 type accountFile struct {
@@ -43,11 +56,12 @@ type accountFile struct {
 }
 
 type accountFileAccount struct {
-	Email    string          `json:"email"`
-	Password string          `json:"password"`
-	Source   string          `json:"source"`
-	Enabled  *bool           `json:"enabled"`
-	Tokens   provider.Tokens `json:"tokens"`
+	Email       string          `json:"email"`
+	Password    string          `json:"password"`
+	Source      string          `json:"source"`
+	AccountType string          `json:"account_type"` // WEB | DESKTOP
+	Enabled     *bool           `json:"enabled"`
+	Tokens      provider.Tokens `json:"tokens"`
 }
 
 func (s *Server) addAccount(w http.ResponseWriter, r *http.Request) {
@@ -56,11 +70,34 @@ func (s *Server) addAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	var q addAccountReq
 	if json.NewDecoder(r.Body).Decode(&q) != nil || q.Email == "" {
-		jsonError(w, 400, "email and tokens required", "invalid_request")
+		jsonError(w, 400, "email required", "invalid_request")
 		return
 	}
-	b, _ := json.Marshal(q.Tokens)
-	a, err := s.Store.UpsertAccount(q.Email, "manual", string(b), "manual")
+	q.AccountType = strings.ToUpper(strings.TrimSpace(q.AccountType))
+	if q.AccountType != "WEB" && q.AccountType != "DESKTOP" {
+		jsonError(w, 400, "account_type 必须为 WEB 或 DESKTOP", "invalid_request")
+		return
+	}
+	var tokens provider.Tokens
+	tokens.UserID = strings.TrimSpace(q.UserID)
+	tokens.WorkspaceID = strings.TrimSpace(q.WorkspaceID)
+	if q.AccountType == "WEB" {
+		if q.PostmanSID == "" || tokens.UserID == "" || tokens.WorkspaceID == "" || q.WorkspaceSubdomain == "" {
+			jsonError(w, 400, "WEB 账号需要 postman_sid、user_id、workspace_id、workspace_subdomain", "invalid_request")
+			return
+		}
+		tokens.PostmanSID = q.PostmanSID
+		tokens.WorkspaceSubdomain = q.WorkspaceSubdomain
+	} else {
+		if q.AccessToken == "" || tokens.UserID == "" || tokens.WorkspaceID == "" {
+			jsonError(w, 400, "DESKTOP 账号需要 access_token、user_id、workspace_id", "invalid_request")
+			return
+		}
+		tokens.AccessToken = q.AccessToken
+		tokens.MultiLoginToken = q.MultiLoginToken
+	}
+	b, _ := json.Marshal(tokens)
+	a, err := s.Store.UpsertAccount(q.Email, q.Password, string(b), "manual", q.AccountType)
 	if err != nil {
 		jsonError(w, 400, err.Error(), "invalid_request")
 		return
@@ -87,6 +124,7 @@ func (s *Server) exportAccounts(w http.ResponseWriter, r *http.Request) {
 		enabled := account.Enabled
 		out.Accounts = append(out.Accounts, accountFileAccount{
 			Email: account.Email, Password: account.Password, Source: account.Source,
+			AccountType: account.AccountType,
 			Enabled: &enabled, Tokens: tokens,
 		})
 	}
@@ -130,19 +168,32 @@ func (s *Server) importAccounts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		seen[account.Email] = true
-		if account.Tokens.UserID == "" || account.Tokens.WorkspaceID == "" || (account.Tokens.AccessToken == "" && account.Tokens.PostmanSID == "") {
-			jsonError(w, 400, "账号 "+account.Email+" 的 tokens 不完整", "invalid_request")
-			return
+		// 推断账号类型（向后兼容：老导出文件无 account_type 字段）
+		acType := strings.ToUpper(strings.TrimSpace(account.AccountType))
+		if acType == "" {
+			if account.Tokens.PostmanSID != "" {
+				acType = "WEB"
+			} else {
+				acType = "DESKTOP"
+			}
 		}
-		if account.Tokens.AccessToken == "" && account.Tokens.WorkspaceSubdomain == "" {
-			jsonError(w, 400, "账号 "+account.Email+" 缺少 workspace_subdomain", "invalid_request")
-			return
+		account.AccountType = acType
+		if acType == "WEB" {
+			if account.Tokens.PostmanSID == "" || account.Tokens.UserID == "" || account.Tokens.WorkspaceID == "" || account.Tokens.WorkspaceSubdomain == "" {
+				jsonError(w, 400, "WEB 账号 "+account.Email+" 需要 postman_sid、user_id、workspace_id、workspace_subdomain", "invalid_request")
+				return
+			}
+		} else {
+			if account.Tokens.AccessToken == "" || account.Tokens.UserID == "" || account.Tokens.WorkspaceID == "" {
+				jsonError(w, 400, "DESKTOP 账号 "+account.Email+" 需要 access_token、user_id、workspace_id", "invalid_request")
+				return
+			}
 		}
 	}
 	importedIDs := make([]int64, 0, len(input.Accounts))
 	for _, account := range input.Accounts {
 		tokens, _ := json.Marshal(account.Tokens)
-		id, err := s.Store.ImportAccount(account.Email, account.Password, string(tokens), account.Source, *account.Enabled)
+		id, err := s.Store.ImportAccount(account.Email, account.Password, string(tokens), account.Source, account.AccountType, *account.Enabled)
 		if err != nil {
 			jsonError(w, 500, err.Error(), "internal_error")
 			return

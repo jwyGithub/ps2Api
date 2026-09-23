@@ -87,10 +87,6 @@
     if (v >= 1000) return (v / 1000).toFixed(2) + 's';
     return Math.round(v) + 'ms';
   }
-  function fmtCost(c) {
-    var v = Number(c || 0);
-    return '$' + (v >= 1000 ? v.toLocaleString('en-US', { maximumFractionDigits: 2 }) : v.toFixed(4));
-  }
   function pct(r) { return (Number(r || 0) * 100).toFixed(2) + '%'; }
   function fmtDate(value) {
     if (!value) return '-';
@@ -251,7 +247,7 @@
     if (kpis[3]) kpis[3].innerHTML = (s.totalRequests ? ((s.successRequests / s.totalRequests) * 100).toFixed(2) : '0.00') + '<span class="text-[20px]" style="color:var(--muted)">%</span>';
     setText('#kpiErrors', (s.errorRequests || 0) + ' 次失败');
     var usage = document.getElementById('sidebarUsage');
-    if (usage) usage.innerHTML = '<div class="flex items-center justify-between mb-3"><div class="text-[11px] font-semibold tracking-wider uppercase" style="color: var(--muted);">累计调用</div><span class="text-[11px] font-mono" style="color: var(--accent);">'+fmt(s.totalRequests)+'</span></div><div class="progress mb-3"><div class="progress-fill" style="width: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2));"></div></div><div class="flex items-baseline gap-1.5 mb-1"><span class="font-display text-[22px] font-medium leading-none">'+fmt(s.totalRequests)+'</span><span class="text-[11px]" style="color: var(--muted);">次请求</span></div><div class="text-[11px]" style="color: var(--muted);">成功 '+fmt(s.successRequests)+' · 失败 '+fmt(s.errorRequests)+' · Token '+fmt(s.totalTokens)+'</div>';
+    if (usage) usage.innerHTML = '<div class="flex items-center justify-between mb-3"><div class="text-[11px] font-semibold tracking-wider uppercase" style="color: var(--muted);">累计调用</div><span class="text-[11px] font-mono" style="color: var(--accent);">'+fmt(s.totalRequests)+'</span></div><div class="progress mb-3"><div class="progress-fill" style="width: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2));"></div></div><div class="flex items-baseline gap-1.5 mb-1"><span class="font-display text-[22px] font-medium leading-none">'+fmt(s.totalRequests)+'</span><span class="text-[11px]" style="color: var(--muted);">次请求</span></div><div class="text-[11px]" style="color: var(--muted);">成功 '+fmt(s.successRequests)+' · 失败 '+fmt(s.errorRequests)+' · Credits '+fmtQuota(s.totalCredits)+'</div>';
     setText('#sysHost', window.location.host);
     setText('#sysAccounts', fmt(s.totalAccounts));
     setText('#sysActive', fmt(s.activeAccounts));
@@ -417,7 +413,7 @@
       ['模型', l.model || '-'], ['账号', l.accountEmail || (l.accountId ? 'ID ' + l.accountId : '-')],
       ['出口', l.egress || '-'], ['上游 URL', l.upstreamUrl || '-'], ['会话 ID', l.conversationId || '-'],
       ['状态', l.status === 'success' ? '成功' : '失败'], ['出站体积', fmt(l.requestBytes || 0) + ' B'],
-      ['耗时', fmtMs(l.durationMs)], ['Tokens', (l.promptTokens || 0) + ' + ' + (l.completionTokens || 0) + ' = ' + (l.totalTokens || 0)]
+      ['耗时', fmtMs(l.durationMs)], ['Credits', fmtQuota(l.credits || 0)]
     ];
     var metaHTML = '<div class="grid grid-cols-2 gap-x-6 gap-y-2 text-[12px]">' + meta.map(function (m) {
       return '<div class="flex justify-between gap-3"><span style="color:var(--muted)">' + esc(m[0]) + '</span><span class="font-mono" style="text-align:right;word-break:break-all">' + esc(m[1]) + '</span></div>';
@@ -600,14 +596,14 @@
     var s = state.stats;
     var values = document.querySelectorAll('#page-stats .font-display');
     if (values[0]) values[0].textContent = fmt(s.totalRequests);
-    if (values[1]) values[1].textContent = fmt(s.totalTokens);
-    if (values[2]) values[2].textContent = fmtCost(s.estimatedCost);
+    if (values[1]) values[1].textContent = fmtQuota(s.totalCredits);
+    if (values[2]) values[2].textContent = fmtMs(s.avgLatencyMs);
     if (values[3]) values[3].textContent = fmtMs(s.p95LatencyMs);
     if (values[4]) values[4].textContent = pct(s.errorRate);
-    setText('#statCostNote', '按模型单价估算');
+    setText('#statCostNote', '来自真实请求日志');
     setText('#statP95Note', '来自真实请求日志');
     setText('#statErrNote', (s.totalRequests ? (s.successRequests / s.totalRequests * 100).toFixed(2) : '0') + '% 成功');
-    setText('#statTodayQuota', fmt(s.todayRequests));
+    setText('#statTodayQuota', fmtQuota(s.todayCredits));
     renderQuotaForecast();
   }
 
@@ -650,7 +646,7 @@
     if (!top) return;
     var list = state.analytics.topAccounts || [];
     top.innerHTML = list.map(function (a, i) {
-      return '<tr><td>'+ (i + 1) +'</td><td class="font-mono">'+esc(a.email)+'</td><td><span class="tag tag-gray">'+esc(sourceName(a.source))+'</span></td><td class="font-mono">'+fmt(a.calls)+'</td><td class="font-mono">'+fmt(a.tokens)+'</td><td class="font-mono">'+fmtMs(a.avgLatencyMs)+'</td><td><span class="font-mono" style="color:'+(a.successRate >= 0.9 ? 'var(--success)' : a.successRate >= 0.7 ? 'var(--warning)' : 'var(--danger)')+'">'+pct(a.successRate)+'</span></td><td><span class="font-mono font-semibold" style="color:var(--accent)">'+Number(a.score || 0).toFixed(1)+'</span></td></tr>';
+      return '<tr><td>'+ (i + 1) +'</td><td class="font-mono">'+esc(a.email)+'</td><td><span class="tag tag-gray">'+esc(sourceName(a.source))+'</span></td><td class="font-mono">'+fmt(a.calls)+'</td><td class="font-mono">'+fmtQuota(a.credits)+'</td><td class="font-mono">'+fmtMs(a.avgLatencyMs)+'</td><td><span class="font-mono" style="color:'+(a.successRate >= 0.9 ? 'var(--success)' : a.successRate >= 0.7 ? 'var(--warning)' : 'var(--danger)')+'">'+pct(a.successRate)+'</span></td><td><span class="font-mono font-semibold" style="color:var(--accent)">'+Number(a.score || 0).toFixed(1)+'</span></td></tr>';
     }).join('') || '<tr><td colspan="8" style="text-align:center;padding:24px;color:var(--muted)">暂无账号数据</td></tr>';
   }
 
@@ -660,7 +656,7 @@
     timeline.innerHTML = state.logs.slice(0, 5).map(function (l) {
       var label = l.status === 'success' ? '请求成功' : '请求失败';
       var detail = l.model || l.errorMessage || '未知请求';
-      return '<div class="timeline-item"><div class="flex items-start justify-between gap-3"><div><div class="text-[13px] font-semibold">'+label+' <span class="font-mono" style="color:var(--accent)">'+esc(detail)+'</span></div><div class="text-[12px] mt-0.5" style="color:var(--fg-2)">账号 #'+(l.accountId || '-')+' · '+(l.totalTokens || 0)+' tokens · '+(l.durationMs || 0)+'ms</div></div><span class="text-[11px] font-mono whitespace-nowrap" style="color:var(--muted)">'+ago(l.createdAt)+'</span></div></div>';
+      return '<div class="timeline-item"><div class="flex items-start justify-between gap-3"><div><div class="text-[13px] font-semibold">'+label+' <span class="font-mono" style="color:var(--accent)">'+esc(detail)+'</span></div><div class="text-[12px] mt-0.5" style="color:var(--fg-2)">账号 #'+(l.accountId || '-')+' · '+fmtQuota(l.credits || 0)+' credits · '+(l.durationMs || 0)+'ms</div></div><span class="text-[11px] font-mono whitespace-nowrap" style="color:var(--muted)">'+ago(l.createdAt)+'</span></div></div>';
     }).join('') || '<div style="padding:20px;color:var(--muted)">暂无活动</div>';
   }
 
@@ -1089,16 +1085,14 @@
     var channels = state.analytics.channels || [];
     if (!channels.length) { destroyChart('chartRadar'); var c = document.getElementById('chartRadar'); if (c) c.parentElement.innerHTML = '<div class="text-[12px]" style="color:var(--muted);padding:40px 0;text-align:center">暂无调用数据</div>'; return; }
     var maxCalls = Math.max.apply(null, channels.map(function (x) { return x.calls; }).concat([1]));
-    var maxTokens = Math.max.apply(null, channels.map(function (x) { return x.tokens; }).concat([1]));
-    var maxCost = Math.max.apply(null, channels.map(function (x) { return x.cost; }).concat([1]));
+    var maxCredits = Math.max.apply(null, channels.map(function (x) { return x.credits; }).concat([1]));
     var maxLat = Math.max.apply(null, channels.map(function (x) { return x.avgLatencyMs; }).concat([1]));
-    drawChart('chartRadar', { type: 'radar', data: { labels: ['调用量', '成功率', '低延迟', 'Token', '成本'], datasets: channels.map(function (c, i) {
+    drawChart('chartRadar', { type: 'radar', data: { labels: ['调用量', '成功率', '低延迟', 'Credits'], datasets: channels.map(function (c, i) {
       return { label: c.channel, data: [
         c.calls / maxCalls,
         c.successRate || 0,
         maxLat ? 1 - (c.avgLatencyMs / maxLat) : 0,
-        c.tokens / maxTokens,
-        maxCost ? 1 - (c.cost / maxCost) : 0
+        c.credits / maxCredits
       ], borderColor: ['#0B3D2E', '#C2410C', '#1D4ED8'][i % 3], backgroundColor: ['rgba(11,61,46,0.12)', 'rgba(194,65,12,0.12)', 'rgba(29,78,216,0.12)'][i % 3], pointRadius: 2 };
     }) }, options: { responsive: true, maintainAspectRatio: false, scales: { r: { beginAtZero: true, max: 1, ticks: { display: false }, grid: { color: 'rgba(138,143,150,0.2)' } } }, plugins: { legend: { position: 'bottom' } } } });
   }
@@ -1169,20 +1163,49 @@
       }, 2000);
     }).finally(function () { input.value = ''; });
   };
+  // 切换账号类型时显示/隐藏对应字段
+  window.onDrawerTypeChange = function () {
+    var t = (document.getElementById('drawerAccountType')||{}).value;
+    var desk = document.getElementById('drawerDesktopFields');
+    var web  = document.getElementById('drawerWebFields');
+    if (desk) desk.style.display = (t === 'DESKTOP') ? '' : 'none';
+    if (web)  web.style.display  = (t === 'WEB')     ? '' : 'none';
+  };
   window.submitAccount = function () {
-    var f=document.getElementById('drawer');
-    var inputs=f.querySelectorAll('input');
-    var email=inputs[0]&&inputs[0].value, token=inputs[1]&&inputs[1].value, multiLogin=inputs[2]&&inputs[2].value, workspace=inputs[3]&&inputs[3].value, subdomain=inputs[4]&&inputs[4].value;
-    if(!email||!token||!workspace){toast('请填写邮箱、access_token 和 workspace_id');return;}
-    var t={access_token:token,user_id:'dashboard',workspace_id:workspace};
-    if(multiLogin)t.multi_login_token=multiLogin;
-    if(subdomain)t.workspace_subdomain=subdomain;
-    api('/api/accounts',{method:'POST',body:JSON.stringify({email:email,tokens:t})}).then(function(){closeDrawer();toast('账号已加入号池');return loadAll();}).catch(function(e){toast(e.message);});
+    var accountType = (document.getElementById('drawerAccountType')||{}).value || 'DESKTOP';
+    var email    = ((document.getElementById('drawerEmail')||{}).value||'').trim();
+    var password = (document.getElementById('drawerPassword')||{}).value||'';
+    if (!email) { toast('请填写邮箱'); return; }
+    var payload = { email: email, password: password, account_type: accountType };
+    if (accountType === 'WEB') {
+      var sid       = (document.getElementById('drawerPostmanSID')||{}).value||'';
+      var userId    = ((document.getElementById('drawerWebUserID')||{}).value||'').trim();
+      var wsId      = ((document.getElementById('drawerWebWorkspaceID')||{}).value||'').trim();
+      var subdomain = ((document.getElementById('drawerWebSubdomain')||{}).value||'').trim();
+      if (!sid || !userId || !wsId || !subdomain) { toast('WEB 账号请填写 postman_sid、user_id、workspace_id、workspace_subdomain'); return; }
+      payload.postman_sid = sid;
+      payload.user_id = userId;
+      payload.workspace_id = wsId;
+      payload.workspace_subdomain = subdomain;
+    } else {
+      var token      = (document.getElementById('drawerAccessToken')||{}).value||'';
+      var multiLogin = (document.getElementById('drawerMultiLoginToken')||{}).value||'';
+      var dUserId    = ((document.getElementById('drawerDesktopUserID')||{}).value||'').trim();
+      var dWsId      = ((document.getElementById('drawerDesktopWorkspaceID')||{}).value||'').trim();
+      if (!token || !dUserId || !dWsId) { toast('DESKTOP 账号请填写 access_token、user_id、workspace_id'); return; }
+      payload.access_token = token;
+      payload.user_id = dUserId;
+      payload.workspace_id = dWsId;
+      if (multiLogin) payload.multi_login_token = multiLogin;
+    }
+    api('/api/accounts',{method:'POST',body:JSON.stringify(payload)}).then(function(){closeDrawer();toast('账号已加入号池');return loadAll();}).catch(function(e){toast(e.message);});
   };
   window.openDrawer = function () {
     var f=document.getElementById('drawer');if(!f)return;
-    var body=f.querySelector('.flex-1');
-    if(body&&!body.dataset.real){body.dataset.real='1';body.innerHTML='<div class="space-y-4"><div><label class="text-[12px] font-semibold block mb-1.5">邮箱标识</label><input class="input" placeholder="account@example.com"></div><div><label class="text-[12px] font-semibold block mb-1.5">Postman token（桌面版填 access_token；web 版填 postman.sid）</label><input class="input font-mono" type="password" placeholder="token / postman.sid"></div><div><label class="text-[12px] font-semibold block mb-1.5">multi_login_token（桌面版多开必填；真机桌面 App / web 版留空）</label><input class="input font-mono" type="password" placeholder="x-multi-login-token（可留空）"></div><div><label class="text-[12px] font-semibold block mb-1.5">workspace_id（= 登录态 teamId）</label><input class="input font-mono" placeholder="workspace UUID"></div><div><label class="text-[12px] font-semibold block mb-1.5">workspace_subdomain（web 版必填，如 abc123；桌面版可留空）</label><input class="input font-mono" placeholder="如 abc123"></div><p class="text-[12px]" style="color:var(--muted)">web 版获取：F12 → Application → Cookies 复制 postman.sid；Console 执行 fetch(\'https://god.postman.co/api/users/me\',{credentials:\'include\'}).then(r=>r.json()).then(m=>console.log(m.id, (m.user_organizations||{}).organizations)) 得到 user_id / workspace_id（orgs[0].id）/ subdomain（m.username 小写）。token 只写入服务端 SQLite，不会回显到面板。</p></div>';}
+    // 重置表单字段
+    ['drawerEmail','drawerPassword','drawerAccessToken','drawerMultiLoginToken','drawerDesktopUserID','drawerDesktopWorkspaceID','drawerPostmanSID','drawerWebUserID','drawerWebWorkspaceID','drawerWebSubdomain'].forEach(function(id){var el=document.getElementById(id);if(el)el.value='';});
+    var sel=document.getElementById('drawerAccountType');if(sel)sel.value='DESKTOP';
+    onDrawerTypeChange();
     f.classList.add('show');document.getElementById('drawerBackdrop').classList.add('show');
   };
   window.saveSettings = function () {

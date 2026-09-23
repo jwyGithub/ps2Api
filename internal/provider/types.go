@@ -159,6 +159,10 @@ type Result struct {
 	RateLimit        *RateLimit
 	PromptTokens     int
 	CompletionTokens int
+	// Credits 是本次请求实际消耗的 AI credits：由上游 usage 的累计用量(usage.Usage) 相对
+	// 账号请求前的快照(Account.QuotaUsed)的增量得到，取代 token 估算作为计量/计费口径。
+	// PromptTokens/CompletionTokens 仅继续用于对外 OpenAI/Anthropic 响应的 usage 字段(客户端兼容)。
+	Credits float64
 	Error            string
 	RateLimited      bool
 	QuotaExhausted   bool

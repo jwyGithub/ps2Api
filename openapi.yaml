@@ -114,8 +114,9 @@ paths:
         **校验规则（外部方必须遵守）：**
           - `version` 必须为 `1`，且 `accounts` 至少 1 个；
           - 每个账号 `email`、`enabled` 必填，`email` 不可重复；
-          - `tokens` 中 `user_id`、`workspace_id` 必填，且 `access_token`、`postman_sid` 至少有一个；
-          - 若仅提供 `postman_sid`（web 模式），必须提供 `workspace_subdomain`。
+          - `account_type` 可选；缺失时按 `tokens.postman_sid` 是否有值自动推断（有值 → WEB，否则 → DESKTOP）；
+          - `DESKTOP` 账号：`tokens.access_token`、`tokens.user_id`、`tokens.workspace_id` 必填；
+          - `WEB` 账号：`tokens.postman_sid`、`tokens.user_id`、`tokens.workspace_id`、`tokens.workspace_subdomain` 均必填。
 
         **写库语义：** 按 `email` UPSERT（幂等），同一 email 会被覆盖更新。
         **非原子性：** 校验全部通过后逐条写入，写第 K 条失败会返回 500，但前 K-1 条已写入且不回滚，
@@ -482,26 +483,30 @@ components:
   schemas:
     Tokens:
       type: object
-      description: Postman 登录凭据。桌面模式用 access_token；web 模式用 postman_sid + workspace_subdomain。
+      description: |
+        Postman 登录凭据（存储在 SQLite 中的 JSON blob）。
+        - DESKTOP 账号：access_token 必填，multi_login_token 可选
+        - WEB 账号：postman_sid、workspace_subdomain 必填
+        - user_id、workspace_id 两种类型均必填
       properties:
         access_token:
           type: string
-          description: 桌面模式访问令牌（与 postman_sid 至少提供一个）
+          description: DESKTOP 账号访问令牌
+        multi_login_token:
+          type: string
+          description: DESKTOP 账号多开令牌，可选
         postman_sid:
           type: string
-          description: web 模式会话 ID（与 access_token 至少提供一个）
+          description: WEB 账号会话 Cookie（postman.sid）
         user_id:
           type: string
           description: 必填
         workspace_id:
           type: string
           description: 必填
-        workspace_uuid:
-          type: string
-          description: 可选
         workspace_subdomain:
           type: string
-          description: web 模式（仅 postman_sid）时必填
+          description: WEB 账号必填（如 abc123）
         user_name:
           type: string
           description: 可选
@@ -511,15 +516,45 @@ components:
 
     AddAccountRequest:
       type: object
+      description: |
+        新增/更新单个账号（按 email UPSERT）。account_type 决定必填字段：
+        - `DESKTOP`：access_token、user_id、workspace_id 必填；multi_login_token 可选
+        - `WEB`：postman_sid、user_id、workspace_id、workspace_subdomain 均必填
       properties:
         email:
           type: string
           format: email
-        tokens:
-          $ref: "#/components/schemas/Tokens"
+          description: 账号邮箱标识（唯一键）
+        password:
+          type: string
+          description: 账号密码，可选，仅本地存储
+        account_type:
+          type: string
+          enum: [WEB, DESKTOP]
+          description: 账号类型，必填
+        access_token:
+          type: string
+          description: DESKTOP 类型必填
+        multi_login_token:
+          type: string
+          description: DESKTOP 类型多开时填写，可选
+        postman_sid:
+          type: string
+          description: WEB 类型必填
+        user_id:
+          type: string
+          description: Postman 用户 ID，必填
+        workspace_id:
+          type: string
+          description: Workspace UUID（= teamId），必填
+        workspace_subdomain:
+          type: string
+          description: WEB 类型必填
       required:
         - email
-        - tokens
+        - account_type
+        - user_id
+        - workspace_id
 
     AccountFileAccount:
       type: object
@@ -533,6 +568,10 @@ components:
         source:
           type: string
           description: 来源标记（manual / local / detect-web / browser）
+        account_type:
+          type: string
+          enum: [WEB, DESKTOP]
+          description: 账号类型；老格式文件缺失时按 tokens 内容自动推断
         enabled:
           type: boolean
           description: 必填（导入时不可省略）
@@ -579,6 +618,10 @@ components:
           description: active | exhausted | error | pending
         enabled:
           type: boolean
+        accountType:
+          type: string
+          enum: [WEB, DESKTOP]
+          description: 账号类型
         source:
           type: string
         plan:

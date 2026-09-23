@@ -87,7 +87,7 @@ func newFakeProbeTestServer(t *testing.T, blocked func(text string) bool) (*http
 	t.Cleanup(func() { st.Close() })
 	// 简报原版测试没插入账号，ActiveAccounts() 为空会让所有 POST 卡在
 	// 「没有活跃账号」400；这里补一个活跃账号，POST 默认选中它。
-	if _, err := st.ImportAccount("probe@test", "", "{}", "manual", true); err != nil {
+	if _, err := st.ImportAccount("probe@test", "", "{}", "manual", "DESKTOP", true); err != nil {
 		t.Fatal(err)
 	}
 	var acc int64 = 7

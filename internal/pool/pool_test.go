@@ -18,7 +18,7 @@ func newTestStore(t *testing.T) (*store.Store, map[string]int64) {
 	t.Cleanup(func() { s.Close() })
 	ids := map[string]int64{}
 	for _, email := range []string{"a1@test.com", "a2@test.com", "a3@test.com"} {
-		acc, err := s.UpsertAccount(email, "", `{"access_token":"tok","user_id":"u","workspace_id":"w"}`, "manual")
+		acc, err := s.UpsertAccount(email, "", `{"access_token":"tok","user_id":"u","workspace_id":"w"}`, "manual", "DESKTOP")
 		if err != nil {
 			t.Fatal(err)
 		}

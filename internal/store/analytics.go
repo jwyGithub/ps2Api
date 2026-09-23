@@ -7,34 +7,31 @@ import (
 	"time"
 )
 
-// ─── 延迟 / 成本统计 ─────────────────────────────────────────────
+// ─── 延迟统计 ─────────────────────────────────────────────
 
-// LatencyAndCostStats 基于真实请求日志计算平均延迟（ms）、P95 延迟（ms）与估算成本（USD）。
-// 成本按模型输入/输出 token 单价估算，token 本身是估算值，因此成本也标记为估算。
-func (s *Store) LatencyAndCostStats() (avg float64, p95 float64, cost float64, err error) {
-	rows, err := s.db.Query(`SELECT model, prompt_tokens, completion_tokens, duration_ms FROM request_logs`)
+// LatencyStats 基于真实请求日志计算平均延迟（ms）与 P95 延迟（ms）。
+// 成本口径已废弃：账号额度以 AI credits 计量，不再按 token 单价估算成本。
+func (s *Store) LatencyStats() (avg float64, p95 float64, err error) {
+	rows, err := s.db.Query(`SELECT duration_ms FROM request_logs`)
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, err
 	}
 	defer rows.Close()
 	var durations []int64
 	var totalDur, n float64
 	for rows.Next() {
-		var model sql.NullString
-		var p, c int64
 		var d sql.NullInt64
-		if err := rows.Scan(&model, &p, &c, &d); err != nil {
-			return 0, 0, 0, err
+		if err := rows.Scan(&d); err != nil {
+			return 0, 0, err
 		}
 		if d.Valid && d.Int64 > 0 {
 			durations = append(durations, d.Int64)
 			totalDur += float64(d.Int64)
 			n++
 		}
-		cost += modelCost(model.String, float64(p), float64(c))
 	}
 	if err := rows.Err(); err != nil {
-		return 0, 0, 0, err
+		return 0, 0, err
 	}
 	if n > 0 {
 		avg = totalDur / n
@@ -47,34 +44,7 @@ func (s *Store) LatencyAndCostStats() (avg float64, p95 float64, cost float64, e
 		}
 		p95 = float64(durations[idx])
 	}
-	return avg, p95, cost, nil
-}
-
-// modelCost 返回一次请求的估算成本。价格单位：USD / 1M tokens。
-func modelCost(model string, promptTokens, completionTokens float64) float64 {
-	in, out := modelPrice(model)
-	return promptTokens*in/1e6 + completionTokens*out/1e6
-}
-
-func modelPrice(model string) (in, out float64) {
-	m := strings.ToLower(strings.TrimSpace(model))
-	switch {
-	case strings.HasPrefix(m, "claude-opus"):
-		return 15, 75
-	case strings.HasPrefix(m, "claude-sonnet"):
-		return 3, 15
-	case strings.HasPrefix(m, "claude-haiku"):
-		return 1, 5
-	case strings.HasPrefix(m, "gpt-5.6"):
-		return 1.25, 10
-	case strings.HasPrefix(m, "gpt-5.5"):
-		return 1.25, 10
-	case strings.HasPrefix(m, "gpt-5.4"):
-		return 2.5, 10
-	case strings.HasPrefix(m, "gpt-5.2"):
-		return 1.25, 10
-	}
-	return 3, 15
+	return avg, p95, nil
 }
 
 // ─── 时序聚合 ───────────────────────────────────────────────────
@@ -176,13 +146,13 @@ func (s *Store) HourlySeries(hours int) ([]*SeriesPoint, error) {
 // ─── 分布 ───────────────────────────────────────────────────────
 
 type ModelUsage struct {
-	Model  string `json:"model"`
-	Count  int64  `json:"count"`
-	Tokens int64  `json:"tokens"`
+	Model   string  `json:"model"`
+	Count   int64   `json:"count"`
+	Credits float64 `json:"credits"`
 }
 
 func (s *Store) ModelDistribution(days int) ([]*ModelUsage, error) {
-	q := `SELECT COALESCE(NULLIF(model,''),'(未标注)') m, COUNT(*), COALESCE(SUM(total_tokens),0) FROM request_logs`
+	q := `SELECT COALESCE(NULLIF(model,''),'(未标注)') m, COUNT(*), COALESCE(SUM(credits),0) FROM request_logs`
 	if days > 0 {
 		q += ` WHERE substr(created_at,1,19) >= datetime('now','localtime','-` + itoa(days) + ` days')`
 	}
@@ -195,7 +165,7 @@ func (s *Store) ModelDistribution(days int) ([]*ModelUsage, error) {
 	var out []*ModelUsage
 	for rows.Next() {
 		u := &ModelUsage{}
-		if err := rows.Scan(&u.Model, &u.Count, &u.Tokens); err != nil {
+		if err := rows.Scan(&u.Model, &u.Count, &u.Credits); err != nil {
 			return nil, err
 		}
 		out = append(out, u)
@@ -212,7 +182,7 @@ type AccountAgg struct {
 	Calls        int64   `json:"calls"`
 	Success      int64   `json:"success"`
 	Error        int64   `json:"error"`
-	Tokens       int64   `json:"tokens"`
+	Credits      float64 `json:"credits"`
 	AvgLatencyMs float64 `json:"avgLatencyMs"`
 	SuccessRate  float64 `json:"successRate"`
 	Score        float64 `json:"score"`
@@ -225,7 +195,7 @@ func (s *Store) AccountAggregates(days, limit int) ([]*AccountAgg, error) {
 	q := `SELECT COALESCE(r.account_id,0) aid, COALESCE(a.email,'(已删除账号)') email, COALESCE(a.source,'') src,
 		COUNT(*), COALESCE(SUM(CASE WHEN r.status='success' THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN r.status='error' THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(r.total_tokens),0), COALESCE(AVG(r.duration_ms),0)
+		COALESCE(SUM(r.credits),0), COALESCE(AVG(r.duration_ms),0)
 		FROM request_logs r LEFT JOIN accounts a ON a.id=r.account_id`
 	if days > 0 {
 		q += ` WHERE substr(r.created_at,1,19) >= datetime('now','localtime','-` + itoa(days) + ` days')`
@@ -240,7 +210,7 @@ func (s *Store) AccountAggregates(days, limit int) ([]*AccountAgg, error) {
 	for rows.Next() {
 		a := &AccountAgg{}
 		var aid sql.NullInt64
-		if err := rows.Scan(&aid, &a.Email, &a.Source, &a.Calls, &a.Success, &a.Error, &a.Tokens, &a.AvgLatencyMs); err != nil {
+		if err := rows.Scan(&aid, &a.Email, &a.Source, &a.Calls, &a.Success, &a.Error, &a.Credits, &a.AvgLatencyMs); err != nil {
 			return nil, err
 		}
 		if aid.Valid {
@@ -268,10 +238,9 @@ type ChannelAgg struct {
 	Calls        int64   `json:"calls"`
 	Success      int64   `json:"success"`
 	Error        int64   `json:"error"`
-	Tokens       int64   `json:"tokens"`
+	Credits      float64 `json:"credits"`
 	AvgLatencyMs float64 `json:"avgLatencyMs"`
 	SuccessRate  float64 `json:"successRate"`
-	Cost         float64 `json:"cost"`
 }
 
 // ChannelComparison 按「渠道」聚合：渠道由账号 token 类型决定（桌面 x-access-token vs Web postman.sid）。
@@ -290,16 +259,15 @@ func (s *Store) ChannelComparison(days int) ([]*ChannelAgg, error) {
 			channelOf[a.ID] = "未知渠道"
 		}
 	}
-	q := `SELECT COALESCE(account_id,0), model, COUNT(*),
+	q := `SELECT COALESCE(account_id,0), COUNT(*),
 		COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN status='error' THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(total_tokens),0), COALESCE(AVG(duration_ms),0),
-		COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0)
+		COALESCE(SUM(credits),0), COALESCE(AVG(duration_ms),0)
 		FROM request_logs`
 	if days > 0 {
 		q += ` WHERE substr(created_at,1,19) >= datetime('now','localtime','-` + itoa(days) + ` days')`
 	}
-	q += ` GROUP BY account_id, model`
+	q += ` GROUP BY account_id`
 	rows, err := s.db.Query(q)
 	if err != nil {
 		return nil, err
@@ -310,10 +278,9 @@ func (s *Store) ChannelComparison(days int) ([]*ChannelAgg, error) {
 	key := func(ch string) string { return ch }
 	for rows.Next() {
 		var aid sql.NullInt64
-		var model sql.NullString
-		var calls, success, errs, tokens, p, c int64
-		var avg float64
-		if err := rows.Scan(&aid, &model, &calls, &success, &errs, &tokens, &avg, &p, &c); err != nil {
+		var calls, success, errs int64
+		var credits, avg float64
+		if err := rows.Scan(&aid, &calls, &success, &errs, &credits, &avg); err != nil {
 			return nil, err
 		}
 		id := int64(0)
@@ -333,8 +300,7 @@ func (s *Store) ChannelComparison(days int) ([]*ChannelAgg, error) {
 		a.Calls += calls
 		a.Success += success
 		a.Error += errs
-		a.Tokens += tokens
-		a.Cost += modelCost(model.String, float64(p), float64(c))
+		a.Credits += credits
 		if avg > 0 && calls > 0 {
 			// 加权平均（按调用量）
 			a.AvgLatencyMs = (a.AvgLatencyMs*float64(a.Calls-calls) + avg*float64(calls)) / float64(a.Calls)

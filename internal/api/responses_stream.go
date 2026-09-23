@@ -156,7 +156,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *pr
 		}
 		return nil
 	})
-	s.chargeKey(r.Context(), res) // API Key 用量回写（tokens×倍率）
+	s.chargeKey(r.Context(), res) // API Key 用量回写（credits×倍率）
 
 	closeReasoning() // 纯思考、无正文/工具时的兜底收尾
 	closeText()

@@ -26,7 +26,7 @@ func failingUpstream(t *testing.T) *http.ServeMux {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	if _, err := db.UpsertAccount("test@example.com", "", `{"access_token":"token","user_id":"user","workspace_id":"workspace"}`, "manual"); err != nil {
+	if _, err := db.UpsertAccount("test@example.com", "", `{"access_token":"token","user_id":"user","workspace_id":"workspace"}`, "manual", "DESKTOP"); err != nil {
 		t.Fatal(err)
 	}
 	// retry_count=1：避免默认的 3 次重试各自退避，让测试快速跑完。

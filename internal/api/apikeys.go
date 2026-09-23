@@ -1,5 +1,5 @@
 // apikeys.go —— 面板「API KEY 管理」：对外 /v1 端点多密钥的增删改查、
-// 每密钥并发限制（进程内计数）与 token 用量计费（额度 = tokens × 倍率）。
+// 每密钥并发限制（进程内计数）与 AI credits 用量计费（额度 = credits × 倍率）。
 package api
 
 import (
@@ -112,7 +112,7 @@ func (s *Server) resolveKey(r *http.Request) (*store.APIKey, error) {
 	return k, nil
 }
 
-// chargeKey 在响应完成后把 token 消耗（×倍率）回写到该密钥。
+// chargeKey 在响应完成后把 AI credits 消耗（×倍率）回写到该密钥。
 // ctx 无密钥（引导态/未过鉴权路径）时是 no-op。并发请求可能小幅超出限额，
 // 与入口检查叠加足够（one-api 同口径）。ponytail: 不做精确分布式计量。
 func (s *Server) chargeKey(ctx context.Context, res *provider.Result) {
@@ -120,11 +120,10 @@ func (s *Server) chargeKey(ctx context.Context, res *provider.Result) {
 	if k == nil || res == nil {
 		return
 	}
-	tokens := int64(res.PromptTokens + res.CompletionTokens)
-	if tokens <= 0 {
+	if res.Credits <= 0 {
 		return
 	}
-	cost := int64(math.Ceil(float64(tokens) * k.Multiplier))
+	cost := int64(math.Ceil(res.Credits * k.Multiplier))
 	if cost <= 0 {
 		return
 	}

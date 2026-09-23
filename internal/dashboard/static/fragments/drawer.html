@@ -9,29 +9,72 @@
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
     </button>
   </div>
-  <div class="flex-1 overflow-y-auto p-6">
+  <div class="flex-1 overflow-y-auto p-6" id="drawerBody">
     <div class="space-y-4">
+      <!-- 账号类型选择 -->
+      <div>
+        <label class="text-[12.5px] font-semibold block mb-1.5">账号类型</label>
+        <select class="input" id="drawerAccountType" onchange="onDrawerTypeChange()">
+          <option value="DESKTOP">DESKTOP（桌面客户端）</option>
+          <option value="WEB">WEB（浏览器 Web 版）</option>
+        </select>
+      </div>
+
+      <!-- 公共字段 -->
       <div>
         <label class="text-[12.5px] font-semibold block mb-1.5">邮箱标识</label>
-        <input class="input" placeholder="account@example.com">
+        <input class="input" id="drawerEmail" placeholder="account@example.com" autocomplete="off">
       </div>
       <div>
-        <label class="text-[12.5px] font-semibold block mb-1.5">Postman token（桌面版 access_token；web 版 postman.sid）</label>
-        <input class="input font-mono" placeholder="token / postman.sid" type="password">
+        <label class="text-[12.5px] font-semibold block mb-1.5">密码（可留空）</label>
+        <input class="input" id="drawerPassword" type="password" placeholder="账号登录密码，仅本地存储">
       </div>
-      <div>
-        <label class="text-[12.5px] font-semibold block mb-1.5">multi_login_token（桌面版多开账号必填；真机桌面 App / web 版留空）</label>
-        <input class="input font-mono" placeholder="x-multi-login-token（可留空）" type="password">
+
+      <!-- DESKTOP 专属字段 -->
+      <div id="drawerDesktopFields">
+        <div class="space-y-4">
+          <div>
+            <label class="text-[12.5px] font-semibold block mb-1.5">access_token <span style="color:var(--danger)">*</span></label>
+            <input class="input font-mono" id="drawerAccessToken" type="password" placeholder="桌面版 access_token">
+          </div>
+          <div>
+            <label class="text-[12.5px] font-semibold block mb-1.5">multi_login_token（多开时必填，单开可留空）</label>
+            <input class="input font-mono" id="drawerMultiLoginToken" type="password" placeholder="x-multi-login-token（可留空）">
+          </div>
+          <div>
+            <label class="text-[12.5px] font-semibold block mb-1.5">user_id <span style="color:var(--danger)">*</span></label>
+            <input class="input font-mono" id="drawerDesktopUserID" placeholder="Postman 用户 ID">
+          </div>
+          <div>
+            <label class="text-[12.5px] font-semibold block mb-1.5">workspace_id <span style="color:var(--danger)">*</span></label>
+            <input class="input font-mono" id="drawerDesktopWorkspaceID" placeholder="workspace UUID（= teamId）">
+          </div>
+          <p class="text-[12px]" style="color: var(--muted);">桌面版获取：打开 Postman 桌面 App → DevTools（F12）→ Application → Local Storage → 找 access_token / multi_login_token；user_id / workspace_id 可在 Network 请求头里找到。</p>
+        </div>
       </div>
-      <div>
-        <label class="text-[12.5px] font-semibold block mb-1.5">workspace_id（= 登录态 teamId，桌面导入可留空）</label>
-        <input class="input font-mono" placeholder="workspace UUID">
+
+      <!-- WEB 专属字段 -->
+      <div id="drawerWebFields" style="display:none;">
+        <div class="space-y-4">
+          <div>
+            <label class="text-[12.5px] font-semibold block mb-1.5">postman_sid <span style="color:var(--danger)">*</span></label>
+            <input class="input font-mono" id="drawerPostmanSID" type="password" placeholder="浏览器 Cookie：postman.sid">
+          </div>
+          <div>
+            <label class="text-[12.5px] font-semibold block mb-1.5">user_id <span style="color:var(--danger)">*</span></label>
+            <input class="input font-mono" id="drawerWebUserID" placeholder="Postman 用户 ID">
+          </div>
+          <div>
+            <label class="text-[12.5px] font-semibold block mb-1.5">workspace_id <span style="color:var(--danger)">*</span></label>
+            <input class="input font-mono" id="drawerWebWorkspaceID" placeholder="workspace UUID（= orgs[0].id）">
+          </div>
+          <div>
+            <label class="text-[12.5px] font-semibold block mb-1.5">workspace_subdomain <span style="color:var(--danger)">*</span></label>
+            <input class="input font-mono" id="drawerWebSubdomain" placeholder="如 abc123（m.username 小写）">
+          </div>
+          <p class="text-[12px]" style="color: var(--muted);">Web 版获取：F12 → Application → Cookies 复制 postman.sid；Console 执行<br><code style="font-size:11px">fetch('https://god.postman.co/api/users/me',{credentials:'include'}).then(r=>r.json()).then(m=>console.log(m.id,(m.user_organizations||{}).organizations))</code><br>得到 user_id / workspace_id（orgs[0].id）/ subdomain（m.username 小写）。</p>
+        </div>
       </div>
-      <div>
-        <label class="text-[12.5px] font-semibold block mb-1.5">workspace_subdomain（web 版必填，如 abc123）</label>
-        <input class="input font-mono" placeholder="如 abc123">
-      </div>
-      <p class="text-[12px]" style="color: var(--muted);">web 版获取：F12 → Application → Cookies 复制 postman.sid；Console 执行 fetch('https://god.postman.co/api/users/me',{credentials:'include'}).then(r=>r.json()).then(m=>console.log(m.id,(m.user_organizations||{}).organizations)) 得 user_id / workspace_id（orgs[0].id）/ subdomain（m.username 小写）。token 只写入服务端 SQLite，不会回显。</p>
     </div>
   </div>
   <div class="p-6 flex items-center gap-2" style="border-top: 1px solid var(--border);">

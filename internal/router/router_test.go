@@ -44,10 +44,10 @@ func newTestRouter(t *testing.T) *Router {
 	}
 	t.Cleanup(func() { s.Close() })
 	tok, _ := json.Marshal(provider.Tokens{AccessToken: "tok", UserID: "u", WorkspaceID: "w"})
-	if _, err := s.UpsertAccount("a1@test.com", "", string(tok), "manual"); err != nil {
+	if _, err := s.UpsertAccount("a1@test.com", "", string(tok), "manual", "DESKTOP"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.UpsertAccount("a2@test.com", "", string(tok), "manual"); err != nil {
+	if _, err := s.UpsertAccount("a2@test.com", "", string(tok), "manual", "DESKTOP"); err != nil {
 		t.Fatal(err)
 	}
 	return New(s)
@@ -434,7 +434,7 @@ func TestStreamAuthFailedDeadAccountsExceedRetryBudget(t *testing.T) {
 	var mu sync.Mutex
 	seen := map[string]bool{}
 	for _, email := range []string{"a3@test.com", "a4@test.com", "a5@test.com"} {
-		acc, err := r.Store.UpsertAccount(email, "", "", "manual")
+		acc, err := r.Store.UpsertAccount(email, "", "", "manual", "DESKTOP")
 		if err != nil || acc == nil {
 			t.Fatalf("upsert %s: %v", email, err)
 		}
@@ -508,7 +508,7 @@ func TestStreamAuthFailedDeadAccountsExceedRetryBudget(t *testing.T) {
 func TestStreamBlockedDeadAccountsExceedRetryBudget(t *testing.T) {
 	r := newTestRouter(t)
 	for _, email := range []string{"a3@test.com", "a4@test.com", "a5@test.com"} {
-		if _, err := r.Store.UpsertAccount(email, "", "", "manual"); err != nil {
+		if _, err := r.Store.UpsertAccount(email, "", "", "manual", "DESKTOP"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -688,7 +688,7 @@ func TestStreamGatewayBlockedNoFailoverAcrossAccounts(t *testing.T) {
 	// 扩充到 5 个账号:即便有大量可用号,网关拦截也不得逐个换号兜底。
 	tok, _ := json.Marshal(provider.Tokens{AccessToken: "tok", UserID: "u", WorkspaceID: "w"})
 	for _, email := range []string{"a3@test.com", "a4@test.com", "a5@test.com"} {
-		if _, err := r.Store.UpsertAccount(email, "", string(tok), "manual"); err != nil {
+		if _, err := r.Store.UpsertAccount(email, "", string(tok), "manual", "DESKTOP"); err != nil {
 			t.Fatal(err)
 		}
 	}

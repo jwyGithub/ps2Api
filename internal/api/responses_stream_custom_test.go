@@ -22,7 +22,7 @@ func TestResponsesStreamCustomToolCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err := db.UpsertAccount("test@example.com", "", `{"access_token":"token","user_id":"user","workspace_id":"workspace"}`, "manual"); err != nil {
+	if _, err := db.UpsertAccount("test@example.com", "", `{"access_token":"token","user_id":"user","workspace_id":"workspace"}`, "manual", "DESKTOP"); err != nil {
 		t.Fatal(err)
 	}
 	rt := router.New(db)

@@ -20,9 +20,10 @@ type Account struct {
 	Password               string           `json:"-"`
 	Status                 string           `json:"status"` // active | exhausted | error | pending
 	Enabled                bool             `json:"enabled"`
-	Tokens                 string           `json:"-"`      // JSON blob
-	Source                 string           `json:"source"` // manual | local | detect-web | browser
-	Plan                   string           `json:"plan"`   // 来自 Postman usage.userType
+	Tokens                 string           `json:"-"`           // JSON blob
+	AccountType            string           `json:"accountType"` // WEB | DESKTOP
+	Source                 string           `json:"source"`      // manual | local | detect-web | browser
+	Plan                   string           `json:"plan"`        // 来自 Postman usage.userType
 	QuotaLimit             float64          `json:"quotaLimit"`
 	QuotaUsed              float64          `json:"quotaUsed"`
 	QuotaRemaining         float64          `json:"quotaRemaining"`
@@ -70,10 +71,10 @@ type RequestLog struct {
 	AccountID        *int64 `json:"accountId"`
 	Model            string `json:"model"`
 	Endpoint         string `json:"endpoint"` // anthropic | openai：调用来源兼容端点
-	PromptTokens     int    `json:"promptTokens"`
-	CompletionTokens int    `json:"completionTokens"`
-	TotalTokens      int    `json:"totalTokens"`
-	Status           string `json:"status"` // success | error
+	// Credits 是本次请求消耗的 AI credits 增量：由上游 usage 的累计用量前后差得到
+	// （见 router.logAttempt）。取代原先本地估算的 token 计数作为统计维度。
+	Credits float64 `json:"credits"`
+	Status  string  `json:"status"` // success | error
 	DurationMs       int64  `json:"durationMs"`
 	ErrorMessage     string `json:"errorMessage"`
 	RequestBytes     int    `json:"requestBytes"` // 出站请求体字节数，用于 403 与体积相关性分析
@@ -150,9 +151,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
   account_id INTEGER REFERENCES accounts(id),
   model TEXT,
   endpoint TEXT NOT NULL DEFAULT '',
-  prompt_tokens INTEGER DEFAULT 0,
-  completion_tokens INTEGER DEFAULT 0,
-  total_tokens INTEGER DEFAULT 0,
+  credits REAL NOT NULL DEFAULT 0,
   status TEXT NOT NULL,
   duration_ms INTEGER,
   error_message TEXT,
@@ -196,6 +195,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
 		{"quota_cycle_start", "DATETIME"}, {"quota_cycle_end", "DATETIME"},
 		{"rate_limit", "INTEGER NOT NULL DEFAULT 0"}, {"rate_remaining", "INTEGER NOT NULL DEFAULT 0"},
 		{"rate_window_seconds", "INTEGER NOT NULL DEFAULT 0"}, {"rate_reset_at", "DATETIME"},
+		// 账号类型：WEB | DESKTOP
+		{"account_type", "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, column := range accountColumns {
 		if err := s.ensureColumn("accounts", column.name, column.decl); err != nil {
@@ -221,6 +222,9 @@ CREATE TABLE IF NOT EXISTS api_keys (
 		{"upstream_url", "TEXT NOT NULL DEFAULT ''"},
 		{"egress", "TEXT NOT NULL DEFAULT ''"},
 		{"conversation_id", "TEXT NOT NULL DEFAULT ''"},
+		// 兼容旧库：补齐 request_logs.credits（本次请求消耗的 AI credits 增量，取代 token 统计）。
+		// 旧库遗留的 prompt_tokens/completion_tokens/total_tokens 列不再引用，保留物理列无副作用。
+		{"credits", "REAL NOT NULL DEFAULT 0"},
 	}
 	for _, column := range reqLogColumns {
 		if err := s.ensureColumn("request_logs", column.name, column.decl); err != nil {
@@ -259,7 +263,7 @@ func (s *Store) ensureColumn(table, col, decl string) error {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) ListAccounts() ([]*Account, error) {
-	rows, err := s.db.Query(`SELECT id,email,password,status,enabled,tokens,source,plan,
+	rows, err := s.db.Query(`SELECT id,email,password,status,enabled,tokens,account_type,source,plan,
 		quota_limit,quota_used,quota_remaining,quota_overage,quota_spillage,quota_state,
 		quota_allow_overage,quota_team_pooled,quota_warning_thresholds,quota_cycle_start,quota_cycle_end,
 		rate_limit,rate_remaining,rate_window_seconds,rate_reset_at,
@@ -272,10 +276,10 @@ func (s *Store) ListAccounts() ([]*Account, error) {
 	for rows.Next() {
 		a := &Account{}
 		var enabled, allowOverage, teamPooled int
-		var tokens, source, plan, quotaState, thresholds, errmsg sql.NullString
+		var tokens, accountType, source, plan, quotaState, thresholds, errmsg sql.NullString
 		var cycleStart, cycleEnd, rateReset, lastUsed, lastLogin sql.NullTime
 		if err := rows.Scan(
-			&a.ID, &a.Email, &a.Password, &a.Status, &enabled, &tokens, &source, &plan,
+			&a.ID, &a.Email, &a.Password, &a.Status, &enabled, &tokens, &accountType, &source, &plan,
 			&a.QuotaLimit, &a.QuotaUsed, &a.QuotaRemaining, &a.QuotaOverage, &a.QuotaSpillage, &quotaState,
 			&allowOverage, &teamPooled, &thresholds, &cycleStart, &cycleEnd,
 			&a.RateLimit, &a.RateRemaining, &a.RateWindowSeconds, &rateReset,
@@ -287,6 +291,7 @@ func (s *Store) ListAccounts() ([]*Account, error) {
 		a.QuotaAllowOverage = allowOverage != 0
 		a.QuotaTeamPooled = teamPooled != 0
 		a.Tokens = tokens.String
+		a.AccountType = accountType.String
 		a.Source = source.String
 		a.Plan = plan.String
 		a.QuotaState = quotaState.String
@@ -339,12 +344,12 @@ func (s *Store) GetAccount(id int64) (*Account, error) {
 	return nil, fmt.Errorf("account %d not found", id)
 }
 
-func (s *Store) UpsertAccount(email, password, tokens, source string) (*Account, error) {
+func (s *Store) UpsertAccount(email, password, tokens, source, accountType string) (*Account, error) {
 	now := time.Now()
-	_, err := s.db.Exec(`INSERT INTO accounts (email,password,tokens,source,status,last_login_at,created_at,updated_at)
-		VALUES (?,?,?,?,'active',?,?,?)
-		ON CONFLICT(email) DO UPDATE SET tokens=excluded.tokens,source=excluded.source,status='active',last_login_at=excluded.last_login_at,error_message=NULL,updated_at=excluded.updated_at`,
-		email, password, tokens, source, now, now, now)
+	_, err := s.db.Exec(`INSERT INTO accounts (email,password,tokens,source,account_type,status,last_login_at,created_at,updated_at)
+		VALUES (?,?,?,?,?,'active',?,?,?)
+		ON CONFLICT(email) DO UPDATE SET tokens=excluded.tokens,source=excluded.source,account_type=excluded.account_type,status='active',last_login_at=excluded.last_login_at,error_message=NULL,updated_at=excluded.updated_at`,
+		email, password, tokens, source, accountType, now, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -357,16 +362,16 @@ func (s *Store) UpsertAccount(email, password, tokens, source string) (*Account,
 
 // ImportAccount upserts an account by email and returns its row id. The id lets
 // callers（例如导入后自动刷新额度）精确定位到本次导入的账号，无需整池扫描。
-func (s *Store) ImportAccount(email, password, tokens, source string, enabled bool) (int64, error) {
+func (s *Store) ImportAccount(email, password, tokens, source, accountType string, enabled bool) (int64, error) {
 	v := 0
 	if enabled {
 		v = 1
 	}
 	now := time.Now()
-	_, err := s.db.Exec(`INSERT INTO accounts (email,password,tokens,source,status,enabled,last_login_at,created_at,updated_at)
-		VALUES (?,?,?,?,'active',?,?,?,?)
-		ON CONFLICT(email) DO UPDATE SET password=excluded.password,tokens=excluded.tokens,source=excluded.source,status='active',enabled=excluded.enabled,last_login_at=excluded.last_login_at,error_message=NULL,updated_at=excluded.updated_at`,
-		email, password, tokens, source, v, now, now, now)
+	_, err := s.db.Exec(`INSERT INTO accounts (email,password,tokens,source,account_type,status,enabled,last_login_at,created_at,updated_at)
+		VALUES (?,?,?,?,?,'active',?,?,?,?)
+		ON CONFLICT(email) DO UPDATE SET password=excluded.password,tokens=excluded.tokens,source=excluded.source,account_type=excluded.account_type,status='active',enabled=excluded.enabled,last_login_at=excluded.last_login_at,error_message=NULL,updated_at=excluded.updated_at`,
+		email, password, tokens, source, accountType, v, now, now, now)
 	if err != nil {
 		return 0, err
 	}
@@ -440,9 +445,9 @@ func (s *Store) LogRequest(l *RequestLog) error {
 	if l.Stream {
 		stream = 1
 	}
-	_, err := s.db.Exec(`INSERT INTO request_logs (account_id,model,endpoint,prompt_tokens,completion_tokens,total_tokens,status,duration_ms,error_message,request_bytes,path,stream,client_body,client_headers,upstream_body,upstream_headers,upstream_url,egress,conversation_id,created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		l.AccountID, l.Model, l.Endpoint, l.PromptTokens, l.CompletionTokens, l.TotalTokens, l.Status, l.DurationMs, l.ErrorMessage, l.RequestBytes,
+	_, err := s.db.Exec(`INSERT INTO request_logs (account_id,model,endpoint,credits,status,duration_ms,error_message,request_bytes,path,stream,client_body,client_headers,upstream_body,upstream_headers,upstream_url,egress,conversation_id,created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		l.AccountID, l.Model, l.Endpoint, l.Credits, l.Status, l.DurationMs, l.ErrorMessage, l.RequestBytes,
 		l.Path, stream, l.ClientBody, l.ClientHeaders, l.UpstreamBody, l.UpstreamHeaders, l.UpstreamURL, l.Egress, l.ConversationID, time.Now())
 	return err
 }
@@ -456,7 +461,7 @@ func (s *Store) CountRequestLogs() (int64, error) {
 
 // requestLogColumns 是「完整请求日志」连表 accounts 的固定列集，PageRequestLogs 与
 // PageRequestLogsGrouped 共用同一列顺序，扫描逻辑收敛到 scanRequestLogs。
-const requestLogColumns = `rl.id,rl.account_id,rl.model,rl.endpoint,rl.prompt_tokens,rl.completion_tokens,rl.total_tokens,
+const requestLogColumns = `rl.id,rl.account_id,rl.model,rl.endpoint,rl.credits,
 	rl.status,rl.duration_ms,rl.error_message,rl.request_bytes,rl.path,rl.stream,rl.client_body,rl.client_headers,rl.upstream_body,rl.upstream_headers,
 	rl.upstream_url,rl.egress,rl.conversation_id,rl.created_at,COALESCE(a.email,'')`
 
@@ -468,7 +473,7 @@ func scanRequestLogs(rows *sql.Rows) ([]*RequestLog, error) {
 		var accID sql.NullInt64
 		var stream int
 		var model, endpoint, errmsg, path, clientBody, clientHeaders, upstreamBody, upstreamHeaders, upstreamURL, egress, convID, email sql.NullString
-		if err := rows.Scan(&l.ID, &accID, &model, &endpoint, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens,
+		if err := rows.Scan(&l.ID, &accID, &model, &endpoint, &l.Credits,
 			&l.Status, &l.DurationMs, &errmsg, &l.RequestBytes, &path, &stream, &clientBody, &clientHeaders, &upstreamBody, &upstreamHeaders,
 			&upstreamURL, &egress, &convID, &l.CreatedAt, &email); err != nil {
 			return nil, err
@@ -766,7 +771,7 @@ func (s *Store) RecentLogs(limit int) ([]*RequestLog, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.Query(`SELECT id,account_id,model,endpoint,prompt_tokens,completion_tokens,total_tokens,status,duration_ms,error_message,request_bytes,created_at FROM request_logs ORDER BY id DESC LIMIT ?`, limit)
+	rows, err := s.db.Query(`SELECT id,account_id,model,endpoint,credits,status,duration_ms,error_message,request_bytes,created_at FROM request_logs ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -776,7 +781,7 @@ func (s *Store) RecentLogs(limit int) ([]*RequestLog, error) {
 		l := &RequestLog{}
 		var accID sql.NullInt64
 		var model, endpoint, errmsg sql.NullString
-		if err := rows.Scan(&l.ID, &accID, &model, &endpoint, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.Status, &l.DurationMs, &errmsg, &l.RequestBytes, &l.CreatedAt); err != nil {
+		if err := rows.Scan(&l.ID, &accID, &model, &endpoint, &l.Credits, &l.Status, &l.DurationMs, &errmsg, &l.RequestBytes, &l.CreatedAt); err != nil {
 			return nil, err
 		}
 		if accID.Valid {
@@ -794,27 +799,28 @@ type Stats struct {
 	TotalRequests   int64   `json:"totalRequests"`
 	SuccessRequests int64   `json:"successRequests"`
 	ErrorRequests   int64   `json:"errorRequests"`
-	TotalTokens     int64   `json:"totalTokens"`
+	TotalCredits    float64 `json:"totalCredits"`
 	ActiveAccounts  int     `json:"activeAccounts"`
 	TotalAccounts   int     `json:"totalAccounts"`
 	AvgLatencyMs    float64 `json:"avgLatencyMs"`
 	P95LatencyMs    float64 `json:"p95LatencyMs"`
-	EstimatedCost   float64 `json:"estimatedCost"`
 	ErrorRate       float64 `json:"errorRate"`
 	TodayRequests   int64   `json:"todayRequests"`
+	TodayCredits    float64 `json:"todayCredits"`
 }
 
 func (s *Store) GetStats() (*Stats, error) {
 	st := &Stats{}
-	row := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN status='error' THEN 1 ELSE 0 END),0), COALESCE(SUM(total_tokens),0) FROM request_logs`)
-	if err := row.Scan(&st.TotalRequests, &st.SuccessRequests, &st.ErrorRequests, &st.TotalTokens); err != nil {
+	row := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN status='error' THEN 1 ELSE 0 END),0), COALESCE(SUM(credits),0) FROM request_logs`)
+	if err := row.Scan(&st.TotalRequests, &st.SuccessRequests, &st.ErrorRequests, &st.TotalCredits); err != nil {
 		return nil, err
 	}
 	// substr(created_at,1,19)：驱动可能写入含时区/单调时钟的长格式，date() 解析不了，截前 19 位按本地墙钟再比
-	if err := s.db.QueryRow(`SELECT COALESCE(SUM(CASE WHEN substr(created_at,1,19)>=date('now','localtime') THEN 1 ELSE 0 END),0) FROM request_logs`).Scan(&st.TodayRequests); err != nil {
+	// 今日请求数与今日 credits 消耗一次查出（credits 取代旧 token 口径）。
+	if err := s.db.QueryRow(`SELECT COALESCE(SUM(CASE WHEN substr(created_at,1,19)>=date('now','localtime') THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN substr(created_at,1,19)>=date('now','localtime') THEN credits ELSE 0 END),0) FROM request_logs`).Scan(&st.TodayRequests, &st.TodayCredits); err != nil {
 		return nil, err
 	}
-	st.AvgLatencyMs, st.P95LatencyMs, st.EstimatedCost, _ = s.LatencyAndCostStats()
+	st.AvgLatencyMs, st.P95LatencyMs, _ = s.LatencyStats()
 	if st.TotalRequests > 0 {
 		st.ErrorRate = float64(st.ErrorRequests) / float64(st.TotalRequests)
 	}
