@@ -53,8 +53,8 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 	}
 
 	input := map[string]interface{}{
-		"chatType": "USER_QUERY",
-		"query":    query,
+		"chatType":     "USER_QUERY",
+		"query":        query,
 		"toolResponse": "",
 		"useCase":      nil,
 		"agent":        nil,
@@ -155,8 +155,26 @@ func (p *Provider) buildHeaders(tokens *Tokens) http.Header {
 	h.Set("accept-language", "en-US,en;q=0.9")
 	if tokens.IsDesktop() {
 		h.Set("x-access-token", tokens.AccessToken)
+		// 双 token 差异（2026-09-22）：真机桌面 App 的 token（chromiumapp 回调流签发）单发
+		// x-access-token 即可；注册产线 PKCE consume 签发的 token 必须搭配
+		// x-multi-login-token，否则网关返回流内 "Invalid access token"（实测）。
+		// MultiLoginToken 为空（真机型账号）时不发，与抓包一致。
+		if tokens.MultiLoginToken != "" {
+			h.Set("x-multi-login-token", tokens.MultiLoginToken)
+		}
 		h.Set("x-app-version", DesktopAppVersion)
 		h.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Postman/"+DesktopAppVersion+" Electron/37.10.3 Safari/537.36")
+		// 浏览器指纹头（2026-09-22 真机桌面抓包对齐）：UA 自称 Electron/Chromium 却不发
+		// sec-ch-ua*/sec-fetch-* 是 Cloudflare Bot Management 的机器人信号。桌面 webview
+		// 是 Chromium，这些头真实存在。referer 带 desktopVersion/userId/teamId。
+		h.Set("Accept", "*/*")
+		h.Set("sec-ch-ua", `"Not)A;Brand";v="8", "Chromium";v="138"`)
+		h.Set("sec-ch-ua-mobile", "?0")
+		h.Set("sec-ch-ua-platform", `"macOS"`)
+		h.Set("sec-fetch-site", "same-site")
+		h.Set("sec-fetch-mode", "cors")
+		h.Set("sec-fetch-dest", "empty")
+		h.Set("Referer", "https://desktop.postman.com/?desktopVersion="+DesktopAppVersion+"&userId="+tokens.UserID+"&teamId="+tokens.WorkspaceID+"&region=us")
 	} else {
 		if tokens.PostmanSID != "" {
 			h.Set("Cookie", "postman.sid="+tokens.PostmanSID)

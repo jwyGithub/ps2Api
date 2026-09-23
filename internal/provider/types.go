@@ -94,6 +94,9 @@ const (
 // Tokens 兼容桌面（access_token）和 web（postman.sid）两种登录态。
 type Tokens struct {
 	AccessToken        string `json:"access_token,omitempty"`
+	// MultiLoginToken 仅桌面版使用：注册产线 PKCE consume 签发的 token 必须搭配
+	// x-multi-login-token 头才能通过网关；真机桌面 App 的 token 留空即可（见 request.go）。
+	MultiLoginToken    string `json:"multi_login_token,omitempty"`
 	PostmanSID         string `json:"postman_sid,omitempty"`
 	UserID             string `json:"user_id"`
 	WorkspaceID        string `json:"workspace_id"`

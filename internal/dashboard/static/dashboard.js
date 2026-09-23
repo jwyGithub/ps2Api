@@ -1172,16 +1172,17 @@
   window.submitAccount = function () {
     var f=document.getElementById('drawer');
     var inputs=f.querySelectorAll('input');
-    var email=inputs[0]&&inputs[0].value, token=inputs[1]&&inputs[1].value, workspace=inputs[2]&&inputs[2].value, subdomain=inputs[3]&&inputs[3].value;
+    var email=inputs[0]&&inputs[0].value, token=inputs[1]&&inputs[1].value, multiLogin=inputs[2]&&inputs[2].value, workspace=inputs[3]&&inputs[3].value, subdomain=inputs[4]&&inputs[4].value;
     if(!email||!token||!workspace){toast('请填写邮箱、access_token 和 workspace_id');return;}
     var t={access_token:token,user_id:'dashboard',workspace_id:workspace};
+    if(multiLogin)t.multi_login_token=multiLogin;
     if(subdomain)t.workspace_subdomain=subdomain;
     api('/api/accounts',{method:'POST',body:JSON.stringify({email:email,tokens:t})}).then(function(){closeDrawer();toast('账号已加入号池');return loadAll();}).catch(function(e){toast(e.message);});
   };
   window.openDrawer = function () {
     var f=document.getElementById('drawer');if(!f)return;
     var body=f.querySelector('.flex-1');
-    if(body&&!body.dataset.real){body.dataset.real='1';body.innerHTML='<div class="space-y-4"><div><label class="text-[12px] font-semibold block mb-1.5">邮箱标识</label><input class="input" placeholder="account@example.com"></div><div><label class="text-[12px] font-semibold block mb-1.5">Postman token（桌面版填 access_token；web 版填 postman.sid）</label><input class="input font-mono" type="password" placeholder="token / postman.sid"></div><div><label class="text-[12px] font-semibold block mb-1.5">workspace_id（= 登录态 teamId）</label><input class="input font-mono" placeholder="workspace UUID"></div><div><label class="text-[12px] font-semibold block mb-1.5">workspace_subdomain（web 版必填，如 abc123；桌面版可留空）</label><input class="input font-mono" placeholder="如 abc123"></div><p class="text-[12px]" style="color:var(--muted)">web 版获取：F12 → Application → Cookies 复制 postman.sid；Console 执行 fetch(\'https://god.postman.co/api/users/me\',{credentials:\'include\'}).then(r=>r.json()).then(m=>console.log(m.id, (m.user_organizations||{}).organizations)) 得到 user_id / workspace_id（orgs[0].id）/ subdomain（m.username 小写）。token 只写入服务端 SQLite，不会回显到面板。</p></div>';}
+    if(body&&!body.dataset.real){body.dataset.real='1';body.innerHTML='<div class="space-y-4"><div><label class="text-[12px] font-semibold block mb-1.5">邮箱标识</label><input class="input" placeholder="account@example.com"></div><div><label class="text-[12px] font-semibold block mb-1.5">Postman token（桌面版填 access_token；web 版填 postman.sid）</label><input class="input font-mono" type="password" placeholder="token / postman.sid"></div><div><label class="text-[12px] font-semibold block mb-1.5">multi_login_token（桌面版多开必填；真机桌面 App / web 版留空）</label><input class="input font-mono" type="password" placeholder="x-multi-login-token（可留空）"></div><div><label class="text-[12px] font-semibold block mb-1.5">workspace_id（= 登录态 teamId）</label><input class="input font-mono" placeholder="workspace UUID"></div><div><label class="text-[12px] font-semibold block mb-1.5">workspace_subdomain（web 版必填，如 abc123；桌面版可留空）</label><input class="input font-mono" placeholder="如 abc123"></div><p class="text-[12px]" style="color:var(--muted)">web 版获取：F12 → Application → Cookies 复制 postman.sid；Console 执行 fetch(\'https://god.postman.co/api/users/me\',{credentials:\'include\'}).then(r=>r.json()).then(m=>console.log(m.id, (m.user_organizations||{}).organizations)) 得到 user_id / workspace_id（orgs[0].id）/ subdomain（m.username 小写）。token 只写入服务端 SQLite，不会回显到面板。</p></div>';}
     f.classList.add('show');document.getElementById('drawerBackdrop').classList.add('show');
   };
   window.saveSettings = function () {
