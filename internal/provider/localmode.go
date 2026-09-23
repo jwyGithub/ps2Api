@@ -10,6 +10,7 @@ import (
 // 它只是「隐藏这些工具不给模型」的客户端清单,不影响 executeShellCommand 等本地工具的可用性;
 // 原样对齐是为了让网关 desktop 请求与已验证能跑 shell 的抓包一致,减少实测变量。
 var desktopLocalModeExcludedTools = []string{
+	"listDirectory", "searchInFiles",
 	"listDatasets", "createDataset", "previewDataset", "queryDatasetView", "deleteDataset",
 	"getDatasetSchema", "createDatasetView", "deleteDatasetView", "runQuery", "insertDatasetRows",
 	"modifyDatasetView", "refreshDatasource", "addDatasetSource", "editDatasetSource",
