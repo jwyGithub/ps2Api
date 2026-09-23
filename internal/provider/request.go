@@ -114,10 +114,7 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 	if req.ParallelToolCalls != nil {
 		parallel = *req.ParallelToolCalls
 	}
-	thinkingLevel := req.OutputConfig["effort"]
-	if thinkingLevel == nil || thinkingLevel == "" {
-		thinkingLevel = "medium"
-	}
+	thinkingLevel := normalizeThinkingLevel(req.OutputConfig["effort"])
 	devMode := map[string]interface{}{
 		"selectedModel":                  postmanModel,
 		"isParallelToolCallingSupported": parallel,

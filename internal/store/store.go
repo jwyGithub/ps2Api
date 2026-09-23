@@ -1022,15 +1022,12 @@ func truncateSQLCell(s string) string {
 	return s[:2000] + "…(截断,共 " + strconv.Itoa(len(s)) + " 字节)"
 }
 
-// RunReadOnlyQuery 面板「数据查询」页的执行入口：只接受 SELECT/WITH/EXPLAIN 开头的
-// 只读语句（PRAGMA 可改库状态，也拒绝），最多返回 maxRows 行，单元格按字节截断。
+// RunSQL 面板「数据查询」页的执行入口：接受任意 SQL（含写语句/DDL/PRAGMA——
+// 面板是运维诊断控制台，2026-09-23 起有意放开原只读限制），最多返回 maxRows 行，
+// 单元格按字节截断。
 // ponytail: 同名列在 map 里会互相覆盖——面板排查场景够用，需要精确对照时用列别名。
-func (s *Store) RunReadOnlyQuery(query string, maxRows int) (cols []string, rows []map[string]interface{}, truncated bool, err error) {
+func (s *Store) RunSQL(query string, maxRows int) (cols []string, rows []map[string]interface{}, truncated bool, err error) {
 	cleaned := stripSQLComments(query)
-	// first := strings.ToLower(strings.TrimSpace(cleaned))
-	// if !strings.HasPrefix(first, "select") && !strings.HasPrefix(first, "with") && !strings.HasPrefix(first, "explain") {
-	// 	return nil, nil, false, errors.New("只允许 SELECT / WITH / EXPLAIN 开头的只读查询")
-	// }
 	// 多语句防护：驱动可能一次执行多个语句（"SELECT 1; DROP TABLE ..."），只放行单条。
 	// 字符串字面量里的分号会被误判为多段——诊断控制台里直接报错重来即可，不值得写 SQL 词法。
 	segments := 0

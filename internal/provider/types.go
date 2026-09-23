@@ -2,6 +2,8 @@ package provider
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -74,9 +76,11 @@ const (
 	// FoldedSkillListRunes 是折叠路径里 skills 清单压缩后的独立预算：每条压成
 	// "- name: 描述首句(≤80 rune)"，条目数不定，总量兜底。预算内装不下的尾部条目
 	// 降级为「- name」（名字即 Skill 工具的调用参数，模型至少知道存在哪些 skill），
-	// 名字也放不下才丢弃。2800 对齐 capUpstreamQuery 头部 30% 保留区（3000 rune）：
-	// skills 段恒置 query 最前（见 splitMessagesSeed），预算超头部窗口就会被中段省略切尾。
-	FoldedSkillListRunes = 2800
+	// 名字也放不下才丢弃。4000 对齐 capUpstreamQuery 头部 30% 保留区（3000 rune）外的
+	// 富余：skills 段恒置 query 最前（见 splitMessagesSeed），2800 时 ~115 条清单大量
+	// 降级名字-only，模型只知名字不知何时调用；调大后优先保住带描述形态。预算超头部
+	// 窗口的部分由中段省略兜底——头部 30%（3000 rune）保证最前面的条目必活。
+	FoldedSkillListRunes = 4000
 	// FoldedTextMsgBudgetRunes 限制折叠路径里单条历史 user/assistant 文本消息的渲染长度，
 	// 也是「原始任务」后置渲染时的长度上限。
 	FoldedTextMsgBudgetRunes = 2000
@@ -93,7 +97,7 @@ const (
 
 // Tokens 兼容桌面（access_token）和 web（postman.sid）两种登录态。
 type Tokens struct {
-	AccessToken        string `json:"access_token,omitempty"`
+	AccessToken string `json:"access_token,omitempty"`
 	// MultiLoginToken 仅桌面版使用：注册产线 PKCE consume 签发的 token 必须搭配
 	// x-multi-login-token 头才能通过网关；真机桌面 App 的 token 留空即可（见 request.go）。
 	MultiLoginToken    string `json:"multi_login_token,omitempty"`
@@ -162,11 +166,11 @@ type Result struct {
 	// Credits 是本次请求实际消耗的 AI credits：由上游 usage 的累计用量(usage.Usage) 相对
 	// 账号请求前的快照(Account.QuotaUsed)的增量得到，取代 token 估算作为计量/计费口径。
 	// PromptTokens/CompletionTokens 仅继续用于对外 OpenAI/Anthropic 响应的 usage 字段(客户端兼容)。
-	Credits float64
-	Error            string
-	RateLimited      bool
-	QuotaExhausted   bool
-	AuthFailed       bool
+	Credits        float64
+	Error          string
+	RateLimited    bool
+	QuotaExhausted bool
+	AuthFailed     bool
 	// RequestRejected 表示失败源于请求内容本身(坏请求、工具名冲突等),而非账号健康。
 	// 这种错误换账号重试无用、且会污染整个号池,router 应直接返回、不标记账号。
 	RequestRejected bool
@@ -218,3 +222,16 @@ type ToolCall struct {
 
 // EmitFunc 流式增量回调。
 type EmitFunc func(d Delta) error
+
+// normalizeThinkingLevel 归一出站 thinkingLevel。
+// 合法值枚举来自 12.29.2 客户端 AI SDK 的 zod 契约（js/scratchpad/39.js）：
+// effort: a.enum(["low","medium","high"]) —— 云端 agent 服务按此校验，
+// 枚举外值属未定义行为（实测不报 400 但大概率被忽略），统一归一为 medium。
+func normalizeThinkingLevel(v interface{}) string {
+	switch s := strings.ToLower(strings.TrimSpace(fmt.Sprint(v))); s {
+	case "low", "medium", "high":
+		return s
+	default:
+		return "medium"
+	}
+}

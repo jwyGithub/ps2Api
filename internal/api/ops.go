@@ -90,8 +90,8 @@ func (s *Server) requestLogs(w http.ResponseWriter, r *http.Request) {
 	jsonWrite(w, 200, map[string]interface{}{"data": logs, "total": total, "page": page, "pageSize": pageSize, "grouped": true})
 }
 
-// sqlQuery 面板「数据查询」页：对 SQLite 执行只读查询（SELECT/WITH/EXPLAIN），
-// 最多 200 行、单元格超长截断；写操作与 PRAGMA 一律拒绝（见 store.RunReadOnlyQuery）。
+// sqlQuery 面板「数据查询」页：对 SQLite 执行任意 SQL（2026-09-23 起有意放开
+// 只读限制，面板是运维诊断控制台），最多 200 行、单元格超长截断；多语句仍拒绝。
 func (s *Server) sqlQuery(w http.ResponseWriter, r *http.Request) {
 	if !s.auth(w, r) {
 		return
@@ -104,7 +104,7 @@ func (s *Server) sqlQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	started := time.Now()
-	cols, rows, truncated, err := s.Store.RunReadOnlyQuery(body.SQL, 200)
+	cols, rows, truncated, err := s.Store.RunSQL(body.SQL, 200)
 	if err != nil {
 		jsonError(w, 400, err.Error(), "invalid_request_error")
 		return
