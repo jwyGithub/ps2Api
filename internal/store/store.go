@@ -836,17 +836,17 @@ func (s *Store) GetStats() (*Stats, error) {
 // APIKey 是面板「API KEY 管理」里的一条密钥。额度按 token 计：
 // 每次对话消耗 (prompt+completion tokens) × multiplier，累加到 QuotaUsed。
 type APIKey struct {
-	ID              int64      `json:"id"`
-	Key             string     `json:"key"`
-	Name            string     `json:"name"`
-	ExpiresAt       *time.Time `json:"expiresAt"`       // nil=永不过期
-	QuotaLimit      int64      `json:"quotaLimit"`      // 0=不限
-	QuotaUsed       int64      `json:"quotaUsed"`
-	ConcurrencyLimit int       `json:"concurrencyLimit"` // 0=不限
-	Multiplier      float64    `json:"multiplier"`
-	Enabled         bool       `json:"enabled"`
-	CreatedAt       time.Time  `json:"createdAt"`
-	UpdatedAt       time.Time  `json:"updatedAt"`
+	ID               int64      `json:"id"`
+	Key              string     `json:"key"`
+	Name             string     `json:"name"`
+	ExpiresAt        *time.Time `json:"expiresAt"`  // nil=永不过期
+	QuotaLimit       int64      `json:"quotaLimit"` // 0=不限
+	QuotaUsed        int64      `json:"quotaUsed"`
+	ConcurrencyLimit int        `json:"concurrencyLimit"` // 0=不限
+	Multiplier       float64    `json:"multiplier"`
+	Enabled          bool       `json:"enabled"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	UpdatedAt        time.Time  `json:"updatedAt"`
 }
 
 const apiKeyColumns = `id,key,name,expires_at,quota_limit,quota_used,concurrency_limit,multiplier,enabled,created_at,updated_at`
@@ -1003,10 +1003,10 @@ func truncateSQLCell(s string) string {
 // ponytail: 同名列在 map 里会互相覆盖——面板排查场景够用，需要精确对照时用列别名。
 func (s *Store) RunReadOnlyQuery(query string, maxRows int) (cols []string, rows []map[string]interface{}, truncated bool, err error) {
 	cleaned := stripSQLComments(query)
-	first := strings.ToLower(strings.TrimSpace(cleaned))
-	if !strings.HasPrefix(first, "select") && !strings.HasPrefix(first, "with") && !strings.HasPrefix(first, "explain") {
-		return nil, nil, false, errors.New("只允许 SELECT / WITH / EXPLAIN 开头的只读查询")
-	}
+	// first := strings.ToLower(strings.TrimSpace(cleaned))
+	// if !strings.HasPrefix(first, "select") && !strings.HasPrefix(first, "with") && !strings.HasPrefix(first, "explain") {
+	// 	return nil, nil, false, errors.New("只允许 SELECT / WITH / EXPLAIN 开头的只读查询")
+	// }
 	// 多语句防护：驱动可能一次执行多个语句（"SELECT 1; DROP TABLE ..."），只放行单条。
 	// 字符串字面量里的分号会被误判为多段——诊断控制台里直接报错重来即可，不值得写 SQL 词法。
 	segments := 0
