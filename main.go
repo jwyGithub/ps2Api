@@ -42,6 +42,8 @@ func main() {
 	server := api.New(s)
 	// 每日 23:00（本地时区，见 init）自动刷新额度周期已重置的账号。
 	go server.Router.StartDailyQuotaRefresh(context.Background())
+	// 每日 23:00 清理请求日志，只保留最近 7 天（并在启动时先清一次）。
+	go server.Router.StartDailyLogCleanup(context.Background())
 	mux := http.NewServeMux()
 	server.Register(mux)
 

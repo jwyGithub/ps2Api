@@ -452,6 +452,24 @@ func (s *Store) LogRequest(l *RequestLog) error {
 	return err
 }
 
+// PurgeRequestLogsOlderThan 删除 created_at 早于「now - days 天」的请求日志，只保留最近 days 天，
+// 返回被删除的行数。days<=0 视为不清理，直接返回 0。
+// created_at 被驱动写成带时区/单调时钟的长格式（如 "2026-08-12 20:34:40.98 +0800 CST m=+..."），
+// 这里统一取 substr(...,1,19) 的「YYYY-MM-DD HH:MM:SS」墙钟部分，与 analytics 的时间过滤口径一致，
+// 再和 SQLite datetime('now','localtime',...) 比较，避免长格式直接比较不可靠。
+func (s *Store) PurgeRequestLogsOlderThan(days int) (int64, error) {
+	if days <= 0 {
+		return 0, nil
+	}
+	res, err := s.db.Exec(`DELETE FROM request_logs
+		WHERE substr(created_at,1,19) < datetime('now','localtime',?)`,
+		fmt.Sprintf("-%d days", days))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // CountRequestLogs 返回 request_logs 总行数，供请求日志页分页计算总页数。
 func (s *Store) CountRequestLogs() (int64, error) {
 	var n int64
