@@ -377,7 +377,12 @@ func (p *Provider) splitMessagesSeed(messages []ChatMessage, convID string, wafP
 				// 清单是模型调用 skills 的唯一依据，不能被散文预算挤掉。
 				skillLines, rest := foldedSystemParts(text)
 				if len(skillLines) > 0 {
-					skillsBlock = "[System skills]\n" + foldSkillList(skillLines)
+					// 使用指令随清单同行：中段省略会吃掉 user 段 system-reminder 里的
+					// skills 上下文（2026-09-23 线上：模型见名单却不知如何调用，从不
+					// 发起 Skill 工具调用），指令必须与清单绑死在头部保留区。
+					skillsBlock = "[System skills]\n" +
+						"(The list below is the available Skill directory. When the user's task matches one of these skills, call the Skill tool with `skill: <name>` as the first action.)\n" +
+						foldSkillList(skillLines)
 				}
 				if strings.TrimSpace(rest) != "" {
 					contextParts = append(contextParts, querySection{Text: "[System]\n" + truncateMiddleRunes(rest, FoldedSystemBudgetRunes), Weight: 2})
