@@ -151,6 +151,12 @@ func (r *Router) markOffline(acc *store.Account, msg string) {
 	}
 }
 
+// MarkAccountOffline 是 markOffline 的导出包装：供 toolsets 透传路径
+// （internal/api/toolsets.go）把 session 失效的号从池中摘除——与主路由 AuthFailed 同口径。
+func (r *Router) MarkAccountOffline(acc *store.Account, msg string) {
+	r.markOffline(acc, msg)
+}
+
 // applyUsageState 依据上游网关返回的 usage.usageState 同步账号的健康状态与启用开关：
 //   - BLOCKED：账号被网关封锁，属账号异常（而非单纯额度用尽），故标记为 error 并停用
 //     （enabled=false），从选号池中摘除；待再次探测到 AVAILABLE 时自动恢复。注意这与「额度

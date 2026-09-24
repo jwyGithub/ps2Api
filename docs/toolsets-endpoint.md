@@ -88,7 +88,7 @@ POST https://<subdomain>.postman.co/_gw/toolsets/v1/messages
     → 否: 原有 /chat 路径（PostmanProvider）不变
 ```
 
-- **透传保真**：客户端与上游同为 Anthropic 协议，body 除 `model` 外零改动——thinking/signature/图片 blocks/tool_use 原样往返
+- **透传保真**：客户端与上游同为 Anthropic 协议，body 除 `model` 外零改动——thinking/signature/图片 blocks/tool_use 原样往返。非流式响应的 `model` 字段回写客户端原名；流式逐事件透传（上游 `message_start` 本就返回裸名，无需回写）
 - `/v1/models` 列表已追加 `claude-opus-5`、`claude-sonnet-5`
 - OpenAI 端点（`/v1/chat/completions`、`/v1/responses`）请求这两个模型 → 返回 "Invalid model"（未做协议转换，明确报错）
 - `normalizeModel` 已加特例：`claude-opus-5` / `claude-sonnet-5` 直通（否则会被通用 claude- 规则错改成 `claude-sonnet-4-6`）

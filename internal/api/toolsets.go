@@ -34,7 +34,6 @@ func (s *Server) pickToolsetsAccount(excluded map[int64]bool) (*store.Account, e
 func (s *Server) toolsetsNonStream(w http.ResponseWriter, r *http.Request, raw []byte, ar AnthropicReq) {
 	excluded := map[int64]bool{}
 	var lastRes *provider.Result
-	var upstreamJSON []byte
 	for attempt := 0; attempt < 3; attempt++ {
 		acc, err := s.pickToolsetsAccount(excluded)
 		if err != nil {
@@ -50,19 +49,21 @@ func (s *Server) toolsetsNonStream(w http.ResponseWriter, r *http.Request, raw [
 			return
 		}
 		lastRes = res
-		upstreamJSON = nil
-		// 认证失败/请求内容错误：换号无用，直接返回。
-		if res.AuthFailed || res.RequestRejected {
+		// 请求内容错误：换号无用，直接返回。
+		if res.RequestRejected {
 			break
+		}
+		// session 失效属账号自身问题：标离线摘号（与主路由 AuthFailed 同口径），换下一个。
+		if res.AuthFailed {
+			s.Router.MarkAccountOffline(acc, "session 失效: "+res.Error)
+			excluded[acc.ID] = true
+			continue
 		}
 		// 限频/上游波动：排除该号换下一个重试。
 		excluded[acc.ID] = true
-		_ = body
-		_ = upstreamJSON
 	}
-	status, typ, code := toolsetsErrorStatus(lastRes)
+	_, typ, code := toolsetsErrorStatus(lastRes)
 	anthropicError(w, code, lastRes.Error, typ)
-	_ = status
 }
 
 func (s *Server) toolsetsStream(w http.ResponseWriter, r *http.Request, raw []byte, ar AnthropicReq) {
@@ -109,7 +110,13 @@ func (s *Server) toolsetsStream(w http.ResponseWriter, r *http.Request, raw []by
 			})))
 			return
 		}
-		if res.AuthFailed || res.RequestRejected {
+		if res.AuthFailed {
+			// session 失效属账号自身问题：标离线摘号（与主路由 AuthFailed 同口径），换下一个。
+			s.Router.MarkAccountOffline(acc, "session 失效: "+res.Error)
+			excluded[acc.ID] = true
+			continue
+		}
+		if res.RequestRejected {
 			_, typ, code := toolsetsErrorStatus(res)
 			anthropicError(w, code, res.Error, typ)
 			return
@@ -117,8 +124,7 @@ func (s *Server) toolsetsStream(w http.ResponseWriter, r *http.Request, raw []by
 		// 限频/上游波动：排除该号换下一个。
 		excluded[acc.ID] = true
 	}
-	_, typ, code := 0, "overloaded_error", 529
-	anthropicError(w, code, "toolsets upstream busy after retries", typ)
+	anthropicError(w, 529, "toolsets upstream busy after retries", "overloaded_error")
 }
 
 // toolsetsErrorStatus 把 Result 的错误分类映射为 Anthropic 协议的 (错误类型, 状态码)。

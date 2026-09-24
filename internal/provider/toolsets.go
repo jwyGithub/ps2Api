@@ -13,6 +13,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -41,6 +42,10 @@ func IsToolsetsModel(model string) bool {
 	return ok
 }
 
+// errToolsetsBusy 是限频/上游波动的分类错误（429/503 重试耗尽），供调用方判
+// res.RateLimited——取代此前对错误消息文本 "(429)" 的字符串匹配。
+var errToolsetsBusy = errors.New("toolsets upstream busy")
+
 // ToolsetsProvider 复用 PostmanProvider 的出口基础设施（代理池/cookie jar/指纹 Transport），
 // 但不走 streamInternal（协议不同、无会话粘性、无 credits usage）。
 type ToolsetsProvider struct {
@@ -52,29 +57,48 @@ func NewToolsetsProvider(base *Provider) *ToolsetsProvider {
 	return &ToolsetsProvider{base: base}
 }
 
-func (tp *ToolsetsProvider) endpoint(tokens *Tokens) string {
-	sub := tokens.WorkspaceSubdomain
-	if sub == "" {
-		sub = "go"
-	}
-	return "https://" + sub + ".postman.co/_gw/toolsets/v1/messages"
-}
-
 // buildHeaders 构造 toolsets 出站头。缺 x-pstmn-req-service: ai-toolsets 一律 404。
+// 桌面双 token 与 web cookie（postman.sid）两种登录态都支持（抓包实测 cookie 亦通）。
+// 浏览器指纹头（sec-ch-ua*/sec-fetch-*）与 /chat 的 buildHeaders 同口径——UA 自称
+// Chromium/Electron 却不发这些是 Cloudflare Bot Management 的机器人信号。
 func (tp *ToolsetsProvider) buildHeaders(tokens *Tokens) http.Header {
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
 	h.Set("Accept", "*/*")
 	h.Set("anthropic-version", "2023-06-01")
 	h.Set("x-pstmn-req-service", "ai-toolsets")
-	h.Set("x-access-token", tokens.AccessToken)
-	if tokens.MultiLoginToken != "" {
-		h.Set("x-multi-login-token", tokens.MultiLoginToken)
+	if tokens.AccessToken != "" {
+		h.Set("x-access-token", tokens.AccessToken)
+		if tokens.MultiLoginToken != "" {
+			h.Set("x-multi-login-token", tokens.MultiLoginToken)
+		}
+	} else if tokens.PostmanSID != "" {
+		h.Set("Cookie", "postman.sid="+tokens.PostmanSID)
 	}
 	h.Set("x-entity-team-id", tokens.WorkspaceID)
 	h.Set("x-app-version", ToolsetsAppVersion)
 	h.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Postman/"+ToolsetsAppVersion+" Electron/37.10.3 Safari/537.36")
+	h.Set("sec-ch-ua", `"Not)A;Brand";v="8", "Chromium";v="138"`)
+	h.Set("sec-ch-ua-mobile", "?0")
+	h.Set("sec-ch-ua-platform", `"macOS"`)
+	h.Set("sec-fetch-dest", "empty")
+	h.Set("sec-fetch-mode", "cors")
+	h.Set("sec-fetch-site", "same-origin")
+	h.Set("Origin", "https://"+tp.host(tokens)+"/")
 	return h
+}
+
+// host 返回出站域名（不含 scheme）。web 会话必须回到自己的子域（cookie 域绑定），桌面 token 回退 go。
+func (tp *ToolsetsProvider) host(tokens *Tokens) string {
+	sub := tokens.WorkspaceSubdomain
+	if sub == "" {
+		sub = "go"
+	}
+	return sub + ".postman.co"
+}
+
+func (tp *ToolsetsProvider) endpoint(tokens *Tokens) string {
+	return "https://" + tp.host(tokens) + "/_gw/toolsets/v1/messages"
 }
 
 // rewriteModelForUpstream 把客户端 body 里的 model 字段改写为三段式路由名。
@@ -149,14 +173,14 @@ func (tp *ToolsetsProvider) doWithRetry(ctx context.Context, acc *store.Account,
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
 			resp.Body.Close()
 			lastResp = resp
-			lastErr = fmt.Errorf("toolsets upstream busy (%d): %s", resp.StatusCode, strings.TrimSpace(string(b)))
-			// upstream_unavailable 也可能以 200 + error JSON 出现，由调用方按 body 判定后回传重试。
+			lastErr = fmt.Errorf("%w (%d): %s", errToolsetsBusy, resp.StatusCode, strings.TrimSpace(string(b)))
+			// upstream_unavailable 也可能以 200 + error JSON 出现：由 Chat/StreamChat 按 body 判定。
 			continue
 		}
 		return resp, nil, egress
 	}
 	if lastErr == nil {
-		lastErr = fmt.Errorf("toolsets upstream unavailable after retries")
+		lastErr = fmt.Errorf("%w after retries", errToolsetsBusy)
 	}
 	return nil, lastErr, egress
 }
@@ -190,7 +214,7 @@ func (tp *ToolsetsProvider) Chat(ctx context.Context, acc *store.Account, raw []
 	if err != nil {
 		res.Error = err.Error()
 		// doWithRetry 内部已把 429/503 归为重试耗尽——按限频处理让 router 退避。
-		if strings.Contains(res.Error, "(429)") || strings.Contains(res.Error, "(503)") {
+		if errors.Is(err, errToolsetsBusy) {
 			res.RateLimited = true
 		}
 		return res, nil
@@ -216,24 +240,34 @@ func (tp *ToolsetsProvider) Chat(ctx context.Context, acc *store.Account, raw []
 		return res, nil
 	}
 	// 上游 200 也可能带 error JSON（如 upstream_unavailable）——按错误分类。
+	if cls := tp.classifyErrorJSON(res, b); cls {
+		return res, nil
+	}
+	res.Success = true
+	res.CompletionTokens = estimateAnthropicOutputTokens(b)
+	return res, rewriteModelInResponse(b, clientModel)
+}
+
+// classifyErrorJSON 尝试把 body 解析为 toolsets 的 error JSON 并分类写入 res。
+// 是 error JSON 时返回 true（res 已带分类），否则 res 不变、返回 false。
+func (tp *ToolsetsProvider) classifyErrorJSON(res *Result, b []byte) bool {
 	var probe struct {
 		Error *struct {
 			Code    string `json:"code"`
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if json.Unmarshal(b, &probe) == nil && probe.Error != nil {
-		res.Error = "toolsets error: " + probe.Error.Code + ": " + probe.Error.Message
-		if probe.Error.Code == "rate_limited" {
-			res.RateLimited = true
-		} else if probe.Error.Code == "not_found_error" {
-			res.RequestRejected = true
-		}
-		return res, nil
+	if json.Unmarshal(b, &probe) != nil || probe.Error == nil {
+		return false
 	}
-	res.Success = true
-	res.CompletionTokens = estimateAnthropicOutputTokens(b)
-	return res, rewriteModelInResponse(b, clientModel)
+	res.Error = "toolsets error: " + probe.Error.Code + ": " + probe.Error.Message
+	switch probe.Error.Code {
+	case "rate_limited":
+		res.RateLimited = true
+	case "not_found_error":
+		res.RequestRejected = true
+	}
+	return true
 }
 
 // StreamChat 流式透传：上游 Anthropic SSE 事件逐条经 emit 回调写给客户端。
@@ -259,7 +293,7 @@ func (tp *ToolsetsProvider) StreamChat(ctx context.Context, acc *store.Account, 
 	resp, err, _ := tp.doWithRetry(ctx, acc, tokens, body, egressAttempt)
 	if err != nil {
 		res.Error = err.Error()
-		if strings.Contains(res.Error, "(429)") || strings.Contains(res.Error, "(503)") {
+		if errors.Is(err, errToolsetsBusy) {
 			res.RateLimited = true
 		}
 		return res
@@ -282,6 +316,7 @@ func (tp *ToolsetsProvider) StreamChat(ctx context.Context, acc *store.Account, 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	event := ""
+	emitted := 0
 	for scanner.Scan() {
 		line := scanner.Text()
 		Trace(ctx, "toolsets.sse", map[string]interface{}{"line": line, "account_id": acc.ID})
@@ -300,13 +335,35 @@ func (tp *ToolsetsProvider) StreamChat(ctx context.Context, acc *store.Account, 
 			res.Error = ErrClientDisconnected
 			return res
 		}
+		emitted++
 		event = ""
 	}
 	if err := scanner.Err(); err != nil && ctx.Err() == nil {
 		res.Error = "toolsets stream read error: " + err.Error()
 		return res
 	}
+	// 上游 200 也可能不带 SSE 而是 error JSON（upstream_unavailable），或直接返回空 body——
+	// 两种都一个事件都没 emit。把整个 body 读回按错误 JSON 分类（rate_limited → RateLimited
+	// 换号重试；其余 error code 归 RequestRejected/通用错误），否则空流对客户端表现为挂死。
+	if emitted == 0 {
+		b, _ := io.ReadAll(resp.Body)
+		return tp.classifyNonSSEBody(res, b)
+	}
 	res.Success = true
+	return res
+}
+
+// classifyNonSSEBody 对 200 但非 SSE（error JSON 或空）的响应做错误分类。返回前覆写 res。
+func (tp *ToolsetsProvider) classifyNonSSEBody(res *Result, b []byte) *Result {
+	if tp.classifyErrorJSON(res, b) {
+		return res
+	}
+	if len(strings.TrimSpace(string(b))) == 0 {
+		res.Error = "toolsets upstream returned empty stream"
+	} else {
+		res.Error = "toolsets upstream returned non-SSE body: " + truncateRunes(string(b), 500)
+	}
+	res.RateLimited = true // 空流/未知 body 视为上游波动，让调用方换号重试
 	return res
 }
 
