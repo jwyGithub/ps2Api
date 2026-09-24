@@ -59,3 +59,9 @@ func (r *Router) selectAccount(pinned *store.Account, excluded map[int64]bool, m
 	}
 	return r.pickAccount(excluded, messages, preferQuota)
 }
+
+// SelectAccount 是 selectAccount 的导出包装：供 toolsets 原生透传路径（internal/api/toolsets.go）
+// 从号池选号。toolsets 无会话粘性（上游无 conversationId），pinned 恒为 nil、messages 传 nil。
+func (r *Router) SelectAccount(pinned *store.Account, excluded map[int64]bool, messages []provider.ChatMessage, preferQuota bool) (*store.Account, bool, error) {
+	return r.selectAccount(pinned, excluded, messages, preferQuota)
+}

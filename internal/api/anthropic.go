@@ -49,6 +49,12 @@ func (s *Server) anthropic(w http.ResponseWriter, r *http.Request) {
 		anthropicError(w, 400, "model and messages are required", "invalid_request_error")
 		return
 	}
+	// toolsets 模型（claude-opus-5 / claude-sonnet-5）：原生透传到「工具集」端点，
+	// 不走 anthropicToOpenAI 转换（客户端与上游同为 Anthropic 协议，零转换损耗）。
+	if provider.IsToolsetsModel(ar.Model) {
+		s.handleToolsetsMessages(w, r, raw, ar)
+		return
+	}
 	req := anthropicToOpenAI(ar)
 	req.Endpoint = "anthropic"
 	req.ClientPath = r.URL.Path
@@ -200,6 +206,10 @@ func mapsToInterfaces(in []map[string]interface{}) []interface{} {
 }
 func normalizeModel(m string) string {
 	m = strings.ToLower(strings.TrimSpace(m))
+	// toolsets 专属模型直通（在通用 claude- 规则之前，否则被错改成 claude-sonnet-4-6）。
+	if m == "claude-opus-5" || m == "claude-sonnet-5" {
+		return m
+	}
 	if strings.HasPrefix(m, "claude-sonnet-4-20250514") {
 		return "claude-sonnet-4-6"
 	}

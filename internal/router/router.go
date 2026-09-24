@@ -9,6 +9,10 @@ import (
 type Router struct {
 	Pool     *pool.Pool
 	Provider *provider.Provider
+	// Toolsets 是「工具集」端点（/_gw/toolsets/v1/messages，Anthropic 原生代理）的透传
+	// Provider：claude-opus-5 / claude-sonnet-5 走它（这两个模型在 /chat 白名单外）。
+	// 复用 Provider 的代理池/cookie jar——共享同一出口配置与 Cloudflare cookie 状态。
+	Toolsets *provider.ToolsetsProvider
 	Store    *store.Store
 	shadow   shadowProbe
 	cache    *responseCache
@@ -16,6 +20,7 @@ type Router struct {
 
 func New(s *store.Store) *Router {
 	r := &Router{Pool: pool.New(s), Provider: provider.New(), Store: s, shadow: shadowProbe{inflight: map[string]int{}}, cache: newResponseCache()}
+	r.Toolsets = provider.NewToolsetsProvider(r.Provider)
 	// 出口代理池：仅当 proxy_enabled=true 且配置了 proxy_urls 时启用，否则返回 nil → 走本机直连。
 	// 每次请求实时读设置，面板改动即时生效、无需重启。
 	r.Provider.SetProxyList(func() []string {

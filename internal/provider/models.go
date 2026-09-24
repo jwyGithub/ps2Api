@@ -63,4 +63,7 @@ var PostmanModels = []ModelInfo{
 	pm("gpt-5.4", 128000, 32000, false),
 	pm("gpt-5.2", 128000, 32000, false),
 	pm("auto", 200000, 64000, false),
+	// toolsets 端点专属模型（/chat 白名单外）：走 ToolsetsProvider 原生透传。
+	pm("claude-opus-5", 200000, 128000, true),
+	pm("claude-sonnet-5", 200000, 128000, true),
 }
