@@ -88,7 +88,11 @@ POST https://<subdomain>.postman.co/_gw/toolsets/v1/messages
     → 否: 原有 /chat 路径（PostmanProvider）不变
 ```
 
-- **透传保真**：客户端与上游同为 Anthropic 协议，body 除 `model` 外零改动——thinking/signature/图片 blocks/tool_use 原样往返。非流式响应的 `model` 字段回写客户端原名；流式逐事件透传（上游 `message_start` 本就返回裸名，无需回写）
+- **透传保真**：客户端与上游同为 Anthropic 协议，body 除以下三处出站适配外零改动——thinking/signature/图片 blocks/tool_use 原样往返。非流式响应的 `model` 字段回写客户端原名；流式逐事件透传（上游 `message_start` 本就返回裸名，无需回写）
+- **出站适配**（上游硬校验，2026-09-24 线上 400 实测）：
+  - `max_tokens` 夹紧到 **8096**（上游硬上限，Claude Code 默认 32000 会被整请求 400）
+  - 工具名不合规（>64 字符或含 `.` 等非法字符，典型是 MCP 长工具名）→ 压缩改写为合法名（前缀 + fnv 哈希后缀 ≤64 字符），响应/流式事件里的 `tool_use.name` 回写原名；续聊 messages 历史里的 `tool_use` 块同样改写
+  - `messages[].role` 非 user/assistant → 不适配，透传上游 400 原样回给客户端（客户端请求本身非法）
 - `/v1/models` 列表已追加 `claude-opus-5`、`claude-sonnet-5`
 - OpenAI 端点（`/v1/chat/completions`、`/v1/responses`）请求这两个模型 → 返回 "Invalid model"（未做协议转换，明确报错）
 - `normalizeModel` 已加特例：`claude-opus-5` / `claude-sonnet-5` 直通（否则会被通用 claude- 规则错改成 `claude-sonnet-4-6`）

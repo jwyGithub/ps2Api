@@ -15,9 +15,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"ps2api/internal/store"
@@ -28,7 +31,13 @@ const (
 	ToolsetsAppVersion = "12.29.2-260923-0231"
 	// toolsetsRateLimitRetries 是 429 / upstream_unavailable 的退避重试次数（含首发的总尝试 = 1+retries）。
 	toolsetsRateLimitRetries = 2
+	// ToolsetsMaxTokens 上游对 max_tokens 的硬上限（抓包实测 8096，超限 400 invalid_request_error）。
+	// 客户端合法但更大的值（如 Claude Code 的 32000）在此夹紧，避免整请求被拒。
+	ToolsetsMaxTokens = 8096
 )
+
+// 上游对工具名的格式校验：1-64 个字母/数字/下划线/连字符。
+var toolsetsToolNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // ToolsetsModelMap 对外模型名 → 上游 toolsets 路由名（三段式 <name>/anthropic/anthropic-messages）。
 var ToolsetsModelMap = map[string]string{
@@ -50,6 +59,10 @@ var errToolsetsBusy = errors.New("toolsets upstream busy")
 // 但不走 streamInternal（协议不同、无会话粘性、无 credits usage）。
 type ToolsetsProvider struct {
 	base *Provider
+	// toolNameMap 是「上游改写名 → 客户端原名」的映射（出站改写时写入、响应回写时查）。
+	// 进程重启后丢失——届时上游名原样透传（见 unmapToolName），续聊 tool_result 的
+	// tool_use_id 仍可配对（Anthropic 按 id 不按 name 配对）。sync.Map 应对并发请求。
+	toolNameMap sync.Map
 }
 
 // NewToolsetsProvider 基于现有 Provider 的出口设施构造。
@@ -101,9 +114,14 @@ func (tp *ToolsetsProvider) endpoint(tokens *Tokens) string {
 	return "https://" + tp.host(tokens) + "/_gw/toolsets/v1/messages"
 }
 
-// rewriteModelForUpstream 把客户端 body 里的 model 字段改写为三段式路由名。
+// rewriteModelForUpstream 把客户端 body 适配为上游 toolsets 接受的形状。改三处：
+//  1. model → 三段式路由名
+//  2. max_tokens → 夹紧到 ToolsetsMaxTokens（上游硬上限，超限整请求 400）
+//  3. tools[].name → 超出上游格式（1-64 字母/数字/_/-）的名字压缩改写（如 MCP 长工具名），
+//     改写映射同时存入 ToolsetsProvider.toolNameMap，供响应回写原名
+//
 // Anthropic body 无顺序敏感字段，parse→改→marshal 安全（unknown 字段由 map 保留）。
-func rewriteModelForUpstream(raw []byte, clientModel string) ([]byte, error) {
+func (tp *ToolsetsProvider) rewriteModelForUpstream(raw []byte, clientModel string) ([]byte, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, fmt.Errorf("bad anthropic body: %w", err)
@@ -113,16 +131,158 @@ func rewriteModelForUpstream(raw []byte, clientModel string) ([]byte, error) {
 		return nil, fmt.Errorf("model %q is not a toolsets model", clientModel)
 	}
 	m["model"], _ = json.Marshal(route)
+	if mtRaw, ok := m["max_tokens"]; ok {
+		var mt int
+		if json.Unmarshal(mtRaw, &mt) == nil && mt > ToolsetsMaxTokens {
+			m["max_tokens"], _ = json.Marshal(ToolsetsMaxTokens)
+		}
+	}
+	if toolsRaw, ok := m["tools"]; ok {
+		var tools []map[string]json.RawMessage
+		if json.Unmarshal(toolsRaw, &tools) == nil {
+			changed := false
+			for i, t := range tools {
+				nameRaw, ok := t["name"]
+				if !ok {
+					continue
+				}
+				var name string
+				if json.Unmarshal(nameRaw, &name) != nil {
+					continue
+				}
+				if toolsetsToolNameRe.MatchString(name) {
+					continue
+				}
+				mapped := tp.mapToolName(name)
+				t["name"], _ = json.Marshal(mapped)
+				tools[i] = t
+				changed = true
+			}
+			if changed {
+				m["tools"], _ = json.Marshal(tools)
+			}
+		}
+	}
+	// 续聊 messages 里回传的 tool_use / tool_result 历史同样带客户端原名，出站一并改写
+	// （Anthropic 协议要求 tool_use.name 与 tool_result 的配对块 name 一致，仅单向改会 400）。
+	if msgsRaw, ok := m["messages"]; ok {
+		var msgs []map[string]json.RawMessage
+		if json.Unmarshal(msgsRaw, &msgs) == nil {
+			changed := false
+			for i, msg := range msgs {
+				if rewritten := tp.rewriteMsgToolNames(msg); rewritten != nil {
+					msgs[i] = rewritten
+					changed = true
+				}
+			}
+			if changed {
+				m["messages"], _ = json.Marshal(msgs)
+			}
+		}
+	}
 	return json.Marshal(m)
 }
 
-// rewriteModelInResponse 把上游响应里的 model 字段回写为客户端请求原名（响应直传不暴露三段式路由）。
-func rewriteModelInResponse(raw []byte, clientModel string) []byte {
+// rewriteMsgToolNames 改写单条 message content 里 tool_use/tool_result 块的 name。
+// 无改动返回 nil（调用方据此跳过重新 marshal，保持字节级原样）。
+func (tp *ToolsetsProvider) rewriteMsgToolNames(msg map[string]json.RawMessage) map[string]json.RawMessage {
+	cRaw, ok := msg["content"]
+	if !ok {
+		return nil
+	}
+	var blocks []map[string]json.RawMessage
+	if json.Unmarshal(cRaw, &blocks) != nil {
+		return nil // content 为纯字符串等非块形态，无工具名
+	}
+	changed := false
+	for i, b := range blocks {
+		tpRaw, ok := b["type"]
+		if !ok {
+			continue
+		}
+		var typ string
+		if json.Unmarshal(tpRaw, &typ) != nil || (typ != "tool_use" && typ != "tool_result") {
+			continue
+		}
+		nameRaw, ok := b["name"]
+		if !ok { // tool_result 只有 id 没有 name，配对走 id，无需改
+			continue
+		}
+		var name string
+		if json.Unmarshal(nameRaw, &name) != nil || toolsetsToolNameRe.MatchString(name) {
+			continue
+		}
+		b["name"], _ = json.Marshal(tp.mapToolName(name))
+		blocks[i] = b
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	msg["content"], _ = json.Marshal(blocks)
+	return msg
+}
+
+// mapToolName 把不合规工具名压缩为上游可接受的形状：保留可读前缀、非法字符替换为 _、
+// 超长部分折叠为 fnv 短哈希后缀（保证唯一、可复现、且总长 ≤64）。同时记录双向映射。
+func (tp *ToolsetsProvider) mapToolName(name string) string {
+	// 非法字符（如 MCP 名里的点）替换为下划线。
+	clean := regexp.MustCompile(`[^A-Za-z0-9_-]`).ReplaceAllString(name, "_")
+	if len(clean) <= 64 {
+		mapped := clean
+		tp.toolNameMap.Store(mapped, name)
+		return mapped
+	}
+	h := fnv.New64a()
+	h.Write([]byte(name))
+	suffix := fmt.Sprintf("_%x", h.Sum64()) // 16 hex 字符
+	keep := 64 - len(suffix)
+	mapped := clean[:keep] + suffix
+	tp.toolNameMap.Store(mapped, name)
+	return mapped
+}
+
+// unmapToolName 把上游响应里的（可能被改写过的）工具名还原为客户端原名。
+// 命中映射返回原名，未命中原样返回（上游没改过或会话已重启映射丢失——原样最诚实）。
+func (tp *ToolsetsProvider) unmapToolName(name string) string {
+	if v, ok := tp.toolNameMap.Load(name); ok {
+		return v.(string)
+	}
+	return name
+}
+
+// rewriteModelInResponse 把上游非流式响应回写为客户端视角：model 字段回写原名
+// （不暴露三段式路由），content 里的 tool_use.name 回写出站时改写的原名。
+func (tp *ToolsetsProvider) rewriteModelInResponse(raw []byte, clientModel string) []byte {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return raw
 	}
 	m["model"], _ = json.Marshal(clientModel)
+	if cRaw, ok := m["content"]; ok {
+		var blocks []map[string]json.RawMessage
+		if json.Unmarshal(cRaw, &blocks) == nil {
+			changed := false
+			for i, b := range blocks {
+				nameRaw, ok := b["name"]
+				if !ok {
+					continue
+				}
+				var name string
+				if json.Unmarshal(nameRaw, &name) != nil {
+					continue
+				}
+				if orig := tp.unmapToolName(name); orig != name {
+					b["name"], _ = json.Marshal(orig)
+					blocks[i] = b
+					changed = true
+				}
+			}
+			if changed {
+				m["content"], _ = json.Marshal(blocks)
+			}
+		}
+	}
 	b, err := json.Marshal(m)
 	if err != nil {
 		return raw
@@ -163,6 +323,10 @@ func (tp *ToolsetsProvider) doWithRetry(ctx context.Context, acc *store.Account,
 			return nil, err, egress
 		}
 		tp.base.applyCookies(acc.ID, req, egress)
+		Trace(ctx, "toolsets.upstream.request", map[string]interface{}{
+			"method": req.Method, "url": req.URL.String(), "headers": req.Header,
+			"account_id": acc.ID, "egress": egress,
+		})
 		resp, err := client.Do(req)
 		if err != nil {
 			lastErr = err
@@ -202,7 +366,7 @@ func (tp *ToolsetsProvider) Chat(ctx context.Context, acc *store.Account, raw []
 		res.AuthFailed = true
 		return res, nil
 	}
-	body, err := rewriteModelForUpstream(raw, clientModel)
+	body, err := tp.rewriteModelForUpstream(raw, clientModel)
 	if err != nil {
 		res.Error = err.Error()
 		res.RequestRejected = true
@@ -211,6 +375,10 @@ func (tp *ToolsetsProvider) Chat(ctx context.Context, acc *store.Account, raw []
 	ctx, cancel := context.WithTimeout(ctx, RequestTimeout)
 	defer cancel()
 	resp, err, egress := tp.doWithRetry(ctx, acc, tokens, body, egressAttempt)
+	res.Egress = egress
+	res.RequestBytes = len(body)
+	res.UpstreamBody = string(body)
+	res.UpstreamURL = tp.endpoint(tokens)
 	if err != nil {
 		res.Error = err.Error()
 		// doWithRetry 内部已把 429/503 归为重试耗尽——按限频处理让 router 退避。
@@ -220,7 +388,7 @@ func (tp *ToolsetsProvider) Chat(ctx context.Context, acc *store.Account, raw []
 		return res, nil
 	}
 	defer resp.Body.Close()
-	_ = egress
+	res.UpstreamHeaders = headersToJSON(resp.Request.Header)
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
 		res.Error = fmt.Sprintf("toolsets auth failed (%d)", resp.StatusCode)
 		res.AuthFailed = true
@@ -245,7 +413,7 @@ func (tp *ToolsetsProvider) Chat(ctx context.Context, acc *store.Account, raw []
 	}
 	res.Success = true
 	res.CompletionTokens = estimateAnthropicOutputTokens(b)
-	return res, rewriteModelInResponse(b, clientModel)
+	return res, tp.rewriteModelInResponse(b, clientModel)
 }
 
 // classifyErrorJSON 尝试把 body 解析为 toolsets 的 error JSON 并分类写入 res。
@@ -282,7 +450,7 @@ func (tp *ToolsetsProvider) StreamChat(ctx context.Context, acc *store.Account, 
 		res.AuthFailed = true
 		return res
 	}
-	body, err := rewriteModelForUpstream(raw, clientModel)
+	body, err := tp.rewriteModelForUpstream(raw, clientModel)
 	if err != nil {
 		res.Error = err.Error()
 		res.RequestRejected = true
@@ -290,7 +458,11 @@ func (tp *ToolsetsProvider) StreamChat(ctx context.Context, acc *store.Account, 
 	}
 	ctx, cancel := context.WithTimeout(ctx, RequestTimeout)
 	defer cancel()
-	resp, err, _ := tp.doWithRetry(ctx, acc, tokens, body, egressAttempt)
+	resp, err, egress := tp.doWithRetry(ctx, acc, tokens, body, egressAttempt)
+	res.Egress = egress
+	res.RequestBytes = len(body)
+	res.UpstreamBody = string(body)
+	res.UpstreamURL = tp.endpoint(tokens)
 	if err != nil {
 		res.Error = err.Error()
 		if errors.Is(err, errToolsetsBusy) {
@@ -299,6 +471,7 @@ func (tp *ToolsetsProvider) StreamChat(ctx context.Context, acc *store.Account, 
 		return res
 	}
 	defer resp.Body.Close()
+	res.UpstreamHeaders = headersToJSON(resp.Request.Header)
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
 		res.Error = fmt.Sprintf("toolsets auth failed (%d)", resp.StatusCode)
 		res.AuthFailed = true
@@ -331,6 +504,9 @@ func (tp *ToolsetsProvider) StreamChat(ctx context.Context, acc *store.Account, 
 		if data == "" || event == "" {
 			continue
 		}
+		if event == "content_block_start" {
+			data = tp.unmapToolNameInEvent(data)
+		}
 		if err := emit(event, []byte(data)); err != nil {
 			res.Error = ErrClientDisconnected
 			return res
@@ -351,6 +527,43 @@ func (tp *ToolsetsProvider) StreamChat(ctx context.Context, acc *store.Account, 
 	}
 	res.Success = true
 	return res
+}
+
+// unmapToolNameInEvent 把流式 content_block_start 事件里 tool_use 的（可能改写过的）
+// name 还原为客户端原名。非 tool_use 事件或未命中映射时原样返回。
+func (tp *ToolsetsProvider) unmapToolNameInEvent(data string) string {
+	var ev struct {
+		ContentBlock *struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+		} `json:"content_block"`
+	}
+	if json.Unmarshal([]byte(data), &ev) != nil || ev.ContentBlock == nil || ev.ContentBlock.Type != "tool_use" {
+		return data
+	}
+	orig := tp.unmapToolName(ev.ContentBlock.Name)
+	if orig == ev.ContentBlock.Name {
+		return data
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal([]byte(data), &m) != nil {
+		return data
+	}
+	cb, ok := m["content_block"]
+	if !ok {
+		return data
+	}
+	var cbMap map[string]json.RawMessage
+	if json.Unmarshal(cb, &cbMap) != nil {
+		return data
+	}
+	cbMap["name"], _ = json.Marshal(orig)
+	m["content_block"], _ = json.Marshal(cbMap)
+	b, err := json.Marshal(m)
+	if err != nil {
+		return data
+	}
+	return string(b)
 }
 
 // classifyNonSSEBody 对 200 但非 SSE（error JSON 或空）的响应做错误分类。返回前覆写 res。

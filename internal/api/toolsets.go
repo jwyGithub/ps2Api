@@ -9,6 +9,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"time"
 
 	"ps2api/internal/provider"
 	"ps2api/internal/store"
@@ -17,11 +18,18 @@ import (
 // handleToolsetsMessages 是 /v1/messages 对 toolsets 模型（claude-opus-5/sonnet-5）的入口。
 // raw 为客户端原始 body 字节（透传到上游，仅 model 字段改写为三段式路由名）。
 func (s *Server) handleToolsetsMessages(w http.ResponseWriter, r *http.Request, raw []byte, ar AnthropicReq) {
+	lc := toolsetsLogContext{clientBody: string(raw), clientHeaders: inboundHeadersJSON(r.Header)}
 	if !ar.Stream {
-		s.toolsetsNonStream(w, r, raw, ar)
+		s.toolsetsNonStream(w, r, raw, ar, lc)
 		return
 	}
-	s.toolsetsStream(w, r, raw, ar)
+	s.toolsetsStream(w, r, raw, ar, lc)
+}
+
+// toolsetsLogContext 携带单次客户端请求的入站排查上下文（body/头），各 attempt 共用。
+type toolsetsLogContext struct {
+	clientBody    string
+	clientHeaders string
 }
 
 // pickToolsetsAccount 从号池选一个可用账号（toolsets 无会话粘性，普通轮询）。
@@ -31,7 +39,7 @@ func (s *Server) pickToolsetsAccount(excluded map[int64]bool) (*store.Account, e
 	return acc, err
 }
 
-func (s *Server) toolsetsNonStream(w http.ResponseWriter, r *http.Request, raw []byte, ar AnthropicReq) {
+func (s *Server) toolsetsNonStream(w http.ResponseWriter, r *http.Request, raw []byte, ar AnthropicReq, lc toolsetsLogContext) {
 	excluded := map[int64]bool{}
 	var lastRes *provider.Result
 	for attempt := 0; attempt < 3; attempt++ {
@@ -40,8 +48,9 @@ func (s *Server) toolsetsNonStream(w http.ResponseWriter, r *http.Request, raw [
 			anthropicError(w, 503, "no available account: "+err.Error(), "api_error")
 			return
 		}
+		started := time.Now()
 		res, body := s.Router.Toolsets.Chat(r.Context(), acc, raw, ar.Model, attempt)
-		s.logToolsetsAttempt(acc, r, res, ar, false)
+		s.logToolsetsAttempt(acc, r, res, ar, false, lc, started)
 		if res.Success {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
@@ -66,7 +75,7 @@ func (s *Server) toolsetsNonStream(w http.ResponseWriter, r *http.Request, raw [
 	anthropicError(w, code, lastRes.Error, typ)
 }
 
-func (s *Server) toolsetsStream(w http.ResponseWriter, r *http.Request, raw []byte, ar AnthropicReq) {
+func (s *Server) toolsetsStream(w http.ResponseWriter, r *http.Request, raw []byte, ar AnthropicReq, lc toolsetsLogContext) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		anthropicError(w, 500, "stream unsupported", "api_error")
@@ -93,12 +102,13 @@ func (s *Server) toolsetsStream(w http.ResponseWriter, r *http.Request, raw []by
 			anthropicError(w, 503, "no available account: "+err.Error(), "api_error")
 			return
 		}
+		reqStart := time.Now()
 		res := s.Router.Toolsets.StreamChat(r.Context(), acc, raw, ar.Model, attempt, func(event string, data []byte) error {
 			ensureStarted()
 			writeEvent(event, data)
 			return nil
 		})
-		s.logToolsetsAttempt(acc, r, res, ar, true)
+		s.logToolsetsAttempt(acc, r, res, ar, true, lc, reqStart)
 		if res.Success {
 			return
 		}
@@ -144,17 +154,27 @@ func toolsetsErrorStatus(res *provider.Result) (string, string, int) {
 
 // logToolsetsAttempt 把 toolsets 请求直写面板请求日志（toolsets 无 credits 计量，
 // Router.logAttempt 的 creditsConsumed 口径不适用，但可见性需要保持）。
-func (s *Server) logToolsetsAttempt(acc *store.Account, r *http.Request, res *provider.Result, ar AnthropicReq, stream bool) {
+// 入站 body/头来自 lc（各 attempt 共用），出站 body/头/URL/出口来自 res（provider 侧填充）。
+func (s *Server) logToolsetsAttempt(acc *store.Account, r *http.Request, res *provider.Result, ar AnthropicReq, stream bool, lc toolsetsLogContext, started time.Time) {
 	l := &store.RequestLog{
-		AccountID:     &acc.ID,
-		Credits:       0,
-		Model:         ar.Model,
-		Endpoint:      "anthropic-toolsets",
-		Path:          r.URL.Path,
-		Stream:        stream,
-		UpstreamBody:  truncateStr(res.Error),
-		UpstreamURL:   "_gw/toolsets/v1/messages",
-		AccountEmail:  acc.Email,
+		AccountID:       &acc.ID,
+		Credits:         0,
+		Model:           ar.Model,
+		Endpoint:        "anthropic-toolsets",
+		DurationMs:      time.Since(started).Milliseconds(),
+		RequestBytes:    res.RequestBytes,
+		Path:            r.URL.Path,
+		Stream:          stream,
+		ClientBody:      lc.clientBody,
+		ClientHeaders:   lc.clientHeaders,
+		UpstreamBody:    res.UpstreamBody,
+		UpstreamHeaders: res.UpstreamHeaders,
+		UpstreamURL:     res.UpstreamURL,
+		Egress:          res.Egress,
+		AccountEmail:    acc.Email,
+	}
+	if l.UpstreamURL == "" {
+		l.UpstreamURL = "_gw/toolsets/v1/messages"
 	}
 	if res.Success {
 		l.Status = "success"

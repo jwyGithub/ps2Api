@@ -106,3 +106,133 @@ func TestToolsetsChatNonSSEErrorClassified(t *testing.T) {
 		t.Fatalf("rate_limited JSON must classify RateLimited, got success=%v err=%s", res.Success, res.Error)
 	}
 }
+
+// 出站适配：max_tokens 夹紧到上游硬上限 8096，超长工具名（MCP 名 >64 字符）压缩改写。
+func TestToolsetsUpstreamAdaptation(t *testing.T) {
+	var got struct {
+		MaxTokens int             `json:"max_tokens"`
+		Tools     []map[string]any `json:"tools"`
+	}
+	longName := "mcp__plugin_chrome-devtools-mcp_chrome-devtools__performance_analyze_insight" // 74 字符
+	var tp *ToolsetsProvider // handler 执行时（Chat 出站中）已赋值
+	tp = newToolsetsTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"model":"claude-opus-5","content":[{"type":"tool_use","id":"t1","name":%q,"input":{}}]}`,
+			mappedNameForTest(t, tp, longName))
+	})
+	raw := fmt.Sprintf(`{"model":"claude-opus-5","max_tokens":32000,"messages":[{"role":"user","content":"hi"}],"tools":[{"name":%q,"description":"","input_schema":{"type":"object"}}]}`, longName)
+	res, body := tp.Chat(context.Background(), toolsetsTestAccount(t), []byte(raw), "claude-opus-5", 0)
+	if !res.Success {
+		t.Fatalf("chat must succeed, err=%s", res.Error)
+	}
+	if got.MaxTokens != 8096 {
+		t.Fatalf("max_tokens must be clamped to 8096, got %d", got.MaxTokens)
+	}
+	if len(got.Tools) != 1 {
+		t.Fatalf("tools must survive rewrite, got %d", len(got.Tools))
+	}
+	upName := got.Tools[0]["name"].(string)
+	if len(upName) > 64 || !toolsetsToolNameRe.MatchString(upName) {
+		t.Fatalf("upstream tool name must be <=64 & legal, got %q", upName)
+	}
+	// 响应里的 tool_use.name 必须回写客户端原名。
+	var resp struct {
+		Content []struct {
+			Name string `json:"name"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil || len(resp.Content) != 1 {
+		t.Fatalf("bad response body: %s", body)
+	}
+	if resp.Content[0].Name != longName {
+		t.Fatalf("response tool name must be original %q, got %q", longName, resp.Content[0].Name)
+	}
+}
+
+// mappedNameForTest 取出 provider 对 longName 的实际改写名（供 mock 返回上游视角）。
+func mappedNameForTest(t *testing.T, tp *ToolsetsProvider, orig string) string {
+	t.Helper()
+	mapped := tp.mapToolName(orig)
+	if mapped == orig || len(mapped) > 64 {
+		t.Fatalf("mapToolName must compress, got %q", mapped)
+	}
+	return mapped
+}
+
+// 续聊：messages 历史里回传的 tool_use（客户端原名）出站也必须改写，否则第二轮 400。
+func TestToolsetsUpstreamAdaptsHistoryToolUse(t *testing.T) {
+	longName := strings.Repeat("b", 70)
+	var upstreamName string
+	tp := newToolsetsTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []struct {
+				Content []struct {
+					Type string `json:"type"`
+					Name string `json:"name"`
+				} `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		for _, m := range body.Messages {
+			for _, c := range m.Content {
+				if c.Type == "tool_use" {
+					upstreamName = c.Name
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"model":"claude-opus-5","content":[{"type":"text","text":"ok"}]}`)
+	})
+	raw := fmt.Sprintf(`{"model":"claude-opus-5","max_tokens":1024,"messages":[`+
+		`{"role":"user","content":[{"type":"text","text":"hi"}]},`+
+		`{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":%q,"input":{}}]},`+
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"done"}]}]}`, longName)
+	res, _ := tp.Chat(context.Background(), toolsetsTestAccount(t), []byte(raw), "claude-opus-5", 0)
+	if !res.Success {
+		t.Fatalf("chat must succeed, err=%s", res.Error)
+	}
+	if upstreamName == "" || upstreamName == longName {
+		t.Fatalf("history tool_use name must be rewritten upstream, got %q", upstreamName)
+	}
+	if !toolsetsToolNameRe.MatchString(upstreamName) || len(upstreamName) > 64 {
+		t.Fatalf("rewritten name must be legal, got %q", upstreamName)
+	}
+}
+
+// 流式 content_block_start 的 tool_use.name 回写原名。
+func TestToolsetsStreamToolNameUnmapped(t *testing.T) {
+	longName := strings.Repeat("a", 70) // 超长 → 必被改写
+	tp := newToolsetsTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]json.RawMessage
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		var tools []struct {
+			Name string `json:"name"`
+		}
+		_ = json.Unmarshal(body["tools"], &tools)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":%q}}\n\n",
+			tools[0].Name)
+		fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	})
+	raw := fmt.Sprintf(`{"model":"claude-opus-5","messages":[{"role":"user","content":"hi"}],"tools":[{"name":%q}]}`, longName)
+	var blockName string
+	res := tp.StreamChat(context.Background(), toolsetsTestAccount(t), []byte(raw), "claude-opus-5", 0, func(event string, data []byte) error {
+		if event == "content_block_start" {
+			var ev struct {
+				ContentBlock struct {
+					Name string `json:"name"`
+				} `json:"content_block"`
+			}
+			_ = json.Unmarshal(data, &ev)
+			blockName = ev.ContentBlock.Name
+		}
+		return nil
+	})
+	if !res.Success {
+		t.Fatalf("stream must succeed, err=%s", res.Error)
+	}
+	if blockName != longName {
+		t.Fatalf("streamed tool name must be original (len %d), got %q", len(longName), blockName)
+	}
+}
