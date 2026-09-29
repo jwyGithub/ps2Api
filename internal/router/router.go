@@ -9,7 +9,7 @@ import (
 type Router struct {
 	Pool     *pool.Pool
 	Provider *provider.Provider
-	// Toolsets 是「工具集」端点（/_gw/toolsets/v1/messages，Anthropic 原生代理）的透传
+	// Toolsets 是「工具集」端点（gateway.postman.com/toolsets/v1/messages，Anthropic 原生代理）的透传
 	// Provider：claude-opus-5 / claude-sonnet-5 走它（这两个模型在 /chat 白名单外）。
 	// 复用 Provider 的代理池/cookie jar——共享同一出口配置与 Cloudflare cookie 状态。
 	Toolsets *provider.ToolsetsProvider

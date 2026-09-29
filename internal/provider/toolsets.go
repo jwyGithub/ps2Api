@@ -1,5 +1,6 @@
 // toolsets.go —— Postman「工具集(Toolsets)」Anthropic 原生代理端点接入。
-// 端点: POST https://<subdomain>.postman.co/_gw/toolsets/v1/messages
+// 端点: POST https://gateway.postman.com/toolsets/v1/messages（Istio 网关，12.30.0 客户端
+// 同款路径；旧路径 <subdomain>.postman.co/_gw/toolsets/... 过 Cloudflare WAF，已弃用）。
 // 实测（2026-09-24）: claude-opus-5 / claude-sonnet-5 可用（Agent Mode /chat 白名单外），
 // 请求/响应均为标准 Anthropic Messages 协议，故对 /v1/messages 客户端做原生透传（零转换）。
 // 关键头 x-pstmn-req-service: ai-toolsets（缺它一律 404）。
@@ -27,8 +28,9 @@ import (
 )
 
 const (
-	// ToolsetsAppVersion 对齐 12.29.x 桌面端（toolsets 功能上线版本）。
-	ToolsetsAppVersion = "12.29.2-260923-0231"
+	// ToolsetsAppVersion 对齐 12.30.0 桌面端（本机实际运行版本，2026-09-29 抓 logs 确认
+	// 完整串为 12.30.0-ui-260928-0231；toolsets 浏览器侧构造器已迁移到 SW 缓存 bundle）。
+	ToolsetsAppVersion = "12.30.0-ui-260928-0231"
 	// toolsetsRateLimitRetries 是 429 / upstream_unavailable 的退避重试次数（含首发的总尝试 = 1+retries）。
 	toolsetsRateLimitRetries = 2
 	// ToolsetsMaxTokens 上游对 max_tokens 的硬上限（抓包实测 8096，超限 400 invalid_request_error）。
@@ -81,8 +83,8 @@ func NewToolsetsProvider(base *Provider) *ToolsetsProvider {
 
 // buildHeaders 构造 toolsets 出站头。缺 x-pstmn-req-service: ai-toolsets 一律 404。
 // 桌面双 token 与 web cookie（postman.sid）两种登录态都支持（抓包实测 cookie 亦通）。
-// 浏览器指纹头（sec-ch-ua*/sec-fetch-*）与 /chat 的 buildHeaders 同口径——UA 自称
-// Chromium/Electron 却不发这些是 Cloudflare Bot Management 的机器人信号。
+// 出站目标是 gateway.postman.com（Istio，无 Cloudflare WAF），头形态按 12.30.0 客户端：
+// 桌面壳请求不带 sec-ch-ua*/sec-fetch-* 浏览器指纹头；web cookie 模拟浏览器跨域 fetch。
 func (tp *ToolsetsProvider) buildHeaders(tokens *Tokens) http.Header {
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
@@ -103,24 +105,32 @@ func (tp *ToolsetsProvider) buildHeaders(tokens *Tokens) http.Header {
 	h.Set("sec-ch-ua", `"Not)A;Brand";v="8", "Chromium";v="138"`)
 	h.Set("sec-ch-ua-mobile", "?0")
 	h.Set("sec-ch-ua-platform", `"macOS"`)
-	h.Set("sec-fetch-dest", "empty")
-	h.Set("sec-fetch-mode", "cors")
-	h.Set("sec-fetch-site", "same-origin")
-	h.Set("Origin", "https://"+tp.host(tokens)+"/")
+	// 浏览器侧（Electron webview）从 <subdomain>.postman.co 页面跨域 fetch 到 gateway.postman.com：
+	// mode=cors + site=cross-site + Origin=页面子域。桌面壳 native fetch 则是同源无这些头。
+	// 桌面双 token 走桌面壳形态（无 sec-fetch/cors 头）；web cookie 模拟浏览器跨域形态。
+	h.Set("Origin", "https://go.postman.co/")
+	if tokens.AccessToken != "" {
+		h.Del("sec-fetch-dest")
+		h.Del("sec-fetch-mode")
+		h.Del("sec-fetch-site")
+		h.Del("sec-ch-ua")
+		h.Del("sec-ch-ua-mobile")
+		h.Del("sec-ch-ua-platform")
+	} else {
+		h.Set("sec-fetch-site", "cross-site")
+	}
 	return h
 }
 
-// host 返回出站域名（不含 scheme）。web 会话必须回到自己的子域（cookie 域绑定），桌面 token 回退 go。
+// host 返回出站域名（不含 scheme）。toolsets 统一走 Istio 网关 gateway.postman.com——
+// 12.30.0 客户端即此路径（__WP_ISTIO_GATEWAY_URL__ + /toolsets/v1/messages，不带 /_gw 前缀），
+// 且 /_gw 子域路径过 Cloudflare WAF，gateway.postman.com 无此层。
 func (tp *ToolsetsProvider) host(tokens *Tokens) string {
-	sub := tokens.WorkspaceSubdomain
-	if sub == "" {
-		sub = "go"
-	}
-	return sub + ".postman.co"
+	return "gateway.postman.com"
 }
 
 func (tp *ToolsetsProvider) endpoint(tokens *Tokens) string {
-	return "https://" + tp.host(tokens) + "/_gw/toolsets/v1/messages"
+	return "https://" + tp.host(tokens) + "/toolsets/v1/messages"
 }
 
 // rewriteModelForUpstream 把客户端 body 适配为上游 toolsets 接受的形状。改三处：

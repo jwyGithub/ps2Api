@@ -174,7 +174,7 @@ func (s *Server) logToolsetsAttempt(acc *store.Account, r *http.Request, res *pr
 		AccountEmail:    acc.Email,
 	}
 	if l.UpstreamURL == "" {
-		l.UpstreamURL = "_gw/toolsets/v1/messages"
+		l.UpstreamURL = "gateway.postman.com/toolsets/v1/messages"
 	}
 	if res.Success {
 		l.Status = "success"
