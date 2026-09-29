@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"sync"
+	"time"
 
 	"ps2api/internal/provider"
 	"ps2api/internal/store"
@@ -92,9 +93,28 @@ func (r *Router) ProbeAccountsByIDs(ctx context.Context, ids []int64) []ProbeRes
 // probeAccountQuota 对单个账号执行一次探测并写库，返回逐账号结果。
 // ProbeQuotas（批量）与 ProbeAccountQuota（单账号）共用此逻辑。
 // withDetail 为 true 时将上游原始结果填入 ProbeResult.Detail，供单账号接口透传给前端。
+//
+// 主路径 = billing operations 零消耗直查（fetchBillingOpsResult，2026-09-29 新增）：
+// 直查失败（user_id 缺失/bifrost 不可达/解析失败等）才回退 ProbeQuota 烧 token 探测，
+// 两条路径产出的 Result.Usage 形状一致（persistQuota/applyUsageState 无感）。
 func (r *Router) probeAccountQuota(ctx context.Context, acc *store.Account, withDetail bool) ProbeResult {
 	pr := ProbeResult{AccountID: acc.ID, Email: acc.Email}
-	res := r.Provider.ProbeQuota(ctx, acc)
+	var res *provider.Result
+	if r.fetchBillingOpsResult(ctx, acc, pr) {
+		// 直查成功：重读账号再判定（写库后 acc 内存字段已过期，applyUsageState/Detail 需要新值）。
+		if fresh, err := r.Store.GetAccount(acc.ID); err == nil && fresh != nil {
+			acc = fresh
+		}
+		pr.OK = true
+		pr.Limit = acc.QuotaLimit
+		pr.Remaining = acc.QuotaRemaining
+		if withDetail {
+			// Detail 携带直查来源的轻量 Result（Usage 已落库，Error 为空）。
+			pr.Detail = billingOpsResultForDetail(acc)
+		}
+		return pr
+	}
+	res = r.Provider.ProbeQuota(ctx, acc)
 	// 限流头可能在没有 usage 对象的响应中返回，也要先落库。
 	if res != nil {
 		r.persistQuota(acc, res)
@@ -208,4 +228,59 @@ func resQuotaExhausted(res *provider.Result) bool {
 	}
 	remaining := res.Usage.Limit - res.Usage.Usage - res.Usage.Overage
 	return remaining <= 0 || res.QuotaExhausted
+}
+
+// fetchBillingOpsResult 用 billing operations 零消耗直查额度并落库。
+// 返回 true 表示成功落库（调用方直接从库里取数即可）；false = 直查不可用，调用方回退烧 token 探测。
+//
+// 落库口径与 persistQuota 一致：plan=operations.plan（sync-free-202603 等，对齐 usage.userType
+// 的计划语义）、state 按 remaining>0 推 AVAILABLE（billing 无 usageState 字段，余量即真相），
+// 周期字段 billing 不返回、保持库中现值不动（QuotaSnapshot 零值周期字段不覆盖——SetQuotaSnapshot
+// 全字段 UPDATE，故此处仅在成功拿到 AI 条目时调用，且周期传 nil 会清掉库里的周期——所以
+// 直查路径不传周期：先读库保留原值）。
+func (r *Router) fetchBillingOpsResult(ctx context.Context, acc *store.Account, pr ProbeResult) bool {
+	// user_id 是硬前置：桌面注册产线落库的账号有；缺了直查必 403，直接走回退省一次往返。
+	// （Account.Tokens 是 JSON blob 字符串，user_id 在里面——GetTokens 负责解析与校验。）
+	ops, err := r.Provider.FetchBillingOps(ctx, acc, 0)
+	if err != nil || ops == nil || ops.AI == nil || ops.AI.Limit <= 0 {
+		return false
+	}
+	ai := ops.AI
+	remaining := ai.Limit - ai.Usage - ai.Overage
+	if remaining < 0 {
+		remaining = 0
+	}
+	// state：直查无 usageState，按余量推——>0 视为 AVAILABLE，==0 视为 EXCEEDED 的等价语义。
+	// exhausted 判定与 resQuotaExhausted 对齐（remaining==0）。
+	state := "AVAILABLE"
+	if remaining == 0 {
+		state = "EXCEEDED"
+	}
+	// 周期字段保留库中现值：读一次当前账号快照（acc 上的值可能过期，直接查库）。
+	fresh, err := r.Store.GetAccount(acc.ID)
+	var cycleStart, cycleEnd *time.Time
+	if err == nil && fresh != nil {
+		cycleStart, cycleEnd = fresh.QuotaCycleStart, fresh.QuotaCycleEnd
+	}
+	pooled := ai.IsPooled == "1" || ai.IsPooled == "true"
+	_ = r.Store.SetQuotaSnapshot(acc.ID, store.QuotaSnapshot{
+		Plan: ai.Plan, State: state, Limit: ai.Limit, Used: ai.Usage,
+		Remaining: remaining, Overage: ai.Overage, Spillage: ai.Spillage,
+		AllowOverage: ai.Overage > 0, TeamPooled: pooled,
+		CycleStart: cycleStart, CycleEnd: cycleEnd,
+	})
+	return true
+}
+
+// billingOpsResultForDetail 构造直查路径的 Detail Result（Usage 从库中快照回填，
+// 形状与烧 token 探测的 Result 一致，前端「刷新额度」详情无感）。
+func billingOpsResultForDetail(acc *store.Account) *provider.Result {
+	res := &provider.Result{Success: true}
+	if acc.QuotaLimit > 0 {
+		res.Usage = &provider.Usage{
+			Limit: acc.QuotaLimit, Usage: acc.QuotaUsed, Overage: acc.QuotaOverage,
+			Spillage: acc.QuotaSpillage, UserType: acc.Plan, UsageState: acc.QuotaState,
+		}
+	}
+	return res
 }
