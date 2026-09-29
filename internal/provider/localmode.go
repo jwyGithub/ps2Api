@@ -9,7 +9,14 @@ import (
 // desktopLocalModeExcludedTools 取自真实 localmode 桌面会话抓包里 clientTools.excludedTools。
 // 它只是「隐藏这些工具不给模型」的客户端清单,不影响 executeShellCommand 等本地工具的可用性;
 // 原样对齐是为了让网关 desktop 请求与已验证能跑 shell 的抓包一致,减少实测变量。
+//
+// 后续追加的 executeShellCommand/readFile/createFile/showRichOutput(2026-09-29):抓包清单之外
+// 的网关侧追加项。上游模型凭 nativeToolsHash 看到这些 Postman 原生工具后会绕过客户端声明的
+// thirdParty 工具直接调用它们(线上 9/28-29 实测 75 次 tool_use_error:Claude Code 无原生工具
+// handler,回 "No such tool available" 死循环)。排除后模型只剩 Bash/Read/Write 等客户端工具,
+// 同期已验证可正常执行(4367+3027+1143 次成功)。
 var desktopLocalModeExcludedTools = []string{
+	"executeShellCommand", "readFile", "createFile", "showRichOutput",
 	"listDirectory", "searchInFiles",
 	"listDatasets", "createDataset", "previewDataset", "queryDatasetView", "deleteDataset",
 	"getDatasetSchema", "createDatasetView", "deleteDatasetView", "runQuery", "insertDatasetRows",

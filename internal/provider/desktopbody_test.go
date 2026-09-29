@@ -2,6 +2,7 @@ package provider
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -32,6 +33,13 @@ func TestBuildBodyDesktopLocalModeShape(t *testing.T) {
 	excl, _ := ct["excludedTools"].([]string)
 	if len(excl) == 0 {
 		t.Fatal("excludedTools 为空,应对齐抓包里的 localmode 隐藏清单")
+	}
+	// 网关侧追加:原生执行类工具必须排除,否则模型绕过 thirdParty 调用它们,
+	// 客户端无 handler 回 tool_use_error(2026-09-29 线上 75 次)。
+	for _, name := range []string{"executeShellCommand", "readFile", "createFile", "showRichOutput"} {
+		if !slices.Contains(excl, name) {
+			t.Fatalf("excludedTools 缺少 %s: %v", name, excl)
+		}
 	}
 }
 

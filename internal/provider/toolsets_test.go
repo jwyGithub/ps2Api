@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -234,5 +235,58 @@ func TestToolsetsStreamToolNameUnmapped(t *testing.T) {
 	}
 	if blockName != longName {
 		t.Fatalf("streamed tool name must be original (len %d), got %q", len(longName), blockName)
+	}
+}
+
+// 新版客户端扩展字段（context_management/safeguards）与 messages[] 里的 system role 消息
+// 都会被上游 400 拒绝（2026-09-29 实测）。出站必须剥字段、折 system。
+func TestToolsetsUpstreamStripsExtendedFieldsAndSystemRole(t *testing.T) {
+	var got map[string]json.RawMessage
+	tp := newToolsetsTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Errorf("upstream body not JSON: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"model":"claude-opus-5","content":[{"type":"text","text":"ok"}]}`)
+	})
+	raw := `{"model":"claude-opus-5","max_tokens":100,"stream":true,` +
+		`"context_management":{"edits":[{"keep":"all","type":"clear_thinking_20251015"}]},` +
+		`"safeguards":null,` +
+		`"system":"base prompt",` +
+		`"messages":[{"role":"user","content":"hi"},` +
+		`{"role":"system","content":[{"type":"text","text":"hook output"}]},` +
+		`{"role":"assistant","content":"done"}]}`
+	res, _ := tp.Chat(context.Background(), toolsetsTestAccount(t), []byte(raw), "claude-opus-5", 0)
+	if !res.Success {
+		t.Fatalf("chat must succeed, err=%s", res.Error)
+	}
+	for _, banned := range []string{"context_management", "safeguards"} {
+		if _, ok := got[banned]; ok {
+			t.Fatalf("upstream body must drop %s", banned)
+		}
+	}
+	var roles []string
+	var msgs []struct {
+		Role string `json:"role"`
+	}
+	if err := json.Unmarshal(got["messages"], &msgs); err != nil {
+		t.Fatalf("messages not parseable: %v", err)
+	}
+	for _, m := range msgs {
+		roles = append(roles, m.Role)
+	}
+	if len(roles) != 2 || roles[0] != "user" || roles[1] != "assistant" {
+		t.Fatalf("system role must be folded out, got roles %v", roles)
+	}
+	var sys []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(got["system"], &sys); err != nil || len(sys) != 2 {
+		t.Fatalf("system must merge prompt+hook output as text blocks, got %s", got["system"])
+	}
+	if sys[0].Text != "base prompt" || sys[1].Text != "hook output" {
+		t.Fatalf("system blocks wrong: %+v", sys)
 	}
 }

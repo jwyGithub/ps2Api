@@ -39,6 +39,15 @@ const (
 // 上游对工具名的格式校验：1-64 个字母/数字/下划线/连字符。
 var toolsetsToolNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
+// toolsetsAllowedFields 是出站 body 的顶层字段白名单（Anthropic Messages 标准 + 实测可过的
+// metadata/output_config）。白名单外（context_management/safeguards 等新版客户端扩展字段）
+// 一律剥掉——上游严格校验，未知字段即 400 "is not allowed"。
+var toolsetsAllowedFields = map[string]bool{
+	"model": true, "messages": true, "system": true, "max_tokens": true,
+	"stream": true, "tools": true, "thinking": true, "temperature": true,
+	"top_p": true, "stop_sequences": true, "metadata": true, "output_config": true,
+}
+
 // ToolsetsModelMap 对外模型名 → 上游 toolsets 路由名（三段式 <name>/anthropic/anthropic-messages）。
 var ToolsetsModelMap = map[string]string{
 	"claude-opus-5":   "claude-opus-5/anthropic/anthropic-messages",
@@ -120,11 +129,21 @@ func (tp *ToolsetsProvider) endpoint(tokens *Tokens) string {
 //  3. tools[].name → 超出上游格式（1-64 字母/数字/_/-）的名字压缩改写（如 MCP 长工具名），
 //     改写映射同时存入 ToolsetsProvider.toolNameMap，供响应回写原名
 //
+//     剥掉白名单外的顶层字段、把 messages[] 里的 system role 消息折进顶层 system：
+//     toolsets 上游是严格的 Anthropic Messages 校验器，新版客户端的 context_management /
+//     safeguards 扩展字段报 "is not allowed"，system role 消息报 "must be one of
+//     [user, assistant]"（2026-09-29 实测 400）。
+//
 // Anthropic body 无顺序敏感字段，parse→改→marshal 安全（unknown 字段由 map 保留）。
 func (tp *ToolsetsProvider) rewriteModelForUpstream(raw []byte, clientModel string) ([]byte, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, fmt.Errorf("bad anthropic body: %w", err)
+	}
+	for k := range m {
+		if !toolsetsAllowedFields[k] {
+			delete(m, k)
+		}
 	}
 	route, ok := ToolsetsModelMap[strings.ToLower(strings.TrimSpace(clientModel))]
 	if !ok {
@@ -165,22 +184,95 @@ func (tp *ToolsetsProvider) rewriteModelForUpstream(raw []byte, clientModel stri
 	}
 	// 续聊 messages 里回传的 tool_use / tool_result 历史同样带客户端原名，出站一并改写
 	// （Anthropic 协议要求 tool_use.name 与 tool_result 的配对块 name 一致，仅单向改会 400）。
+	// 同时把 system role 消息从 messages[] 折出（上游只认 user/assistant，新版客户端会把
+	// SessionStart hook 输出以 role:system 塞进 messages）——文本拼进顶层 system。
 	if msgsRaw, ok := m["messages"]; ok {
 		var msgs []map[string]json.RawMessage
 		if json.Unmarshal(msgsRaw, &msgs) == nil {
+			var sysParts []string
+			kept := msgs[:0]
 			changed := false
-			for i, msg := range msgs {
+			for _, msg := range msgs {
+				if roleRaw, ok := msg["role"]; ok {
+					var role string
+					if json.Unmarshal(roleRaw, &role) == nil && role == "system" {
+						sysParts = append(sysParts, blockTexts(msg["content"]))
+						changed = true
+						continue
+					}
+				}
 				if rewritten := tp.rewriteMsgToolNames(msg); rewritten != nil {
-					msgs[i] = rewritten
+					msg = rewritten
 					changed = true
 				}
+				kept = append(kept, msg)
 			}
 			if changed {
-				m["messages"], _ = json.Marshal(msgs)
+				if len(sysParts) > 0 {
+					m["system"], _ = json.Marshal(joinSystemBlocks(m["system"], sysParts))
+				}
+				m["messages"], _ = json.Marshal(msgs[:len(kept)])
 			}
 		}
 	}
 	return json.Marshal(m)
+}
+
+// blockTexts 提取 content（字符串或 blocks 数组）里的全部 text 块文本，用空行连接。
+func blockTexts(contentRaw json.RawMessage) string {
+	if len(contentRaw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(contentRaw, &s) == nil {
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(contentRaw, &blocks) != nil {
+		return ""
+	}
+	var parts []string
+	for _, b := range blocks {
+		if b.Type == "text" && b.Text != "" {
+			parts = append(parts, b.Text)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// joinSystemBlocks 把原顶层 system（字符串或 [{type:text}] 数组）与新增 system 消息文本
+// 合并为 Anthropic system 数组形态：[{type:"text",text:...},...]。
+func joinSystemBlocks(sysRaw json.RawMessage, add []string) interface{} {
+	var texts []string
+	if len(sysRaw) > 0 {
+		var s string
+		if json.Unmarshal(sysRaw, &s) == nil {
+			texts = append(texts, s)
+		} else {
+			var blocks []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(sysRaw, &blocks) == nil {
+				for _, b := range blocks {
+					if b.Text != "" {
+						texts = append(texts, b.Text)
+					}
+				}
+			}
+		}
+	}
+	texts = append(texts, add...)
+	out := make([]map[string]string, 0, len(texts))
+	for _, t := range texts {
+		if t != "" {
+			out = append(out, map[string]string{"type": "text", "text": t})
+		}
+	}
+	return out
 }
 
 // rewriteMsgToolNames 改写单条 message content 里 tool_use/tool_result 块的 name。
