@@ -601,7 +601,7 @@ func (s *Store) PageRequestLogsGrouped(offset, limit int) ([]*RequestLog, error)
 		return nil, err
 	}
 	defer rows.Close()
-	return scanRequestLogs(rows)
+	return scanRequestLogSummaries(rows)
 }
 
 // WafSignatureLikeSQL 把签名子串表拼成 request_logs.upstream_body 的 LIKE 匹配
