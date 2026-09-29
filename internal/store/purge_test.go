@@ -45,4 +45,12 @@ func TestPurgeRequestLogsOlderThan(t *testing.T) {
 	if remaining, _ := s.CountRequestLogs(); remaining != 2 {
 		t.Fatalf("remaining after no-op purge = %d, want 2", remaining)
 	}
+
+	// VACUUM 不报错、数据仍在。
+	if err := s.Vacuum(); err != nil {
+		t.Fatalf("Vacuum: %v", err)
+	}
+	if remaining, _ := s.CountRequestLogs(); remaining != 2 {
+		t.Fatalf("remaining after vacuum = %d, want 2", remaining)
+	}
 }

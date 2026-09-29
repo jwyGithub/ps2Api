@@ -1,0 +1,34 @@
+<section class="page" id="page-modelmap">
+    <div class="p-8">
+      <div class="flex items-end justify-between mb-8 gap-6 flex-wrap">
+        <div>
+          <div class="text-[11px] font-semibold tracking-wider uppercase mb-2" style="color: var(--muted);">Model Mapping</div>
+          <h1 class="hero-title">模型 <em>映射</em></h1>
+          <p class="mt-2 text-[14px]" style="color: var(--fg-2);">客户端传来的模型名按映射表改写后发上游；未配置映射的模型原样透传。响应里的 model 字段仍回写客户端原名。</p>
+        </div>
+      </div>
+
+      <div class="card p-6">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="font-display text-[16px] font-medium">映射规则</h3>
+          <button class="btn btn-primary" style="padding:6px 16px" onclick="addModelMapRow('', '')">+ 添加映射</button>
+        </div>
+        <table class="w-full" id="modelMapTable" style="border-collapse:collapse">
+          <thead>
+            <tr style="color:var(--muted);text-align:left">
+              <th class="text-[12px] font-semibold pb-2 pr-3">客户端请求的模型</th>
+              <th class="text-[12px] font-semibold pb-2 pr-3"></th>
+              <th class="text-[12px] font-semibold pb-2 pr-3">实际发送给上游的模型</th>
+              <th class="text-[12px] font-semibold pb-2"></th>
+            </tr>
+          </thead>
+          <tbody id="modelMapRows"></tbody>
+        </table>
+        <div id="modelMapEmpty" class="text-[12px] py-6" style="color:var(--muted);text-align:center">暂无映射，所有模型原样透传。</div>
+        <div class="pt-4 flex items-center gap-2">
+          <button class="btn btn-primary" onclick="saveModelMap()">保存映射</button>
+          <span class="text-[12px]" style="color:var(--muted)">保存后立即生效，无需重启。映射表为空时全部透传。</span>
+        </div>
+      </div>
+    </div>
+  </section>

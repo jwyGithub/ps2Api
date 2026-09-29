@@ -51,6 +51,9 @@ var settingDefs = []settingDef{
 	{Key: "vision_max_result_chars", Label: "单图识别文本上限(字符)", Type: "number", Default: "2000", Group: "vision", Description: "每张图识别结果最多保留多少字符，超出截断。防止多图识别文本顶爆上游 10000 字符 query 上限"},
 	{Key: "vision_timeout_seconds", Label: "识别超时(秒)", Type: "number", Default: "60", Group: "vision", Description: "单次视觉模型调用的超时时间（秒）"},
 	{Key: "vision_prompt", Label: "识别提示词", Type: "text", Default: "Transcribe the contents of this image into text as completely and in as structured a way as possible, including all readable text, charts, and key visual information. Output only the transcription itself, without any prefix or suffix explanation.", Group: "vision", Description: "发给视觉模型的指令，决定识别输出的风格与详略"},
+	// 模型映射（modelmap）：客户端传来的模型名按此表改写后出站，未配置原样透传。
+	// 值为 JSON 对象（前端「模型映射」页负责编辑），响应里的 model 字段仍回写客户端原名。
+	{Key: "model_mapping", Label: "模型映射表", Type: "text", Default: "", Group: "modelmap", Description: "JSON 对象 {\"客户端模型\":\"实际发送模型\"}，未命中的模型原样透传"},
 }
 
 func defaultSettings() map[string]string {
@@ -103,9 +106,9 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, 400, "unknown setting key: "+k, "invalid_request")
 			return
 		}
-		// 代理出口列表、视觉模型 Key 允许被清空（前者删空出口回退直连，后者清空以停用图片识别）；
+		// 代理出口列表、视觉模型 Key、模型映射表允许被清空（删空分别回退直连/停用图片识别/全部透传）；
 		// 其它设置项保留「空值跳过」语义，避免误把未随表单提交的项清掉。
-		if v == "" && k != "proxy_urls" && k != "vision_api_key" {
+		if v == "" && k != "proxy_urls" && k != "vision_api_key" && k != "model_mapping" {
 			continue
 		}
 		if err := s.Store.SetSetting(k, v); err != nil {

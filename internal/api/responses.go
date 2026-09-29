@@ -94,6 +94,10 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		openAIError(w, 400, "input is required", "invalid_request_error")
 		return
 	}
+	// 模型映射：出站用映射后的名字，响应回写仍用客户端原名 clientModel。
+	clientModel := req.Model
+	rr.Model = s.applyModelMapping(rr.Model)
+	req.Model = normalizeModel(rr.Model)
 	if name, ok := provider.UnsupportedToolResult(req.Messages); ok {
 		provider.Trace(r.Context(), "client.tool_loop_blocked", map[string]interface{}{"tool": name, "reason": "unsupported custom tool call"})
 		openAIError(w, 400, fmt.Sprintf("tool %q was not executed by the client; register a handler for this tool before retrying", name), "invalid_request_error")
@@ -102,7 +106,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	// exec custom tool 探测:客户端声明了 exec(type:custom)才把原生工具翻译成 custom_tool_call。
 	execMode := codexExecDeclared(rr.Tools, rr.Input) || codexExecForce
 	if rr.Stream {
-		s.streamResponses(w, r, &req, execMode, customNames)
+		s.streamResponses(w, r, &req, execMode, customNames, clientModel)
 		return
 	}
 	res, _, err := s.Router.Chat(r.Context(), &req)
@@ -111,12 +115,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		openAIError(w, upstreamErrorStatus(err), err.Error(), "service_unavailable")
 		return
 	}
-	// 上游回吐的工具名可能被 thirdParty 机制加了 namespace 前缀，渲染前先纠回裸名。
-	registered := registeredToolNames(req.Tools)
-	for i := range res.ToolCalls {
-		res.ToolCalls[i].Function.Name = stripUpstreamToolPrefix(res.ToolCalls[i].Function.Name, registered)
-	}
-	jsonWrite(w, 200, responsesObject(res, req.Model, "completed", execMode, customNames))
+	jsonWrite(w, 200, responsesObject(res, clientModel, "completed", execMode, customNames))
 }
 
 // responsesToOpenAI 把 Responses 请求转为内部 ChatRequest，并返回 custom(自由文本)工具名集合。

@@ -90,6 +90,29 @@ func (s *Server) requestLogs(w http.ResponseWriter, r *http.Request) {
 	jsonWrite(w, 200, map[string]interface{}{"data": logs, "total": total, "page": page, "pageSize": pageSize, "grouped": true})
 }
 
+// requestLogDetail 按主键返回单条完整请求日志（含入站/出站 body 与 headers）。
+// 列表页只带摘要字段（大字段线上单行均值数百 KB，整页会拉出十几 MB JSON），详情弹窗走这里单条拉取。
+func (s *Server) requestLogDetail(w http.ResponseWriter, r *http.Request) {
+	if !s.auth(w, r) {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		jsonError(w, 400, "id 需为正整数", "invalid_request_error")
+		return
+	}
+	l, err := s.Store.GetRequestLog(id)
+	if err != nil {
+		jsonError(w, 500, err.Error(), "internal_error")
+		return
+	}
+	if l == nil {
+		jsonError(w, 404, "日志不存在或已清理", "not_found_error")
+		return
+	}
+	jsonWrite(w, 200, l)
+}
+
 // sqlQuery 面板「数据查询」页：对 SQLite 执行任意 SQL（2026-09-23 起有意放开
 // 只读限制，面板是运维诊断控制台），最多 200 行、单元格超长截断；多语句仍拒绝。
 func (s *Server) sqlQuery(w http.ResponseWriter, r *http.Request) {

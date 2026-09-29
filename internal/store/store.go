@@ -477,8 +477,19 @@ func (s *Store) CountRequestLogs() (int64, error) {
 	return n, err
 }
 
-// requestLogColumns 是「完整请求日志」连表 accounts 的固定列集，PageRequestLogs 与
-// PageRequestLogsGrouped 共用同一列顺序，扫描逻辑收敛到 scanRequestLogs。
+// Vacuum 重建数据库文件回收磁盘空间：DELETE 只把页标记为空闲复用、文件体积不会缩小，
+// 必须显式 VACUUM 才把空间还给操作系统。顺带 TRUNCATE checkpoint 截断 -wal 文件。
+// 每天一次、日志清理之后调用，代价可接受。
+func (s *Store) Vacuum() error {
+	if _, err := s.db.Exec(`VACUUM`); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	return err
+}
+
+// requestLogColumns 是「完整请求日志」连表 accounts 的固定列集，GetRequestLog（单条详情）
+// 在用；列表页走轻量的 requestLogSummaryColumns，扫描逻辑各自收敛到 scanRequestLogs。
 const requestLogColumns = `rl.id,rl.account_id,rl.model,rl.endpoint,rl.credits,
 	rl.status,rl.duration_ms,rl.error_message,rl.request_bytes,rl.path,rl.stream,rl.client_body,rl.client_headers,rl.upstream_body,rl.upstream_headers,
 	rl.upstream_url,rl.egress,rl.conversation_id,rl.created_at,COALESCE(a.email,'')`
@@ -517,25 +528,6 @@ func scanRequestLogs(rows *sql.Rows) ([]*RequestLog, error) {
 	return out, rows.Err()
 }
 
-// PageRequestLogs 按 id 倒序分页返回完整请求日志（含入站/出站请求体与元数据），
-// 连表带出账号邮箱便于排查。offset/limit 由调用方按页码换算。
-func (s *Store) PageRequestLogs(offset, limit int) ([]*RequestLog, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-	if offset < 0 {
-		offset = 0
-	}
-	rows, err := s.db.Query(`SELECT `+requestLogColumns+`
-		FROM request_logs rl LEFT JOIN accounts a ON a.id = rl.account_id
-		ORDER BY rl.id DESC LIMIT ? OFFSET ?`, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanRequestLogs(rows)
-}
-
 // sessionKeyExpr 计算「指纹会话」分组键：命中/新建的 Postman 会话 ID（由消息指纹映射而来）；
 // 会话 ID 为空的日志（如尚未建会话即失败、非会话请求）各自成为独立会话，避免被错误合并。
 const sessionKeyExpr = `COALESCE(NULLIF(%s.conversation_id,''),'log:'||%s.id)`
@@ -546,6 +538,40 @@ func (s *Store) CountRequestLogSessions() (int64, error) {
 	q := `SELECT COUNT(*) FROM (SELECT 1 FROM request_logs rl GROUP BY ` + fmt.Sprintf(sessionKeyExpr, "rl", "rl") + `)`
 	err := s.db.QueryRow(q).Scan(&n)
 	return n, err
+}
+
+// 请求日志列表页用的轻量列集：不含 client/upstream 的 body 与 headers 四个大字段
+// （线上单行均值可达数百 KB，整页会拉出十几 MB 的 JSON），弹窗详情走 GetRequestLog 单条拉取。
+const requestLogSummaryColumns = `rl.id,rl.account_id,rl.model,rl.endpoint,rl.credits,
+	rl.status,rl.duration_ms,rl.error_message,rl.request_bytes,rl.path,rl.stream,
+	rl.conversation_id,rl.created_at,COALESCE(a.email,'')`
+
+// scanRequestLogSummaries 把 requestLogSummaryColumns 列集扫描为 []*RequestLog（大字段为空）。
+func scanRequestLogSummaries(rows *sql.Rows) ([]*RequestLog, error) {
+	var out []*RequestLog
+	for rows.Next() {
+		l := &RequestLog{}
+		var accID sql.NullInt64
+		var stream int
+		var model, endpoint, errmsg, path, convID, email sql.NullString
+		if err := rows.Scan(&l.ID, &accID, &model, &endpoint, &l.Credits,
+			&l.Status, &l.DurationMs, &errmsg, &l.RequestBytes, &path, &stream,
+			&convID, &l.CreatedAt, &email); err != nil {
+			return nil, err
+		}
+		if accID.Valid {
+			l.AccountID = &accID.Int64
+		}
+		l.Model = model.String
+		l.Endpoint = endpoint.String
+		l.ErrorMessage = errmsg.String
+		l.Path = path.String
+		l.Stream = stream != 0
+		l.ConversationID = convID.String
+		l.AccountEmail = email.String
+		out = append(out, l)
+	}
+	return out, rows.Err()
 }
 
 // PageRequestLogsGrouped 按「指纹会话」分页：先以会话最近一次调用（MAX(id)）倒序挑出本页的
@@ -566,7 +592,7 @@ func (s *Store) PageRequestLogsGrouped(offset, limit int) ([]*RequestLog, error)
 			ORDER BY last_id DESC
 			LIMIT ? OFFSET ?
 		)
-		SELECT `+requestLogColumns+`
+		SELECT `+requestLogSummaryColumns+`
 		FROM request_logs rl
 		LEFT JOIN accounts a ON a.id = rl.account_id
 		JOIN sess ON sess.sk = `+rlKey+`

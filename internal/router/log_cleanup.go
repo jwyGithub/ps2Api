@@ -35,4 +35,10 @@ func (r *Router) purgeOldLogsOnce() {
 		return
 	}
 	log.Printf("[log-cleanup] 请求日志清理完成: 删除 %d 条超过 %d 天的记录", n, logRetentionDays)
+	// ponytail: 只有真删了行才 VACUUM；每天最多一次，主文件 + wal 一起回收
+	if n > 0 {
+		if err := r.Store.Vacuum(); err != nil {
+			log.Printf("[log-cleanup] VACUUM 失败: %v", err)
+		}
+	}
 }

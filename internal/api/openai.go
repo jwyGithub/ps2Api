@@ -48,8 +48,11 @@ func (s *Server) openAI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Endpoint = "openai"
+	// 模型映射：出站用映射后的名字，响应回写仍用客户端原名 clientModel。
+	clientModel := req.Model
+	req.Model = s.applyModelMapping(req.Model)
 	if req.Stream {
-		s.streamOpenAI(w, r, &req)
+		s.streamOpenAI(w, r, &req, clientModel)
 		return
 	}
 	res, _, err := s.Router.Chat(r.Context(), &req)
@@ -58,9 +61,9 @@ func (s *Server) openAI(w http.ResponseWriter, r *http.Request) {
 		openAIError(w, upstreamErrorStatus(err), err.Error(), "service_unavailable")
 		return
 	}
-	jsonWrite(w, 200, openAIResponse(res, req.Model))
+	jsonWrite(w, 200, openAIResponse(res, clientModel))
 }
-func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, req *provider.ChatRequest) {
+func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, req *provider.ChatRequest, clientModel string) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		openAIError(w, 500, "stream unsupported", "server_error")
@@ -82,7 +85,7 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, req *provi
 	}
 	emit := func(d provider.Delta) error {
 		ensureStarted()
-		chunk := map[string]interface{}{"id": id, "object": "chat.completion.chunk", "created": created, "model": req.Model, "choices": []interface{}{map[string]interface{}{"index": 0, "delta": deltaMap(d), "finish_reason": nil}}}
+		chunk := map[string]interface{}{"id": id, "object": "chat.completion.chunk", "created": created, "model": clientModel, "choices": []interface{}{map[string]interface{}{"index": 0, "delta": deltaMap(d), "finish_reason": nil}}}
 		if d.HasFinish {
 			chunk["choices"] = []interface{}{map[string]interface{}{"index": 0, "delta": map[string]interface{}{}, "finish_reason": d.FinishReason}}
 		}

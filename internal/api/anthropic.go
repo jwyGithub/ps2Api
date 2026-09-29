@@ -49,8 +49,14 @@ func (s *Server) anthropic(w http.ResponseWriter, r *http.Request) {
 		anthropicError(w, 400, "model and messages are required", "invalid_request_error")
 		return
 	}
+	// 模型映射：出站用映射后的名字，响应回写仍用客户端原名 clientModel。
+	// 放在 toolsets 分流之前——映射可以决定模型走哪个端点（如把普通模型映射到 claude-opus-5
+	// 则进 toolsets 透传，反之把 claude-opus-5 映射到 4.x 则走 /chat 转换链路）。
+	clientModel := ar.Model
+	ar.Model = s.applyModelMapping(ar.Model)
 	// toolsets 模型（claude-opus-5 / claude-sonnet-5）：原生透传到「工具集」端点，
 	// 不走 anthropicToOpenAI 转换（客户端与上游同为 Anthropic 协议，零转换损耗）。
+	// 注意保留映射后的名字：rewriteModelForUpstream 按它查三段式路由名并改写出站 body。
 	if provider.IsToolsetsModel(ar.Model) {
 		s.handleToolsetsMessages(w, r, raw, ar)
 		return
@@ -78,7 +84,7 @@ func (s *Server) anthropic(w http.ResponseWriter, r *http.Request) {
 	}
 	if ar.Stream {
 		req.Stream = true
-		s.streamAnthropic(w, r, &req, ar)
+		s.streamAnthropic(w, r, &req, clientModel)
 		return
 	}
 	res, _, err := s.Router.Chat(r.Context(), &req)
@@ -92,7 +98,7 @@ func (s *Server) anthropic(w http.ResponseWriter, r *http.Request) {
 		anthropicError(w, status, err.Error(), typ)
 		return
 	}
-	jsonWrite(w, 200, openAIToAnthropic(res, ar.Model))
+	jsonWrite(w, 200, openAIToAnthropic(res, clientModel))
 }
 // thinkingBudgetToEffort 把 Anthropic 的 thinking.budget_tokens 映射成思考档位（high/medium/low）。
 // 仅当 thinking.type == "enabled" 且 budget_tokens 有效时返回；否则返回空串（不设置思考强度）。
@@ -248,7 +254,7 @@ func openAIToAnthropic(res *provider.Result, model string) map[string]interface{
 	}
 	return map[string]interface{}{"id": newID("msg_"), "type": "message", "role": "assistant", "model": model, "content": blocks, "stop_reason": stop, "stop_sequence": nil, "usage": usage}
 }
-func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, req *provider.ChatRequest, ar AnthropicReq) {
+func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, req *provider.ChatRequest, clientModel string) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		anthropicError(w, 500, "stream unsupported", "api_error")
@@ -272,7 +278,7 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, req *pr
 		started = true
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
-		writeEvent("message_start", map[string]interface{}{"type": "message_start", "message": map[string]interface{}{"id": id, "type": "message", "role": "assistant", "model": ar.Model, "content": []interface{}{}, "stop_reason": nil, "usage": map[string]int{"input_tokens": provider.EstimateMessagesTokens(req.Messages), "output_tokens": 0}}})
+		writeEvent("message_start", map[string]interface{}{"type": "message_start", "message": map[string]interface{}{"id": id, "type": "message", "role": "assistant", "model": clientModel, "content": []interface{}{}, "stop_reason": nil, "usage": map[string]int{"input_tokens": provider.EstimateMessagesTokens(req.Messages), "output_tokens": 0}}})
 	}
 	thinkingOpen := false
 	thinkingIndex := -1

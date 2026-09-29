@@ -13,7 +13,7 @@ import (
 // streamResponses 把内部 Delta 流转成 Responses SSE 事件。
 // execMode 开启后,可映射的原生工具翻译成 exec custom_tool_call(见 codex_exec.go);
 // customNames 里的自由文本工具直接渲染成 custom_tool_call(原名,对齐 raycast2api)。
-func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *provider.ChatRequest, execMode bool, customNames map[string]bool) {
+func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *provider.ChatRequest, execMode bool, customNames map[string]bool, clientModel string) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		openAIError(w, 500, "stream unsupported", "server_error")
@@ -29,7 +29,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *pr
 		fl.Flush()
 	}
 	skeleton := func(status string, output []interface{}) map[string]interface{} {
-		return map[string]interface{}{"id": respID, "object": "response", "status": status, "model": req.Model, "output": output}
+		return map[string]interface{}{"id": respID, "object": "response", "status": status, "model": clientModel, "output": output}
 	}
 	// started：延迟提交 SSE 响应头 + response.created 到首个增量到达。若产出任何输出前就失败，
 	// 回退为干净的 HTTP 503 JSON 错误，避免半截流让调用方挂起。
@@ -203,7 +203,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *pr
 			return
 		}
 		// 已开流后失败：发 response.failed 作为终止事件，让流干净收尾。
-		emit("response.failed", map[string]interface{}{"response": map[string]interface{}{"id": respID, "object": "response", "status": "failed", "model": req.Model, "error": map[string]string{"code": "provider_error", "message": err.Error()}}})
+		emit("response.failed", map[string]interface{}{"response": map[string]interface{}{"id": respID, "object": "response", "status": "failed", "model": clientModel, "error": map[string]string{"code": "provider_error", "message": err.Error()}}})
 		return
 	}
 	emit("response.completed", map[string]interface{}{"response": skeleton("completed", output)})

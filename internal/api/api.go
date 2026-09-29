@@ -102,7 +102,11 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stats", s.stats)
 	mux.HandleFunc("GET /api/logs", s.logs)
 	mux.HandleFunc("GET /api/request-logs", s.requestLogs)
+	mux.HandleFunc("GET /api/request-logs/{id}", s.requestLogDetail)
 	mux.HandleFunc("GET /api/cache-probe", s.cacheProbe)
+	// /api/models 供面板「模型映射」页渲染上游模型下拉（复用 /v1/models 同一份清单，
+	// 走 /api/* 会话鉴权而非 API Key——面板页面 fetch 不带 Key）。
+	mux.HandleFunc("GET /api/models", s.models)
 	mux.HandleFunc("DELETE /api/cache-probe", s.cacheProbeReset)
 	mux.HandleFunc("POST /api/sql-query", s.sqlQuery)
 

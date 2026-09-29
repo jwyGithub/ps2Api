@@ -55,7 +55,7 @@
   }
 
   function bootstrapDashboard() {
-    var names = ['fragments/topnav.html', 'fragments/sidebar.html', 'fragments/page-overview.html', 'fragments/page-stats.html', 'fragments/page-reqlogs.html', 'fragments/page-sql.html', 'fragments/page-waf.html', 'fragments/page-pools.html', 'fragments/page-quota.html', 'fragments/page-routing.html', 'fragments/page-apikeys.html', 'fragments/page-settings.html', 'fragments/page-proxies.html', 'fragments/page-vision.html', 'fragments/drawer.html'];
+    var names = ['fragments/topnav.html', 'fragments/sidebar.html', 'fragments/page-overview.html', 'fragments/page-stats.html', 'fragments/page-reqlogs.html', 'fragments/page-sql.html', 'fragments/page-waf.html', 'fragments/page-pools.html', 'fragments/page-quota.html', 'fragments/page-routing.html', 'fragments/page-modelmap.html', 'fragments/page-apikeys.html', 'fragments/page-settings.html', 'fragments/page-proxies.html', 'fragments/page-vision.html', 'fragments/drawer.html'];
     return Promise.all(names.map(loadFragment)).then(function (parts) {
       var app = document.getElementById('dashboard-app');
       if (!app) return;
@@ -148,13 +148,14 @@
     state.page = page;
     document.querySelectorAll('.page').forEach(function (el) { el.classList.toggle('active', el.id === 'page-' + page); });
     document.querySelectorAll('.sidebar-item[data-page]').forEach(function (el) { el.classList.toggle('active', el.dataset.page === page); });
-    var names = { overview:'概览', stats:'统计分析', reqlogs:'请求日志', sql:'数据查询', waf:'WAF 检测', pools:'号池 & 额度', routing:'路由策略', proxies:'代理出口', vision:'图片识别', apikeys:'API KEY 管理', settings:'系统设置' };
+    var names = { overview:'概览', stats:'统计分析', reqlogs:'请求日志', sql:'数据查询', waf:'WAF 检测', pools:'号池 & 额度', routing:'路由策略', modelmap:'模型映射', proxies:'代理出口', vision:'图片识别', apikeys:'API KEY 管理', settings:'系统设置' };
     setText('#crumb', names[page] || page);
     if (page === 'reqlogs') renderReqLogsReal();
     if (page === 'sql') renderSqlPresets();
     if (page === 'waf') { wafRefresh(); wafRestoreProbe(); }
     if (page === 'pools') { renderPoolsReal(); renderQuotaReal(); }
     if (page === 'routing') renderRoutingReal();
+    if (page === 'modelmap') renderModelMapReal();
     if (page === 'proxies') renderProxiesReal();
     if (page === 'vision') renderVisionReal();
     if (page === 'settings') renderSettingsReal();
@@ -212,6 +213,7 @@
       pools: ['accounts', 'analytics'],
       quota: ['accounts', 'analytics', 'settings'],
       routing: ['settings'],
+      modelmap: ['settings'],
       proxies: ['settings'],
       vision: ['settings'],
       settings: ['settings'],
@@ -405,10 +407,12 @@
     if (state.reqlogsCollapsed[key]) { delete state.reqlogsCollapsed[key]; } else { state.reqlogsCollapsed[key] = true; }
     paintReqLogs();
   };
+  // showReqLog 弹出单条详情：列表页数据不含 body/headers 大字段（整页拉取会有十几 MB），
+  // 点「查看」时按 id 单条拉取完整记录再渲染。
   window.showReqLog = function (id) {
-    var l = (state.reqlogs || []).filter(function (x) { return x.id === id; })[0];
-    if (!l) return;
-    var meta = [
+    api('/api/request-logs/' + id).then(function (l) {
+      if (!l) return;
+      var meta = [
       ['ID', l.id], ['时间', fmtDate(l.createdAt)], ['入站端点', endpointLabel(l)],
       ['模型', l.model || '-'], ['账号', l.accountEmail || (l.accountId ? 'ID ' + l.accountId : '-')],
       ['出口', l.egress || '-'], ['上游 URL', l.upstreamUrl || '-'], ['会话 ID', l.conversationId || '-'],
@@ -432,6 +436,7 @@
     setText('#reqlogModalTitle', endpointLabel(l));
     var m = document.getElementById('reqlogModal'), b = document.getElementById('reqlogModalBackdrop');
     if (m) m.classList.add('show'); if (b) b.classList.add('show');
+    }).catch(function (e) { toast('加载日志详情失败：' + e.message); });
   };
   window.closeReqLogModal = function () {
     var m = document.getElementById('reqlogModal'), b = document.getElementById('reqlogModalBackdrop');
@@ -1006,7 +1011,7 @@
     var form = document.getElementById('settingsForm');
     if (form) {
       // 代理(group=proxy)、图片识别(group=vision)相关项已迁移到各自独立菜单页，通用设置表单不再渲染。
-      form.innerHTML = state.settingsDefs.filter(function (d) { return d.group !== 'proxy' && d.group !== 'vision'; }).map(function (d) {
+      form.innerHTML = state.settingsDefs.filter(function (d) { return d.group !== 'proxy' && d.group !== 'vision' && d.group !== 'modelmap'; }).map(function (d) {
         var val = state.settings[d.key] != null ? state.settings[d.key] : d.default;
         var input;
         if (d.type === 'bool') {
@@ -1214,6 +1219,78 @@
       payload[el.dataset.key] = el.type === 'checkbox' ? (el.checked ? 'true' : 'false') : el.value;
     });
     api('/api/settings', {method:'PUT', body:JSON.stringify({settings:payload})}).then(function(){toast('配置已保存并生效');return loadAll();}).catch(function(e){toast(e.message);});
+  };
+
+  // ─── 模型映射（独立页面，settings.model_mapping JSON）──────────
+  // parseModelMap 把 model_mapping JSON 解析为有序 [from, to] 数组；坏 JSON 返回空表。
+  function parseModelMap(raw) {
+    try {
+      var o = JSON.parse(raw || '{}');
+      return Object.keys(o || {}).map(function (k) { return [k, o[k]]; });
+    } catch (_) { return []; }
+  }
+  // modelMapTargetSelect 渲染「实际发送模型」下拉：选项来自 /api/models（上游固定清单）；
+  // 已保存的值不在清单里（如旧配置、上游下线模型）时补一个选项，避免值凭空丢失。
+  function modelMapTargetSelect(val, i) {
+    var opts = (state.modelOptions || []).map(function (m) {
+      return '<option value="'+esc(m)+'"'+(m === val ? ' selected' : '')+'>'+esc(m)+'</option>';
+    }).join('');
+    if (val && (state.modelOptions || []).indexOf(val) === -1) {
+      opts = '<option value="'+esc(val)+'" selected>'+esc(val)+'</option>' + opts;
+    }
+    return '<select class="input font-mono" style="width:100%" data-mk="to" data-i="'+i+'"><option value="">（选择上游模型）</option>' + opts + '</select>';
+  }
+  function renderModelMapReal() {
+    var body = document.getElementById('modelMapRows'); if (!body) return;
+    // 编辑中的草稿优先（增删行即时生效）；首次进入页面才从已保存的 settings 解析。
+    if (!state.modelMap) state.modelMap = parseModelMap((state.settings || {})['model_mapping']);
+    var list = state.modelMap;
+    document.getElementById('modelMapEmpty').style.display = list.length ? 'none' : '';
+    body.innerHTML = list.map(function (pair, i) {
+      return '<tr style="border-top:1px solid var(--border)">' +
+        '<td class="py-2 pr-3"><input class="input font-mono" style="width:100%" data-mk="from" data-i="'+i+'" value="'+esc(pair[0])+'" placeholder="客户端模型名，如 claude-opus-5-5"></td>' +
+        '<td class="py-2 pr-3" style="color:var(--muted)">→</td>' +
+        '<td class="py-2 pr-3">' + modelMapTargetSelect(pair[1], i) + '</td>' +
+        '<td class="py-2 text-right"><button class="btn btn-ghost" style="padding:4px 12px;font-size:12px" onclick="removeModelMapRow('+i+')">删除</button></td>' +
+      '</tr>';
+    }).join('');
+    // 首次渲染时拉上游模型清单（幂等：已有则跳过）。
+    if (!state.modelOptions) {
+      api('/api/models').then(function (data) {
+        state.modelOptions = (data.data || []).map(function (m) { return m.id; });
+        renderModelMapReal(); // 下拉需要重渲染一次才有选项；只重绘，不动草稿。
+      }).catch(function () { state.modelOptions = []; });
+    }
+  }
+  window.addModelMapRow = function (from, to) {
+    if (!state.modelMap) state.modelMap = parseModelMap((state.settings || {})['model_mapping']);
+    state.modelMap.push([from || '', to || '']);
+    renderModelMapReal();
+    var rows = document.querySelectorAll('#modelMapRows tr');
+    var last = rows[rows.length - 1];
+    if (last) last.querySelector('input').focus();
+  };
+  window.removeModelMapRow = function (i) {
+    state.modelMap.splice(i, 1);
+    renderModelMapReal();
+  };
+  // saveModelMap 收集表格里的行（去掉 from/to 任一为空的），序列化成 JSON 存 settings。
+  // 后端未命中的模型原样透传，所以空表 = 全部透传。
+  window.saveModelMap = function () {
+    var froms = document.querySelectorAll('#modelMapRows [data-mk="from"]');
+    var tos = document.querySelectorAll('#modelMapRows [data-mk="to"]');
+    var payload = {}, seen = {}, dup = false;
+    for (var i = 0; i < froms.length; i++) {
+      var f = froms[i].value.trim(), t = tos[i].value.trim();
+      if (!f || !t) continue;
+      if (seen[f]) dup = true;
+      seen[f] = true;
+      payload[f] = t;
+    }
+    if (dup) { toast('存在重复的客户端模型名，请先合并再保存'); return; }
+    api('/api/settings', { method: 'PUT', body: JSON.stringify({ settings: { model_mapping: Object.keys(payload).length ? JSON.stringify(payload) : '' } }) })
+      .then(function () { toast('模型映射已保存并生效'); state.modelMap = null; return refreshCurrentPage().then(renderModelMapReal); })
+      .catch(function (e) { toast(e.message); });
   };
 
   // ─── 图片识别（独立页面，group=vision）──────────────────────────
