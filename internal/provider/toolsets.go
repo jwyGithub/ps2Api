@@ -125,7 +125,7 @@ func (tp *ToolsetsProvider) buildHeaders(tokens *Tokens) http.Header {
 // host 返回出站域名（不含 scheme）。toolsets 统一走 Istio 网关 gateway.postman.com——
 // 12.30.0 客户端即此路径（__WP_ISTIO_GATEWAY_URL__ + /toolsets/v1/messages，不带 /_gw 前缀），
 // 且 /_gw 子域路径过 Cloudflare WAF，gateway.postman.com 无此层。
-func (tp *ToolsetsProvider) host(tokens *Tokens) string {
+func (tp *ToolsetsProvider) host(_ *Tokens) string {
 	return "gateway.postman.com"
 }
 
@@ -134,8 +134,11 @@ func (tp *ToolsetsProvider) endpoint(tokens *Tokens) string {
 }
 
 // rewriteModelForUpstream 把客户端 body 适配为上游 toolsets 接受的形状。改三处：
+//
 //  1. model → 三段式路由名
+//
 //  2. max_tokens → 夹紧到 ToolsetsMaxTokens（上游硬上限，超限整请求 400）
+//
 //  3. tools[].name → 超出上游格式（1-64 字母/数字/_/-）的名字压缩改写（如 MCP 长工具名），
 //     改写映射同时存入 ToolsetsProvider.toolNameMap，供响应回写原名
 //

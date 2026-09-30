@@ -16,7 +16,7 @@ import (
 // handler,回 "No such tool available" 死循环)。排除后模型只剩 Bash/Read/Write 等客户端工具,
 // 同期已验证可正常执行(4367+3027+1143 次成功)。
 var desktopLocalModeExcludedTools = []string{
-	"executeShellCommand", "readFile", "createFile", "showRichOutput",
+	"executeShellCommand", "readFile", "createFile", "showRichOutput", "sendRequest",
 	"listDirectory", "searchInFiles",
 	"listDatasets", "createDataset", "previewDataset", "queryDatasetView", "deleteDataset",
 	"getDatasetSchema", "createDatasetView", "deleteDatasetView", "runQuery", "insertDatasetRows",
