@@ -5,7 +5,7 @@ import { html } from 'https://cdn.jsdelivr.net/npm/lit@3.3.3/+esm';
 export class PtBtn extends BaseElement {
   static properties = { variant: { type: String } };
   constructor() { super(); this.variant = 'ghost'; }
-  updated() { this.captureChildren(this.renderRoot.querySelector('button')); }
+  updated() { this.captureChildren(this.renderRoot.querySelector(':scope > .btn')); }
   render() {
     return html`<button class="btn btn-${this.variant}" part="button"></button>`;
   }

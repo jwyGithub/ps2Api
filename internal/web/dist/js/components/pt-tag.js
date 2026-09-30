@@ -5,7 +5,7 @@ import { html } from 'https://cdn.jsdelivr.net/npm/lit@3.3.3/+esm';
 export class PtTag extends BaseElement {
   static properties = { color: { type: String } };
   constructor() { super(); this.color = 'gray'; }
-  updated() { this.captureChildren(this.renderRoot.querySelector('span')); }
+  updated() { this.captureChildren(this.renderRoot.querySelector(':scope > .tag')); }
   render() {
     return html`<span class="tag tag-${this.color}"></span>`;
   }

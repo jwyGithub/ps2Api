@@ -5,7 +5,7 @@ import { html } from 'https://cdn.jsdelivr.net/npm/lit@3.3.3/+esm';
 export class PtCard extends BaseElement {
   static properties = { padded: { type: Boolean }, hover: { type: Boolean } };
   constructor() { super(); this.padded = true; this.hover = false; }
-  updated() { this.captureChildren(this.renderRoot.querySelector('div')); }
+  updated() { this.captureChildren(this.renderRoot.querySelector(':scope > .card')); }
   render() {
     const pad = this.padded ? ' p-6' : '';
     const hov = this.hover ? ' card-hover' : '';
