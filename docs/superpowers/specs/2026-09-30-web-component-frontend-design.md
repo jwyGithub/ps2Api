@@ -79,11 +79,19 @@ internal/web/                     ← 新前端模块（独立 embed）
 
 阶段一交付的 overview 页同样先给出功能点清单确认后再实现。
 
+## 阶段一范围（v1：先跑起来）
+
+v1 只做**组件封装 + 样式统一 + 布局完善**，跑通 `/v2` 全链路，不逐页迁功能：
+
+- 基础组件库：base/toast/icon/btn/input/tag/card/pager/table/table-paged
+- 布局组件：topnav + sidebar + 页面容器（页面路由骨架，未迁移的菜单显示占位）
+- overview 页以真实数据渲染作为链路验证样板
+- 各页功能清单在每个菜单迁移时再逐个分析确认，v1 不锁定
+
 ## 迁移顺序
 
-1. **阶段一（本次交付）**：`internal/web/` 骨架 + Go 路由 + 基础组件
-   （base/toast/icon/btn/input/tag/card/pager/table/table-paged）+ overview 页
-   （先确认功能清单再实现）跑通全链路
+1. **阶段一（本次交付，v1）**：`internal/web/` 骨架 + Go 路由 + 基础组件库 +
+   布局（topnav/sidebar/路由骨架）+ overview 真实数据样板页，先跑起来
 2. 阶段二起：按流量低→高逐页迁移（vision → modelmap → routing → proxies →
    sql → waf → apikeys → settings → pools → reqlogs → stats → overview 收尾），
    每页先功能分析、按需增删功能
