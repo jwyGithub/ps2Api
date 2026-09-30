@@ -200,6 +200,13 @@ func (r *Router) applyUsageState(acc *store.Account, res *provider.Result) {
 		if acc.Enabled {
 			_ = r.Store.SetAccountEnabled(acc.ID, false)
 		}
+	case "EXCEEDED":
+		// EXCEEDED = 额度耗尽：标 exhausted（不停用，等周期重置后探测恢复），与 AVAILABLE 分支
+		// 里「余量算到 0」的口径一致。此前是状态盲区：账号带着 error（如聊天重试耗尽被 MarkError）
+		// 时刷新报 EXCEEDED 也无法翻成 exhausted，面板一直显示异常。
+		if acc.Status != "exhausted" {
+			_ = r.Store.SetAccountStatus(acc.ID, "exhausted", "Postman AI quota exceeded (usageState=EXCEEDED)")
+		}
 	case "AVAILABLE":
 		// 状态同步：usageState 报 AVAILABLE 但真实余量已耗尽（remaining<=0）时，不能恢复成 active——
 		// 那样会让「余量为 0 但 status=active」的空号被会话粘性/号池当成健康号反复交付。把余量烧到 0
@@ -255,6 +262,20 @@ func (r *Router) fetchBillingOpsResult(ctx context.Context, acc *store.Account, 
 	state := "AVAILABLE"
 	if remaining == 0 {
 		state = "EXCEEDED"
+	}
+	// 直查路径同步账号健康状态（与烧 token 探测的 applyUsageState 同口径，此前从不写 status，
+	// error/exhausted 账号刷新后状态原地不动）：余量耗尽标 exhausted（不停用）；余量恢复则翻回
+	// active 并启用——刷新是运维人工核对动作，且 RefreshDueQuotas 靠它在周期重置后复活账号。
+	// BLOCKED 直查探测不到（无 usageState），维持现状不动。
+	if remaining == 0 {
+		if acc.Status != "exhausted" {
+			_ = r.Store.SetAccountStatus(acc.ID, "exhausted", "Postman AI quota exhausted (billing ops remaining=0)")
+		}
+	} else if acc.Status != "active" {
+		_ = r.Store.SetAccountStatus(acc.ID, "active", "")
+	}
+	if !acc.Enabled && remaining > 0 {
+		_ = r.Store.SetAccountEnabled(acc.ID, true)
 	}
 	// 周期字段保留库中现值：读一次当前账号快照（acc 上的值可能过期，直接查库）。
 	fresh, err := r.Store.GetAccount(acc.ID)

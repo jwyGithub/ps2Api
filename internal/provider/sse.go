@@ -144,12 +144,31 @@ func (r *StreamReader) handleUsage(data json.RawMessage) []Delta {
 	if err := json.Unmarshal(data, &u); err != nil {
 		return nil
 	}
+	// 上游 usage 事件与 billing 直查的 ai_millicredits 同源但量纲不同：实测同一账号
+	// usage 事件 limit=40000、billing operations limit=400，差 100 倍。此处统一除以 100
+	// 对齐 billing 的 credits 口径，使聊天落库(persistQuota)与直查落库(fetchBillingOpsResult)
+	// 数值可比、互不覆盖；resQuotaExhausted/applyUsageState 算差值，量纲无关、无感。
+	// ponytail: 固定 100 倍率；若上游对不同套餐换算不同，再改成从 billing ops 推导。
+	scaleUsageToCredits(&u)
 	r.Usage = &u
 	switch u.UsageState {
 	case "EXCEEDED", "UNAVAILABLE", "BLOCKED":
 		r.QuotaExceeded = true
 	}
 	return nil
+}
+
+// scaleUsageToCredits 把上游 usage 的 limit/usage/overage/spillage 与 warning 阈值统一换算成
+// billing ai_millicredits 的 credits 口径（除以 100，见 handleUsage 注释）。
+func scaleUsageToCredits(u *Usage) {
+	const factor = 100
+	u.Limit /= factor
+	u.Usage /= factor
+	u.Overage /= factor
+	u.Spillage /= factor
+	for i := range u.WarningThresholds {
+		u.WarningThresholds[i].Value /= factor
+	}
 }
 
 func (r *StreamReader) handleConversation(data json.RawMessage) []Delta {
