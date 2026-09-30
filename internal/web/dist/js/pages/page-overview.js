@@ -25,7 +25,7 @@ export class PtPageOverview extends BaseElement {
     ]);
     this.stats = stats || {};
     this.analytics = analytics || {};
-    this.accounts = accountsRes.data || accountsRes || [];
+    this.accounts = accountsRes.data || [];
     this.logs = (logsRes.data || []).slice(0, 5);
     await this.updateComplete;
     this.drawCharts();
@@ -92,7 +92,7 @@ export class PtPageOverview extends BaseElement {
         ${[
           { label: '今日请求', value: fmt(s.todayRequests), icon: 'activity' },
           { label: '活跃账号', value: html`${fmt(s.activeAccounts)}<span class="text-[20px]" style="color:var(--muted)">/${fmt(s.totalAccounts)}</span>`, icon: 'users' },
-          { label: '平均延迟', value: html`${fmtMs(s.avgLatencyMs)}<span class="text-[20px]" style="color:var(--muted)"> ms</span>`, icon: 'clock' },
+          { label: '平均延迟', value: html`${fmtMs(s.avgLatencyMs)}`, icon: 'clock' },
           { label: '成功率', value: html`${successRate}<span class="text-[20px]" style="color:var(--muted)">%</span>`, icon: 'check-circle' },
         ].map((k) => html`
           <pt-card hover>
