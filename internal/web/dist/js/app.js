@@ -11,7 +11,7 @@ const LABELS = {
   vision: '图片识别', apikeys: 'API KEY 管理', settings: '系统设置',
 };
 // 已迁移到 v2 的页面，Task 4 起逐个加入
-const MIGRATED = new Set();
+const MIGRATED = new Set(['overview']);
 
 class PtApp extends BaseElement {
   static properties = { page: { state: true } };
