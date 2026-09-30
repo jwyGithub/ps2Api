@@ -113,6 +113,13 @@ func quotaExhausted(acc *store.Account) bool {
 //     额度并列时「从未用过」的号优先（三元并列再比负载），避免刚重置/新导入的号
 //     被老号长期压制。软预留避让只作用于 RoundRobin，不介入 403 换号
 //     （那一步的目标是切到「最新鲜、余量最满」的号，与占用避让正交）。
+// preferredPlan 是否为优先选用的套餐类型（Plan 来自 Postman usage.userType）。
+// 日期后缀（如 -202603）会随周期变化，故只按前缀匹配。
+// ponytail: 套餐类型硬编码，出现第三种需要优先的类型时再改成设置项。
+func preferredPlan(acc *store.Account) bool {
+	return strings.HasPrefix(acc.Plan, "sync-solo-trial")
+}
+
 func (p *Pool) pickIndex(accounts []*store.Account, excluded map[int64]bool, now time.Time, skipCooldown, skipExhausted bool, mode QuotaMode) int {
 	start := (p.last + 1) % len(accounts)
 	best := -1
@@ -120,6 +127,7 @@ func (p *Pool) pickIndex(accounts []*store.Account, excluded map[int64]bool, now
 	bestReserved := 2 // 0=未预留,1=预留中；初值 2 保证首个候选必被采纳
 	bestRemaining, bestLimit := -1, 0
 	bestNeverUsed := false
+	bestPref := false
 	// 池子里是否还有从未用过的号：决定提前收工条件是否适用（已用层的理想号
 	// 不能提前收工，否则会漏看后面的未用号）。
 	anyNeverUsed := false
@@ -145,32 +153,35 @@ func (p *Pool) pickIndex(accounts []*store.Account, excluded map[int64]bool, now
 		}
 		load := p.inFlight[acc.ID]
 		neverUsed := acc.LastUsedAt == nil
+		pref := preferredPlan(acc)
 		if mode != QuotaModeRoundRobin {
 			if best == -1 {
-				best, bestRemaining, bestLimit, bestLoad, bestNeverUsed = idx, acc.RateRemaining, acc.RateLimit, load, neverUsed
+				best, bestRemaining, bestLimit, bestLoad, bestNeverUsed, bestPref = idx, acc.RateRemaining, acc.RateLimit, load, neverUsed, pref
 				continue
 			}
 			switch quotaCmp(mode, acc.RateRemaining, acc.RateLimit, bestRemaining, bestLimit) {
 			case 1:
-				best, bestRemaining, bestLimit, bestLoad, bestNeverUsed = idx, acc.RateRemaining, acc.RateLimit, load, neverUsed
+				best, bestRemaining, bestLimit, bestLoad, bestNeverUsed, bestPref = idx, acc.RateRemaining, acc.RateLimit, load, neverUsed, pref
 			case 0:
-				if (neverUsed && !bestNeverUsed) || (neverUsed == bestNeverUsed && load < bestLoad) {
-					best, bestRemaining, bestLimit, bestLoad, bestNeverUsed = idx, acc.RateRemaining, acc.RateLimit, load, neverUsed
+				if (pref && !bestPref) ||
+					(pref == bestPref && ((neverUsed && !bestNeverUsed) || (neverUsed == bestNeverUsed && load < bestLoad))) {
+					best, bestRemaining, bestLimit, bestLoad, bestNeverUsed, bestPref = idx, acc.RateRemaining, acc.RateLimit, load, neverUsed, pref
 				}
 			}
 			continue
 		}
-		// 主键「从未用过优先」、次键 inFlight 负载升序、三键「软预留」升序：
-		// 池子里还有从没承接过请求的号时先消耗它们（用最老的：accounts 按 id 升序，
-		// 从起点轮转天然先碰到 id 小的）；全部用过一轮后回到常规负载轮询。
+		// 主键「优先套餐(solo-trial)优先」、二键「从未用过优先」、三键 inFlight 负载升序、
+		// 四键「软预留」升序：优先套餐的号在轮询里整体压过其他套餐，同层内保持原有
+		// 「先消耗新号、再按负载轮询」的次序。
 		// 同分下从起点轮转取先到者，即最早注册的号。
-		if best == -1 || neverUsed && !bestNeverUsed ||
-			(neverUsed == bestNeverUsed && (load < bestLoad || (load == bestLoad && reservedOf(p, acc.ID, now) < bestReserved))) {
-			best, bestLoad, bestReserved, bestNeverUsed = idx, load, reservedOf(p, acc.ID, now), neverUsed
+		if best == -1 || pref && !bestPref ||
+			pref == bestPref && (neverUsed && !bestNeverUsed ||
+				neverUsed == bestNeverUsed && (load < bestLoad || (load == bestLoad && reservedOf(p, acc.ID, now) < bestReserved))) {
+			best, bestLoad, bestReserved, bestNeverUsed, bestPref = idx, load, reservedOf(p, acc.ID, now), neverUsed, pref
 		}
 		// 仅「未用层（或无未用号时的当前层）、负载 0 且未被预留」才是理想账号，可提前收工；
 		// 否则继续找更优的（包括更高优先层的未用号）。
-		if neverUsed == bestNeverUsed && (neverUsed || !anyNeverUsed) && load == 0 && bestReserved == 0 {
+		if pref == bestPref && neverUsed == bestNeverUsed && (neverUsed || !anyNeverUsed) && load == 0 && bestReserved == 0 {
 			break
 		}
 	}

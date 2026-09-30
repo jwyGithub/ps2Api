@@ -316,3 +316,49 @@ func TestNextByQuotaPrefersNeverUsedOnTie(t *testing.T) {
 		t.Fatalf("quota tie: expected never-used a2(%d), got %d", ids["a2@test.com"], acc.ID)
 	}
 }
+
+// 普通轮询应优先选用 sync-solo-trial-202603 套餐的账号：即便其负载/已用不占优也要先选它；
+// 排除优先号后回退普通轮询；403 换号(Ratio)同分时也应先选优先套餐。
+func TestNextPrefersSoloTrialPlan(t *testing.T) {
+	s, ids := newTestStore(t)
+	// a1 是 solo-trial；a2、a3 是 free。a1 已用过、a2/a3 从未用，验证优先套餐压过「从未用过优先」。
+	for email, plan := range map[string]string{
+		"a1@test.com": "sync-solo-trial-202603",
+		"a2@test.com": "sync-free-202603",
+		"a3@test.com": "",
+	} {
+		if err := s.SetPlan(ids[email], plan); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.MarkUsed(ids["a1@test.com"]); err != nil {
+		t.Fatal(err)
+	}
+	p := New(s)
+	acc, err := p.Next(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acc.ID != ids["a1@test.com"] {
+		t.Fatalf("期望优先选 solo-trial 账号 a1，实际选中 %s", acc.Email)
+	}
+
+	// 排除 a1 后回退普通轮询（从未用过的 a2/a3 中按 id 升序取 a2）。
+	acc, err = p.Next(map[int64]bool{ids["a1@test.com"]: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acc.ID != ids["a2@test.com"] {
+		t.Fatalf("排除 solo-trial 后期望回退选 a2，实际选中 %s", acc.Email)
+	}
+
+	// 403 换号(Ratio)：额度满打满算相同（均未知=0/0），同分应优先 solo-trial。
+	p2 := New(s)
+	acc, err = p2.NextByQuota(nil, QuotaModeRatio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acc.ID != ids["a1@test.com"] {
+		t.Fatalf("403 换号同分时期望优先选 solo-trial a1，实际选中 %s", acc.Email)
+	}
+}
