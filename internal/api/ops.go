@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"ps2api/internal/dashboard"
+	"ps2api/internal/web"
 )
 
 // cacheProbe 返回影子缓存探针的度量结果（潜在命中率 + single-flight 潜在收益）。
@@ -199,6 +200,49 @@ func (s *Server) dashboardStatic(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	} else if strings.HasSuffix(name, ".html") {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	} else if strings.HasSuffix(name, ".js") {
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	}
+	w.Write(data)
+}
+
+// webPage 提供新版面板入口（/v2）。登录策略与旧版 dashboard() 一致。
+func (s *Server) webPage(w http.ResponseWriter, r *http.Request) {
+	if loginEnabled() && !validSession(r) {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+	data, err := web.Files.ReadFile("dist/index.html")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(data)
+}
+
+// webStatic 提供新版面板静态资源（/v2/...）。ES module 必须带正确 JS MIME，
+// 否则浏览器拒绝以 module 方式加载。
+func (s *Server) webStatic(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/v2/")
+	if name == "" || strings.Contains(name, "..") {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := web.Files.ReadFile("dist/" + name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	switch {
+	case strings.HasSuffix(name, ".css"):
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	case strings.HasSuffix(name, ".html"):
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	case strings.HasSuffix(name, ".js") || strings.HasSuffix(name, ".mjs"):
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	case strings.HasSuffix(name, ".svg"):
+		w.Header().Set("Content-Type", "image/svg+xml")
 	}
 	w.Write(data)
 }

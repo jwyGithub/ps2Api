@@ -126,6 +126,8 @@ func (s *Server) Register(mux *http.ServeMux) {
 	// 面板静态资源（见 ops.go）
 	mux.HandleFunc("GET /dashboard.js", s.dashboardAsset)
 	mux.HandleFunc("GET /dashboard/", s.dashboardStatic)
+	mux.HandleFunc("GET /v2", s.webPage)
+	mux.HandleFunc("GET /v2/", s.webStatic)
 	mux.HandleFunc("GET /", s.dashboard)
 }
 
