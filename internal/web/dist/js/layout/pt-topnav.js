@@ -1,7 +1,7 @@
 // pt-topnav.js —— 固定顶栏：品牌 + 面包屑 + 状态 + 退出
 import { BaseElement } from '../base.js';
 import { html } from 'https://cdn.jsdelivr.net/npm/lit@3.3.3/+esm';
-import './pt-icon.js';
+import '../components/pt-icon.js';
 
 export class PtTopnav extends BaseElement {
   static properties = { label: { type: String } };

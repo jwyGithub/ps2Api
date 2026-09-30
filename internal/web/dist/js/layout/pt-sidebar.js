@@ -1,7 +1,7 @@
 // pt-sidebar.js —— 左侧导航：分组菜单，激活项发 page-change 事件
 import { BaseElement } from '../base.js';
 import { html } from 'https://cdn.jsdelivr.net/npm/lit@3.3.3/+esm';
-import './pt-icon.js';
+import '../components/pt-icon.js';
 
 const PAGES = [
   { group: '监控', items: [
