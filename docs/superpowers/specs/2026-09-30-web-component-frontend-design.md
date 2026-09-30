@@ -32,7 +32,7 @@ internal/web/                     ← 新前端模块（独立 embed）
       │   └── icons.js            ← pt-icon：name → svg path 表
       ├── components/
       │   ├── pt-btn.js           ← 按钮（variant: primary/ghost/gold）
-      │   ├── pt-input.js         ← 输入框
+      │   ├── pt-input.js         ← 输入框（v1 未实现，首个表单页迁移时补）
       │   ├── pt-table.js         ← 表格（columns + rows 属性，slot 自定义单元格）
       │   ├── pt-table-paged.js   ← 表格（内置分页，复用 pt-pager）
       │   ├── pt-pager.js         ← 分页条（窗口化页码，迁移旧 pagerHTML 逻辑）

@@ -274,3 +274,6 @@ input[type="range"]::-moz-range-thumb {
 
 input[type="checkbox"] { accent-color: var(--accent); }
 input[type="radio"] { accent-color: var(--accent); }
+
+/* 自定义元素默认 inline，块级化使 margin 生效 */
+pt-card,pt-page{display:block;}
