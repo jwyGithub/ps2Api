@@ -66,12 +66,27 @@ internal/web/                     ← 新前端模块（独立 embed）
 `api('/api/stats')`、`api('/api/analytics?days=14')` 等，结果存组件 `@state`，
 渲染用 Lit 模板。图表沿用 Chart.js CDN，在 `updated()` 后挂到 canvas。
 
+## 迁移原则：重实现，非移植
+
+旧前端（dashboard.js 1775 行字符串拼接 + DOM 查询）实现质量差，新前端**不直接复制旧代码**。
+每迁移一页的流程：
+
+1. **功能分析先行**：梳理该页现有功能点清单（展示什么数据、哪些交互、调用哪些 API），
+   与用户确认——迁移中会**去掉部分功能**、也可能**新增功能**，以确认后的清单为准
+2. 按清单用 Lit 组件**重新实现**；旧代码只作行为参考（如字段含义、API 参数、边界情况），
+   不搬运其拼接式实现
+3. 工具函数（api/esc/fmt 等）同样重新实现，旧版仅参考语义
+
+阶段一交付的 overview 页同样先给出功能点清单确认后再实现。
+
 ## 迁移顺序
 
 1. **阶段一（本次交付）**：`internal/web/` 骨架 + Go 路由 + 基础组件
-   （base/toast/icon/btn/input/tag/card/pager/table/table-paged）+ overview 页跑通全链路
+   （base/toast/icon/btn/input/tag/card/pager/table/table-paged）+ overview 页
+   （先确认功能清单再实现）跑通全链路
 2. 阶段二起：按流量低→高逐页迁移（vision → modelmap → routing → proxies →
-   sql → waf → apikeys → settings → pools → reqlogs → stats → overview 收尾）
+   sql → waf → apikeys → settings → pools → reqlogs → stats → overview 收尾），
+   每页先功能分析、按需增删功能
 3. 每页迁移 = 新目录补一个 page module + 侧边栏加入口；旧 fragments 对应页不删
 4. 全部完成后单独一次切换：`GET /` 改读 `web.Files`，删 `static/`（可回退的独立 commit）
 
