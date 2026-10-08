@@ -36,13 +36,17 @@ func TestToolCallOSSShape(t *testing.T) {
 func TestUsageAndRateLimitMetadata(t *testing.T) {
 	r := NewStreamReader()
 	r.Feed(`data: {"eventType":"usage","data":{"userType":"FREE_USER","usageState":"AVAILABLE","limit":50000,"usage":28713,"overage":0,"spillage":2,"allowOverage":false,"warningThresholds":[{"value":50,"unit":"Percentage"}],"usageCycle":{"start":"2026-08-11T23:22:55Z","end":"2026-09-11T23:22:55Z"},"isTeamPooled":true}}`)
-	// limit/usage/overage/spillage 换算成 billing credits 口径（÷100，见 scaleUsageToCredits）；
-	// warningThresholds 单位是 Percentage，值不换算。
-	if r.Usage == nil || r.Usage.Spillage != 0.02 || r.Usage.UsageCycle == nil || r.Usage.UsageCycle.End.Format(time.RFC3339) != "2026-09-11T23:22:55Z" || !r.Usage.IsTeamPooled {
+	// 额度统一来源（2026-10-08）：usage 事件数值量纲随套餐漂移（FREE ÷100、trial ÷1000），
+	// 不可落库——handleUsage 把数值字段全部清零，禁止覆盖 billing ops 权威值。
+	// 状态类字段（usageState/周期/池化标记）量纲无关，照常解析。
+	if r.Usage == nil || r.Usage.Spillage != 0 || r.Usage.UsageCycle == nil || r.Usage.UsageCycle.End.Format(time.RFC3339) != "2026-09-11T23:22:55Z" || !r.Usage.IsTeamPooled {
 		t.Fatalf("usage metadata = %+v", r.Usage)
 	}
-	if r.Usage.Limit != 500 || r.Usage.Usage != 287.13 || r.Usage.WarningThresholds[0].Value != 0.5 {
-		t.Fatalf("usage credits scaling = %+v", r.Usage)
+	if r.Usage.Limit != 0 || r.Usage.Usage != 0 || r.Usage.WarningThresholds != nil {
+		t.Fatalf("usage numeric fields must be zeroed (billing ops is the only authority), got %+v", r.Usage)
+	}
+	if r.QuotaExceeded {
+		t.Fatal("AVAILABLE state must not set QuotaExceeded")
 	}
 
 	now := time.Date(2026, 8, 15, 11, 10, 58, 0, time.UTC)

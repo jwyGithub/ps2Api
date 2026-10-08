@@ -9,11 +9,11 @@ import (
 
 // billing_refresh.go —— 对话后异步刷新 billing ops 权威额度。
 //
-// 背景（2026-10-08 额度统一来源改造）：额度有两个来源——对话流 SSE usage 事件（millicredits
-// 量纲，经 scaleUsageToCredits 除以 100 对齐）与 billing operations 直查（credits 原生口径）。
-// 两者 plan/userType/周期字段形状不同，快照互相覆盖曾导致 plan 污染与数值漂移。统一后：
-// 对话路径的 persistQuota 只写兜底快照，随后调度本任务用 billing ops 权威值覆盖——
-// 库中额度永远向 operations.ai_millicredits 收敛，单一可信来源。
+// 背景（2026-10-08 额度统一来源改造）：对话流 SSE usage 事件的数值量纲随套餐漂移
+// （实测 FREE 号 ÷100、trial 号 ÷1000 才对齐 billing），不可落库——对话路径的快照
+// 仅在库中无快照时写状态占位。库中额度的唯一权威来源是 billing operations 直查
+// （operations.ai_millicredits，credits 口径）：本任务在每次对话后异步刷新一次，
+// 加上每日 23:00 定时刷新与面板手动刷新，三条路全部写同一权威来源。
 //
 // 去抖：同账号 30s 内的多次对话只触发一次刷新（对话常成串到达，逐次刷新纯浪费往返）。
 // 异步执行，不阻塞对话响应；失败静默（下次对话或每日 23:00 刷新兜底）。

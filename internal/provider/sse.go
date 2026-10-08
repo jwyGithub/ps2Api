@@ -144,31 +144,21 @@ func (r *StreamReader) handleUsage(data json.RawMessage) []Delta {
 	if err := json.Unmarshal(data, &u); err != nil {
 		return nil
 	}
-	// 上游 usage 事件与 billing 直查的 ai_millicredits 同源但量纲不同：实测同一账号
-	// usage 事件 limit=40000、billing operations limit=400，差 100 倍。此处统一除以 100
-	// 对齐 billing 的 credits 口径，使聊天落库(persistQuota)与直查落库(fetchBillingOpsResult)
-	// 数值可比、互不覆盖；resQuotaExhausted/applyUsageState 算差值，量纲无关、无感。
-	// ponytail: 固定 100 倍率；若上游对不同套餐换算不同，再改成从 billing ops 推导。
-	scaleUsageToCredits(&u)
+	// 额度统一来源（2026-10-08 定案）：usage 事件的数值量纲不可信——实测 FREE 号差 100 倍
+	// （40000 vs billing 400），trial 号差 1000 倍（400000 vs billing 400），倍率随套餐漂移，
+	// 任何固定换算都会写错数（线上曾把 400 写成 4000/40）。因此数值字段（limit/usage/
+	// overage/spillage/阈值）在此全部清零，禁止落库覆盖 billing ops 的权威值；persistQuota
+	// 仅在库中尚无快照（QuotaLimit==0，新号首聊）时用 usage 事件填充初始值——错误量纲的
+	// 首值也会在 3s 后被 scheduleBillingRefresh 的权威刷新覆盖。状态类字段（usageState、
+	// QuotaExceeded 判定）量纲无关，照常使用。
+	u.Limit, u.Usage, u.Overage, u.Spillage = 0, 0, 0, 0
+	u.WarningThresholds = nil
 	r.Usage = &u
 	switch u.UsageState {
 	case "EXCEEDED", "UNAVAILABLE", "BLOCKED":
 		r.QuotaExceeded = true
 	}
 	return nil
-}
-
-// scaleUsageToCredits 把上游 usage 的 limit/usage/overage/spillage 与 warning 阈值统一换算成
-// billing ai_millicredits 的 credits 口径（除以 100，见 handleUsage 注释）。
-func scaleUsageToCredits(u *Usage) {
-	const factor = 100
-	u.Limit /= factor
-	u.Usage /= factor
-	u.Overage /= factor
-	u.Spillage /= factor
-	for i := range u.WarningThresholds {
-		u.WarningThresholds[i].Value /= factor
-	}
 }
 
 func (r *StreamReader) handleConversation(data json.RawMessage) []Delta {

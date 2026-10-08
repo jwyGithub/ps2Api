@@ -72,33 +72,15 @@ func (r *Router) persistQuota(acc *store.Account, res *provider.Result) {
 	if res == nil {
 		return
 	}
-	if usage := res.Usage; usage != nil && usage.Limit > 0 {
-		remaining := usage.Limit - usage.Usage - usage.Overage
-		if remaining < 0 || res.QuotaExhausted {
-			remaining = 0
-		}
-		thresholds := make([]store.QuotaThreshold, len(usage.WarningThresholds))
-		for i, threshold := range usage.WarningThresholds {
-			thresholds[i] = store.QuotaThreshold{Value: threshold.Value, Unit: threshold.Unit}
-		}
-		var cycleStart, cycleEnd *time.Time
-		if usage.UsageCycle != nil {
-			cycleStart, cycleEnd = &usage.UsageCycle.Start, &usage.UsageCycle.End
-		}
-		// plan 字段不在此覆盖：usage.userType 是「用户类型」（FREE_USER/PAID_USER），不是套餐
-		// （sync-free-202603/sync-solo-trial-202603）。曾经直接写入导致每次对话后 plan 被污染成
-		// FREE_USER，池选号的 preferredPlan（认 sync-solo-trial 前缀）与 FREE 清理口径全部失真
-		// （2026-10-08 线上确认）。套餐唯一可信来源是 billing ops 的 operations.plan
-		// （fetchBillingOpsResult 路径）与注册导入时的落库值；这里读库保留。
-		plan := acc.Plan
-		if fresh, err := r.Store.GetAccount(acc.ID); err == nil && fresh != nil {
-			plan = fresh.Plan
-		}
+	// 额度统一来源（2026-10-08 定案）：usage 事件数值量纲随套餐漂移（FREE ÷100、trial ÷1000
+	// 才能对齐 billing），不可落库——sse.go handleUsage 已把数值字段清零，此处只在
+	// 「库中尚无快照」（QuotaLimit==0，新号首聊）时写状态占位（数值保持 0=未采集，
+	// ProbeQuotas/metrics 对 0 的既有语义就是"待采集/跳过"），随后 scheduleBillingRefresh
+	// 的权威值立刻接管。库中已有快照时数值完全不动——conversation 快照覆盖 billing
+	// 权威值正是 400→4000 事故的根源。
+	if usage := res.Usage; usage != nil && acc.QuotaLimit <= 0 {
 		_ = r.Store.SetQuotaSnapshot(acc.ID, store.QuotaSnapshot{
-			Plan: plan, State: usage.UsageState, Limit: usage.Limit, Used: usage.Usage,
-			Remaining: remaining, Overage: usage.Overage, Spillage: usage.Spillage,
-			AllowOverage: usage.AllowOverage, TeamPooled: usage.IsTeamPooled,
-			WarningThresholds: thresholds, CycleStart: cycleStart, CycleEnd: cycleEnd,
+			Plan: acc.Plan, State: usage.UsageState,
 		})
 	}
 	if rate := res.RateLimit; rate != nil {
