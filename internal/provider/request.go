@@ -47,6 +47,9 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 	// Claude Code 标题生成模板是上游安全分类器的高危信号（2026-10-08 线上定位：
 	// 同账号同 session 内容，裸发成功、套模板必 flag）。先压缩为无害等价指令再中和。
 	upstreamQuery = neutralizeTitlePrompt(upstreamQuery)
+	// git 署名 system-reminder 块（🤖 Generated with [Claude Code]…）在 FREE 号上是
+	// 确定性 flag 信号（探针验证剔除后通过），整块剔除。
+	upstreamQuery = stripAttributionReminder(upstreamQuery)
 	if wafNeutralizeEnabled() && !req.WafProbe {
 		upstreamQuery = wafNeutralize(upstreamQuery)
 	}

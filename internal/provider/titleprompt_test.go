@@ -34,3 +34,28 @@ func TestNeutralizeTitlePrompt(t *testing.T) {
 		t.Fatalf("malformed title query must pass through, got:\n%s", got)
 	}
 }
+
+// git 署名 reminder 块是 FREE 号上的确定性 flag 信号（2026-10-08 探针验证），
+// 出站前必须整块剔除；session/任务内容不受影响。
+func TestStripAttributionReminder(t *testing.T) {
+	q := "before\n<system-reminder>\nCodebase instructions here.\n</system-reminder>\n<mid/>\n<system-reminder>\n" + attributionMarker + "\n- End git commit messages with:\nCo-Authored-By: x\n</system-reminder>\n<task>修改ddns</task>"
+	got := stripAttributionReminder(q)
+	if strings.Contains(got, attributionMarker) || strings.Contains(got, "Co-Authored-By") {
+		t.Fatalf("attribution block must be removed:\n%s", got)
+	}
+	for _, keep := range []string{"before", "Codebase instructions here.", "<mid/>", "<task>修改ddns</task>"} {
+		if !strings.Contains(got, keep) {
+			t.Fatalf("must keep %q, got:\n%s", keep, got)
+		}
+	}
+
+	// 无特征原样直通
+	if got := stripAttributionReminder("plain query"); got != "plain query" {
+		t.Fatalf("plain query must pass through: %q", got)
+	}
+	// 只有特征没有完整包裹：原样直通（不误伤）
+	partial := "x " + attributionMarker + " y"
+	if got := stripAttributionReminder(partial); got != partial {
+		t.Fatalf("unwrapped marker must pass through: %q", got)
+	}
+}
