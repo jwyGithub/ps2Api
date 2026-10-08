@@ -343,6 +343,14 @@ func (r *StreamReader) handleFailure(data json.RawMessage) []Delta {
 		r.RequestRejected = true
 		r.SessionCorrupt = true
 	}
+	// "This message got flagged by our safety checks"（2026-10 实测）：上游内容安全层拦截，
+	// 经 failure 事件带 message 文案返回（无独立 errorType）。实测同内容换号一挂一过、
+	// 连 "hi" 都可能被拦——拦截依据是「账号+环境信誉分」的概率性判定，不是内容本身。
+	// 处置同 UpstreamFailure：账号健康不得 MarkError（否则一次拦截踢废一个号）；
+	// 新对话允许换号 failover，续聊钉住原号（防把同一错误传染给整池）。
+	if strings.Contains(strings.ToLower(d.Message), "flagged by our safety checks") {
+		r.UpstreamFailure = true
+	}
 	if isUpstreamModelFailure(d.ErrorType) {
 		r.UpstreamFailure = true
 	}
