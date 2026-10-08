@@ -14,9 +14,11 @@ import (
 // FREE 号在号池里不仅几乎交付不了结果，还会烧掉 failover 预算并污染 flag 统计，留着弊大于利。
 // 本任务定期删除 plan 为 FREE 的账号（含额度归零的 sync-free 前缀号）。
 //
-// 删除口径（满足其一即删）：
-//   - plan == "FREE_USER"（usage.userType 口径的免费号）
-//   - plan 前缀 "sync-free-" 且额度已耗尽（remaining<=0）——未耗尽的 sync-free 还有 50 额度可用
+// 删除口径：plan 前缀 "sync-free-" 且额度已耗尽（remaining<=0）。
+// （plan 只有两种真实值：sync-free-202603 / sync-solo-trial-202603，均由注册产线或
+// billing ops 落库。历史上对话路径曾把 usage.userType（FREE_USER/PAID_USER）误写成
+// plan 造成污染，该 bug 已修——persistQuota 不再覆盖 plan；库里残留的 FREE_USER 是
+// 历史脏数据，同样按 FREE 清掉。）
 //
 // 保护条件：手动停用（enabled=false）的号不删——那是人留着的；今天注册的号不删——给注册
 // 产线留一个自然日观察期，避免刚落库就被清掉。删除走 Store.DeleteAccount（request_logs
@@ -76,10 +78,11 @@ func (r *Router) purgeFreeAccountsOnce() {
 }
 
 // isFreePlanForCleanup 判断账号是否属于「应清理的 FREE 套餐」。
-//   - plan == "FREE_USER"：usage.userType 口径的免费号，无条件清；
+//   - plan == "FREE_USER"：历史污染残留（对话路径曾误写 usage.userType 进 plan），无条件清；
 //   - plan 前缀 "sync-free-"：注册产线的同步免费号，仅当额度确认耗尽（limit>0 且 remaining<=0）
 //     才清——还有余量的 sync-free 号（50/50）仍然能交付请求。
 //   - plan 为空（额度从未刷新过）不清：信息不足，宁可保留。
+//   - sync-solo-trial-*/PAID_USER 等其余值一律保留。
 func isFreePlanForCleanup(plan string, quotaLimit, quotaRemaining float64) bool {
 	if plan == "FREE_USER" {
 		return true

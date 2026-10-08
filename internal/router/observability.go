@@ -64,6 +64,10 @@ func creditsConsumed(acc *store.Account, res *provider.Result) float64 {
 }
 
 // persistQuota 把聊天流 usage 与响应头限流快照写入账号。
+//
+// 额度统一来源（2026-10-08 改）：快照数值仅作兜底，权威来源是 billing ops 直查。
+// 写完快照后异步调度一次 billing ops 刷新（零消耗、不阻塞响应、带去抖），
+// 用 operations.ai_millicredits 的权威值覆盖快照——两条路径的 plan/量纲/周期就此归一。
 func (r *Router) persistQuota(acc *store.Account, res *provider.Result) {
 	if res == nil {
 		return
@@ -81,8 +85,17 @@ func (r *Router) persistQuota(acc *store.Account, res *provider.Result) {
 		if usage.UsageCycle != nil {
 			cycleStart, cycleEnd = &usage.UsageCycle.Start, &usage.UsageCycle.End
 		}
+		// plan 字段不在此覆盖：usage.userType 是「用户类型」（FREE_USER/PAID_USER），不是套餐
+		// （sync-free-202603/sync-solo-trial-202603）。曾经直接写入导致每次对话后 plan 被污染成
+		// FREE_USER，池选号的 preferredPlan（认 sync-solo-trial 前缀）与 FREE 清理口径全部失真
+		// （2026-10-08 线上确认）。套餐唯一可信来源是 billing ops 的 operations.plan
+		// （fetchBillingOpsResult 路径）与注册导入时的落库值；这里读库保留。
+		plan := acc.Plan
+		if fresh, err := r.Store.GetAccount(acc.ID); err == nil && fresh != nil {
+			plan = fresh.Plan
+		}
 		_ = r.Store.SetQuotaSnapshot(acc.ID, store.QuotaSnapshot{
-			Plan: usage.UserType, State: usage.UsageState, Limit: usage.Limit, Used: usage.Usage,
+			Plan: plan, State: usage.UsageState, Limit: usage.Limit, Used: usage.Usage,
 			Remaining: remaining, Overage: usage.Overage, Spillage: usage.Spillage,
 			AllowOverage: usage.AllowOverage, TeamPooled: usage.IsTeamPooled,
 			WarningThresholds: thresholds, CycleStart: cycleStart, CycleEnd: cycleEnd,
@@ -91,4 +104,6 @@ func (r *Router) persistQuota(acc *store.Account, res *provider.Result) {
 	if rate := res.RateLimit; rate != nil {
 		_ = r.Store.SetRateLimit(acc.ID, rate.Limit, rate.Remaining, rate.WindowSeconds, rate.ResetAt)
 	}
+	// 对话后异步刷新一次 billing ops 权威额度（去抖：同账号 30s 内只跑一次）。
+	r.scheduleBillingRefresh(acc.ID)
 }

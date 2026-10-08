@@ -16,10 +16,12 @@ type Router struct {
 	Store    *store.Store
 	shadow   shadowProbe
 	cache    *responseCache
+	// billingRefresh 驱动「对话后异步刷新 billing ops 权威额度」（见 billing_refresh.go）。
+	billingRefresh *billingRefresher
 }
 
 func New(s *store.Store) *Router {
-	r := &Router{Pool: pool.New(s), Provider: provider.New(), Store: s, shadow: shadowProbe{inflight: map[string]int{}}, cache: newResponseCache()}
+	r := &Router{Pool: pool.New(s), Provider: provider.New(), Store: s, shadow: shadowProbe{inflight: map[string]int{}}, cache: newResponseCache(), billingRefresh: newBillingRefresher()}
 	r.Toolsets = provider.NewToolsetsProvider(r.Provider)
 	// 出口代理池：仅当 proxy_enabled=true 且配置了 proxy_urls 时启用，否则返回 nil → 走本机直连。
 	// 每次请求实时读设置，面板改动即时生效、无需重启。

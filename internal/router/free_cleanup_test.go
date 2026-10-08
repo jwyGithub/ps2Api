@@ -14,8 +14,7 @@ func TestIsFreePlanForCleanup(t *testing.T) {
 		want             bool
 	}{
 		{"FREE_USER", 500, 0, true},
-		{"FREE_USER", 500, 300, true},       // FREE_USER 无条件清（不管余量）
-		{"FREE_USER", 0, 0, true},           // 额度未知的 FREE_USER 也清
+		{"FREE_USER", 500, 300, true},       // 历史污染残留（persistQuota 曾误写 userType），无条件清
 		{"sync-free-202603", 50, 0, true},   // sync-free 耗尽才清
 		{"sync-free-202603", 50, 23, false}, // sync-free 还有余量，保留
 		{"sync-free-202603", 0, 0, false},   // 额度未知不清（信息不足）
@@ -30,13 +29,13 @@ func TestIsFreePlanForCleanup(t *testing.T) {
 	}
 }
 
-// 钉住清理口径的两个保护条件：观察期一个自然日；FREE_USER 无条件清。
+// 钉住清理口径的保护条件：观察期一个自然日；污染残留 FREE_USER 无条件清。
 func TestFreeCleanupGuardrails(t *testing.T) {
 	if freeCleanupGraceDays != 1 {
 		t.Fatalf("freeCleanupGraceDays = %d, want 1 (注册观察期一个自然日)", freeCleanupGraceDays)
 	}
 	var acc store.Account
-	acc.Plan = "FREE_USER"
+	acc.Plan = "FREE_USER" // 历史污染残留口径
 	acc.QuotaLimit = 500
 	acc.CreatedAt = time.Now().Add(-2 * 24 * time.Hour)
 	if !isFreePlanForCleanup(acc.Plan, acc.QuotaLimit, acc.QuotaRemaining) {
