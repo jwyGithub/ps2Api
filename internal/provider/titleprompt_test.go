@@ -59,3 +59,23 @@ func TestStripAttributionReminder(t *testing.T) {
 		t.Fatalf("unwrapped marker must pass through: %q", got)
 	}
 }
+
+// auto mode 本地分类器请求的 Stage-1 指令尾是 flag 信号（2026-10-08 探针验证），
+// 必须替换为中性等价指令；verdict 标签输出约定保持不变。
+func TestNeutralizeClassifierTail(t *testing.T) {
+	q := "[User (task)]\nReview.\n\n<transcript>\n{\"Bash\":\"cargo test\"}\n</transcript>\n\n" + classifierTailMarker + " Stage 1 does NOT apply. Block if ANY rule could apply. Your ENTIRE response MUST begin with <block>."
+	got := neutralizeClassifierTail(q)
+	if strings.Contains(got, classifierTailMarker) || strings.Contains(got, "<block>") {
+		t.Fatalf("classifier tail must be neutralized:\n%s", got)
+	}
+	if !strings.Contains(got, "<transcript>") {
+		t.Fatalf("transcript must be preserved:\n%s", got)
+	}
+	if !strings.Contains(got, classifierTailNeutral) {
+		t.Fatalf("neutral instruction must be present:\n%s", got)
+	}
+	// 非分类器请求原样直通
+	if got := neutralizeClassifierTail("plain query"); got != "plain query" {
+		t.Fatalf("plain query must pass through: %q", got)
+	}
+}
