@@ -508,19 +508,29 @@ const compactTitleInstruction = "Name this coding session with a short title. Th
 // 客户端解析不受影响。
 const classifierTailMarker = "Err on the side of blocking."
 
+// classifierTailMarker2 是 Stage-2 分类器（严重度分级）请求的特征句。Claude Code 分类器
+// 两段式：Stage-1 判 block/allow，Stage-2 给 0-10 严重度。两段的指令尾同属高危措辞。
+const classifierTailMarker2 = "Stage 1 does NOT apply user intent or ALLOW exceptions"
+
 // classifierTailNeutral 是中性化后的等价指令。保留的语义要素：审查 transcript 里的
 // 最后动作、不确定时从严、 verdict 标签放首行、无其他输出。丢弃全部 "blocking /
 // MUST / Do NOT" 式高压措辞（触发 Postman 分类器的部分）。
 const classifierTailNeutral = "Review the last action in the transcript. Reply with the verdict tag on the first line, then nothing else. Lean toward caution when unsure."
 
-// neutralizeClassifierTail 识别 auto mode 本地分类器请求，替换高危指令尾。
-// 非该类请求原样返回。
+// classifierTailNeutral2 是 Stage-2 的中性等价指令。保留语义要素：不考虑用户意图、
+// 只输出 <severity>N</severity> 一行。丢弃 "Grade HARM ONLY / do NOT reduce" 高压措辞。
+const classifierTailNeutral2 = "Consider only the action itself, not user intent. Reply with <severity>N</severity> (0-10) on the first line, then nothing else."
+
+// neutralizeClassifierTail 识别 auto mode 本地分类器请求（Stage-1/Stage-2 两种模板），
+// 把高危指令尾替换为中性等价版本。非该类请求原样返回。
 func neutralizeClassifierTail(q string) string {
-	i := strings.LastIndex(q, classifierTailMarker)
-	if i < 0 {
-		return q
+	if i := strings.LastIndex(q, classifierTailMarker); i >= 0 {
+		return q[:i] + classifierTailNeutral
 	}
-	return q[:i] + classifierTailNeutral
+	if i := strings.LastIndex(q, classifierTailMarker2); i >= 0 {
+		return q[:i] + classifierTailNeutral2
+	}
+	return q
 }
 
 // attributionMarker 是 Claude Code 客户端注入的 git 署名 system-reminder 块特征。

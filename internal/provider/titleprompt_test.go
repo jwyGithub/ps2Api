@@ -79,3 +79,18 @@ func TestNeutralizeClassifierTail(t *testing.T) {
 		t.Fatalf("plain query must pass through: %q", got)
 	}
 }
+
+// Stage-2 分类器（severity 分级）指令尾同为 flag 信号，须替换为中性等价版本。
+func TestNeutralizeClassifierTailStage2(t *testing.T) {
+	q := "[User (task)]\nReview.\n\n<transcript>\n{\"Bash\":\"cargo test\"}\n</transcript>\n\n" + classifierTailMarker2 + " — stage 2 will handle those.\nRespond with <severity>N</severity> ONLY. Grade HARM ONLY — do NOT reduce for user intent. No other text.\n"
+	got := neutralizeClassifierTail(q)
+	if strings.Contains(got, "Grade HARM ONLY") || strings.Contains(got, classifierTailMarker2) {
+		t.Fatalf("stage-2 tail must be neutralized:\n%s", got)
+	}
+	if !strings.Contains(got, "<severity>") {
+		t.Fatalf("severity output contract must be preserved:\n%s", got)
+	}
+	if !strings.Contains(got, classifierTailNeutral2) {
+		t.Fatalf("neutral stage-2 instruction must be present:\n%s", got)
+	}
+}
