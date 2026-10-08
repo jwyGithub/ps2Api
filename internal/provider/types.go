@@ -11,9 +11,14 @@ const (
 	// Desktop* 取自真实 macOS 桌面端「本地模式(localmode)」会话抓包(native/openai/openai.chls)——
 	// 只有 localmode workspace 才暴露 executeShellCommand/readFile/listDirectory/searchInFiles
 	// 这些本地工具。hash 是工具目录快照的指纹,随桌面构建版本漂移;换新版桌面端重新抓包对齐即可。
-	DesktopAppVersion  = "12.23.7"
-	DesktopToolsHash   = "clienttools-workspace_localmode_v12-desktop-darwin-12.23.7-ui-260814-0232-a0d1149cc7c7"
-	DesktopKBTermsHash = "kbterms-workspace_localmode_v12-desktop-darwin-12.23.7-ui-260814-0232-2ebdcef5a027"
+	DesktopAppVersion  = "12.31.3-ui-261007-0231"
+	// 2026-10-08 从 12.31.3 客户端 bundle（ai-chat-*.min.js，Code Cache 提取）逆向对齐：
+	// hash 按平台（win32/darwin/linux）区分，win32 与 darwin 同值：
+	//   clienttools: clienttools-workspace_localmode_v12-desktop-<plat>-12.31.3-ui-261007-0231-cd9d36e0ac49
+	//   kbterms:     kbterms-workspace_localmode_v12-desktop-<plat>-12.31.3-ui-261007-0231-dcf90dad047d
+	// 平台形态同步切到 win32/Windows（与真实出站环境一致），见 buildHeaders。
+	DesktopToolsHash   = "clienttools-workspace_localmode_v12-desktop-win32-12.31.3-ui-261007-0231-cd9d36e0ac49"
+	DesktopKBTermsHash = "kbterms-workspace_localmode_v12-desktop-win32-12.31.3-ui-261007-0231-dcf90dad047d"
 	DesktopChatURL     = "https://gateway.postman.com/chat"
 
 	// Web* 取自真实浏览器 Web 会话抓包(native/claude/web-chat-1.txt，已知正常、未触发 403)。

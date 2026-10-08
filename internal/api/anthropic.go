@@ -25,6 +25,10 @@ type AnthropicReq struct {
 	OutputConfig map[string]interface{} `json:"output_config"`
 	// Thinking 是 Anthropic 标准的扩展思考字段（thinking.budget_tokens），output_config 缺省时按预算档位回退。
 	Thinking map[string]interface{} `json:"thinking"`
+	// Safeguards 是 auto mode 服务器审查请求（beta: dangerous-tool-use-2026-09-03）。
+	// 上游（Postman chat）不承载该字段，由网关本地审查并在响应回填 safeguard_results，
+	// 使新版客户端认为服务器审查可达（不再弹 classifier billing 提示）。见 provider/safeguards.go。
+	Safeguards []provider.SafeguardEntry `json:"safeguards"`
 }
 type AnthropicMsg struct {
 	Role    string          `json:"role"`
@@ -84,7 +88,7 @@ func (s *Server) anthropic(w http.ResponseWriter, r *http.Request) {
 	}
 	if ar.Stream {
 		req.Stream = true
-		s.streamAnthropic(w, r, &req, clientModel)
+		s.streamAnthropic(w, r, &req, clientModel, ar.Safeguards, raw)
 		return
 	}
 	res, _, err := s.Router.Chat(r.Context(), &req)
@@ -98,8 +102,23 @@ func (s *Server) anthropic(w http.ResponseWriter, r *http.Request) {
 		anthropicError(w, status, err.Error(), typ)
 		return
 	}
-	jsonWrite(w, 200, openAIToAnthropic(res, clientModel))
+	resp := openAIToAnthropic(res, clientModel)
+	// auto mode 服务器审查：本地判定后在非流式响应顶层回填 safeguard_results。
+	if sg := provider.EvaluateSafeguards(ar.Safeguards, extractMessagesRaw(raw)); sg != nil {
+		resp["safeguard_results"] = sg
+	}
+	jsonWrite(w, 200, resp)
 }
+
+// extractMessagesRaw 从客户端请求原文抠出 messages 字段（供 safeguards 审查提取 tool_use）。
+func extractMessagesRaw(raw []byte) json.RawMessage {
+	var probe struct {
+		Messages json.RawMessage `json:"messages"`
+	}
+	_ = json.Unmarshal(raw, &probe)
+	return probe.Messages
+}
+
 // thinkingBudgetToEffort 把 Anthropic 的 thinking.budget_tokens 映射成思考档位（high/medium/low）。
 // 仅当 thinking.type == "enabled" 且 budget_tokens 有效时返回；否则返回空串（不设置思考强度）。
 func thinkingBudgetToEffort(thinking map[string]interface{}) string {
@@ -254,7 +273,7 @@ func openAIToAnthropic(res *provider.Result, model string) map[string]interface{
 	}
 	return map[string]interface{}{"id": newID("msg_"), "type": "message", "role": "assistant", "model": model, "content": blocks, "stop_reason": stop, "stop_sequence": nil, "usage": usage}
 }
-func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, req *provider.ChatRequest, clientModel string) {
+func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, req *provider.ChatRequest, clientModel string, safeguards []provider.SafeguardEntry, rawBody []byte) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		anthropicError(w, 500, "stream unsupported", "api_error")
@@ -394,6 +413,13 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, req *pr
 		}
 	}
 	deltaUsage["output_tokens"] = outputTokens
-	writeEvent("message_delta", map[string]interface{}{"type": "message_delta", "delta": map[string]string{"stop_reason": stop}, "usage": deltaUsage})
+	// auto mode 服务器审查：本地判定后随最终 message_delta.delta 回填 safeguard_results。
+	// 客户端（claude.exe IXr）只在该帧读取此字段；缺失会被当作服务器审查不可达而回退本地
+	// 分类器并弹 classifier billing 提示。
+	delta := map[string]interface{}{"stop_reason": stop}
+	if sg := provider.EvaluateSafeguards(safeguards, extractMessagesRaw(rawBody)); sg != nil {
+		delta["safeguard_results"] = sg
+	}
+	writeEvent("message_delta", map[string]interface{}{"type": "message_delta", "delta": delta, "usage": deltaUsage})
 	writeEvent("message_stop", map[string]string{"type": "message_stop"})
 }

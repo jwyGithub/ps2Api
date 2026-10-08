@@ -7,9 +7,10 @@ import (
 	"testing"
 )
 
-// TestBuildBodyDesktopLocalModeShape 钉住 desktop 分支的出站请求形态:必须与真实抓包里
-// 能跑 executeShellCommand 的 localmode 会话一致(product/platform/hash)。改回 win32 或
-// 云端 workspace_v12 都会让这里失败——避免静默丢失本地工具能力。
+// TestBuildBodyDesktopLocalModeShape 钉住 desktop 分支的出站请求形态:必须与真实客户端
+// localmode 会话一致(product/platform/hash)。2026-10-08 平台形态从 DESKTOP_MACOS/darwin
+// 切到 DESKTOP_WINDOWS/win32（对齐 12.31.3 实机 + 与 UA/sec-ch-ua-platform 指纹自洽）；
+// 改回 macOS 或云端 workspace_v12 都会让这里失败——避免静默丢失本地工具能力。
 func TestBuildBodyDesktopLocalModeShape(t *testing.T) {
 	p := New()
 	req := &ChatRequest{Model: "gpt-5.6-sol", Endpoint: "openai",
@@ -18,8 +19,8 @@ func TestBuildBodyDesktopLocalModeShape(t *testing.T) {
 
 	body := p.buildBody(req, tokens, "GPT_56_SOL", 1)
 
-	if got := body["platform"]; got != "DESKTOP_MACOS" {
-		t.Fatalf("platform = %v, want DESKTOP_MACOS", got)
+	if got := body["platform"]; got != "DESKTOP_WINDOWS" {
+		t.Fatalf("platform = %v, want DESKTOP_WINDOWS", got)
 	}
 	input := body["input"].(map[string]interface{})
 	if got := input["product"]; got != "workspace_localmode_v12" {
@@ -27,8 +28,8 @@ func TestBuildBodyDesktopLocalModeShape(t *testing.T) {
 	}
 	ct := body["clientTools"].(map[string]interface{})
 	hash, _ := ct["nativeToolsHash"].(string)
-	if !strings.Contains(hash, "localmode") || !strings.Contains(hash, "darwin") {
-		t.Fatalf("nativeToolsHash = %q, want localmode+darwin", hash)
+	if !strings.Contains(hash, "localmode") || !strings.Contains(hash, "win32") {
+		t.Fatalf("nativeToolsHash = %q, want localmode+win32", hash)
 	}
 	excl, _ := ct["excludedTools"].([]string)
 	if len(excl) == 0 {

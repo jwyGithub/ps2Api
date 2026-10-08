@@ -44,6 +44,8 @@ func main() {
 	go server.Router.StartDailyQuotaRefresh(context.Background())
 	// 每日 23:00 清理请求日志，只保留最近 7 天（并在启动时先清一次）。
 	go server.Router.StartDailyLogCleanup(context.Background())
+	// 每日 23:10 清理 FREE 套餐账号（风控实验结论：FREE 号分类器阈值过低，留存弊大于利）。
+	go server.Router.StartDailyFreeCleanup(context.Background())
 	mux := http.NewServeMux()
 	server.Register(mux)
 

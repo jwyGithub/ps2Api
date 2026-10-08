@@ -28,9 +28,9 @@ import (
 )
 
 const (
-	// ToolsetsAppVersion 对齐 12.30.0 桌面端（本机实际运行版本，2026-09-29 抓 logs 确认
-	// 完整串为 12.30.0-ui-260928-0231；toolsets 浏览器侧构造器已迁移到 SW 缓存 bundle）。
-	ToolsetsAppVersion = "12.30.0-ui-260928-0231"
+	// ToolsetsAppVersion 对齐桌面端构建号（2026-10-08 升到 12.31.3-ui-261007-0231，本机已更新；
+	// toolsets 浏览器侧构造器已迁移到 SW 缓存 bundle）。
+	ToolsetsAppVersion = "12.31.3-ui-261007-0231"
 	// toolsetsRateLimitRetries 是 429 / upstream_unavailable 的退避重试次数（含首发的总尝试 = 1+retries）。
 	toolsetsRateLimitRetries = 2
 	// ToolsetsMaxTokens 上游对 max_tokens 的硬上限（抓包实测 8096，超限 400 invalid_request_error）。

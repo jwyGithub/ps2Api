@@ -270,6 +270,12 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 		// 上游自己调模型失败(Policy Error 等):账号健康、请求也没问题,router 据此不标记账号、
 		// 续聊也不换号(换号会丢服务端会话上下文)。见 isUpstreamModelFailure。
 		res.UpstreamFailure = reader.UpstreamFailure
+		// "flagged by our safety checks"（2026-10 实测）是「账号+环境信誉分」的概率性拦截，
+		// 同内容换号一挂一过——账号本身健康，绝不 MarkError（否则一次拦截踢废一个号）。
+		// 归 UpstreamFailure：新对话允许换号 failover，续聊经 router 钉住原号原地重试。
+		if IsSafetyFlaggedMessage(reader.Err) {
+			res.UpstreamFailure = true
+		}
 		// 工具相关的 failure(工具名冲突、无可用工具等)是请求内容问题,不是账号故障——
 		// 换账号重试无用,标记 RequestRejected 让 router 直接返回、不把账号踢出池。
 		if reader.RequestRejected || isRequestRejectionMessage(reader.Err) {

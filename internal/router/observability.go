@@ -64,31 +64,28 @@ func creditsConsumed(acc *store.Account, res *provider.Result) float64 {
 }
 
 // persistQuota 把聊天流 usage 与响应头限流快照写入账号。
+//
+// 额度统一来源（2026-10-08 改）：快照数值仅作兜底，权威来源是 billing ops 直查。
+// 写完快照后异步调度一次 billing ops 刷新（零消耗、不阻塞响应、带去抖），
+// 用 operations.ai_millicredits 的权威值覆盖快照——两条路径的 plan/量纲/周期就此归一。
 func (r *Router) persistQuota(acc *store.Account, res *provider.Result) {
 	if res == nil {
 		return
 	}
-	if usage := res.Usage; usage != nil && usage.Limit > 0 {
-		remaining := usage.Limit - usage.Usage - usage.Overage
-		if remaining < 0 || res.QuotaExhausted {
-			remaining = 0
-		}
-		thresholds := make([]store.QuotaThreshold, len(usage.WarningThresholds))
-		for i, threshold := range usage.WarningThresholds {
-			thresholds[i] = store.QuotaThreshold{Value: threshold.Value, Unit: threshold.Unit}
-		}
-		var cycleStart, cycleEnd *time.Time
-		if usage.UsageCycle != nil {
-			cycleStart, cycleEnd = &usage.UsageCycle.Start, &usage.UsageCycle.End
-		}
+	// 额度统一来源（2026-10-08 定案）：usage 事件数值量纲随套餐漂移（FREE ÷100、trial ÷1000
+	// 才能对齐 billing），不可落库——sse.go handleUsage 已把数值字段清零，此处只在
+	// 「库中尚无快照」（QuotaLimit==0，新号首聊）时写状态占位（数值保持 0=未采集，
+	// ProbeQuotas/metrics 对 0 的既有语义就是"待采集/跳过"），随后 scheduleBillingRefresh
+	// 的权威值立刻接管。库中已有快照时数值完全不动——conversation 快照覆盖 billing
+	// 权威值正是 400→4000 事故的根源。
+	if usage := res.Usage; usage != nil && acc.QuotaLimit <= 0 {
 		_ = r.Store.SetQuotaSnapshot(acc.ID, store.QuotaSnapshot{
-			Plan: usage.UserType, State: usage.UsageState, Limit: usage.Limit, Used: usage.Usage,
-			Remaining: remaining, Overage: usage.Overage, Spillage: usage.Spillage,
-			AllowOverage: usage.AllowOverage, TeamPooled: usage.IsTeamPooled,
-			WarningThresholds: thresholds, CycleStart: cycleStart, CycleEnd: cycleEnd,
+			Plan: acc.Plan, State: usage.UsageState,
 		})
 	}
 	if rate := res.RateLimit; rate != nil {
 		_ = r.Store.SetRateLimit(acc.ID, rate.Limit, rate.Remaining, rate.WindowSeconds, rate.ResetAt)
 	}
+	// 对话后异步刷新一次 billing ops 权威额度（去抖：同账号 30s 内只跑一次）。
+	r.scheduleBillingRefresh(acc.ID)
 }

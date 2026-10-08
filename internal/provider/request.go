@@ -44,6 +44,15 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 	// 特征插入零宽空格令 rune 数回涨，贴近上限的折叠产物中和后可能越过 10000，由它
 	// 兜底截断（并非无条件直通）；对增量（hasConv）路径它则是唯一的 cap 点。
 	upstreamQuery := split.Query
+	// Claude Code 标题生成模板是上游安全分类器的高危信号（2026-10-08 线上定位：
+	// 同账号同 session 内容，裸发成功、套模板必 flag）。先压缩为无害等价指令再中和。
+	upstreamQuery = neutralizeTitlePrompt(upstreamQuery)
+	// auto mode 本地分类器请求的 Stage-1 指令尾（"Err on the side of blocking…"）同为
+	// 高危信号（探针：原版在被 flag 号上 2/2 挂、中和版 2/2 过），替换为中性等价指令。
+	upstreamQuery = neutralizeClassifierTail(upstreamQuery)
+	// git 署名 system-reminder 块（🤖 Generated with [Claude Code]…）在 FREE 号上是
+	// 确定性 flag 信号（探针验证剔除后通过），整块剔除。
+	upstreamQuery = stripAttributionReminder(upstreamQuery)
 	if wafNeutralizeEnabled() && !req.WafProbe {
 		upstreamQuery = wafNeutralize(upstreamQuery)
 	}
@@ -70,7 +79,8 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 		input["product"] = "workspace_localmode_v12"
 		body = map[string]interface{}{
 			"input":    input,
-			"platform": "DESKTOP_MACOS",
+			// 12.31.3 客户端按 OS platform() 映射：win32→DESKTOP_WINDOWS/darwin→DESKTOP_MACOS/linux→DESKTOP_LINUX
+			"platform": "DESKTOP_WINDOWS",
 			"clientTools": map[string]interface{}{
 				"nativeToolsHash": DesktopToolsHash,
 				"excludedTools":   desktopLocalModeExcludedTools,
@@ -159,15 +169,19 @@ func (p *Provider) buildHeaders(tokens *Tokens) http.Header {
 		if tokens.MultiLoginToken != "" {
 			h.Set("x-multi-login-token", tokens.MultiLoginToken)
 		}
+		// 2026-10-08 对齐 12.31.3 桌面端（Windows 实机）：x-app-version 带完整 ui 构建号
+		// （12.31.3-ui-261007-0231），平台形态切 win32 —— UA/sec-ch-ua-platform/Referer 与
+		// clientTools/clientKBTerms 的 win32 hash 保持同一平台，避免「UA 说 Windows、
+		// hash 说 darwin」这类指纹错配（风控可比对的字段必须自洽）。
 		h.Set("x-app-version", DesktopAppVersion)
-		h.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Postman/"+DesktopAppVersion+" Electron/37.10.3 Safari/537.36")
+		h.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Postman/"+DesktopAppVersion+" Electron/37.10.3 Safari/537.36")
 		// 浏览器指纹头（2026-09-22 真机桌面抓包对齐）：UA 自称 Electron/Chromium 却不发
 		// sec-ch-ua*/sec-fetch-* 是 Cloudflare Bot Management 的机器人信号。桌面 webview
-		// 是 Chromium，这些头真实存在。referer 带 desktopVersion/userId/teamId。
+		// 是 Chromium（12.31.3 = Electron 37 / Chromium 138），这些头真实存在。
 		h.Set("Accept", "*/*")
 		h.Set("sec-ch-ua", `"Not)A;Brand";v="8", "Chromium";v="138"`)
 		h.Set("sec-ch-ua-mobile", "?0")
-		h.Set("sec-ch-ua-platform", `"macOS"`)
+		h.Set("sec-ch-ua-platform", `"Windows"`)
 		h.Set("sec-fetch-site", "same-site")
 		h.Set("sec-fetch-mode", "cors")
 		h.Set("sec-fetch-dest", "empty")

@@ -36,13 +36,17 @@ func TestToolCallOSSShape(t *testing.T) {
 func TestUsageAndRateLimitMetadata(t *testing.T) {
 	r := NewStreamReader()
 	r.Feed(`data: {"eventType":"usage","data":{"userType":"FREE_USER","usageState":"AVAILABLE","limit":50000,"usage":28713,"overage":0,"spillage":2,"allowOverage":false,"warningThresholds":[{"value":50,"unit":"Percentage"}],"usageCycle":{"start":"2026-08-11T23:22:55Z","end":"2026-09-11T23:22:55Z"},"isTeamPooled":true}}`)
-	// limit/usage/overage/spillage 换算成 billing credits 口径（÷100，见 scaleUsageToCredits）；
-	// warningThresholds 单位是 Percentage，值不换算。
-	if r.Usage == nil || r.Usage.Spillage != 0.02 || r.Usage.UsageCycle == nil || r.Usage.UsageCycle.End.Format(time.RFC3339) != "2026-09-11T23:22:55Z" || !r.Usage.IsTeamPooled {
+	// 额度统一来源（2026-10-08）：usage 事件数值量纲随套餐漂移（FREE ÷100、trial ÷1000），
+	// 不可落库——handleUsage 把数值字段全部清零，禁止覆盖 billing ops 权威值。
+	// 状态类字段（usageState/周期/池化标记）量纲无关，照常解析。
+	if r.Usage == nil || r.Usage.Spillage != 0 || r.Usage.UsageCycle == nil || r.Usage.UsageCycle.End.Format(time.RFC3339) != "2026-09-11T23:22:55Z" || !r.Usage.IsTeamPooled {
 		t.Fatalf("usage metadata = %+v", r.Usage)
 	}
-	if r.Usage.Limit != 500 || r.Usage.Usage != 287.13 || r.Usage.WarningThresholds[0].Value != 0.5 {
-		t.Fatalf("usage credits scaling = %+v", r.Usage)
+	if r.Usage.Limit != 0 || r.Usage.Usage != 0 || r.Usage.WarningThresholds != nil {
+		t.Fatalf("usage numeric fields must be zeroed (billing ops is the only authority), got %+v", r.Usage)
+	}
+	if r.QuotaExceeded {
+		t.Fatal("AVAILABLE state must not set QuotaExceeded")
 	}
 
 	now := time.Date(2026, 8, 15, 11, 10, 58, 0, time.UTC)
@@ -90,6 +94,21 @@ func TestNonUpstreamFailureTypesAreNotFlagged(t *testing.T) {
 		if r.UpstreamFailure {
 			t.Fatalf("errorType %q must not be treated as an upstream model failure", errorType)
 		}
+	}
+}
+
+// 安全拦截（"flagged by our safety checks"）的 errorType 复用 INPUT_VALIDATION_ERROR，
+// 必须靠 message 文案优先区分：归 UpstreamFailure（账号健康、可换号 failover），
+// 绝不能落进 RequestRejected——否则 router 的 RequestRejected 分支直接 400 终止，
+// 请求粘在烧透的号上反复 400，池里干净号永远轮不到（2026-10-08 13:36 线上实测）。
+func TestSafetyFlaggedIsUpstreamFailureNotRequestRejected(t *testing.T) {
+	r := NewStreamReader()
+	r.Feed(`data: {"eventType":"failure","data":{"errorType":"INPUT_VALIDATION_ERROR","message":"This message got flagged by our safety checks. Try rephrasing your message or reach out to us at help@postman.com with reference ID c4a5cf48.","userMessage":"That was unexpected :("}}`)
+	if !r.UpstreamFailure {
+		t.Fatal("safety-flagged failure must be treated as an upstream failure (account is healthy)")
+	}
+	if r.RequestRejected {
+		t.Fatal("safety-flagged failure must NOT be RequestRejected (else router 400s instead of failing over)")
 	}
 }
 
