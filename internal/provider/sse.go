@@ -332,7 +332,13 @@ func (r *StreamReader) handleFailure(data json.RawMessage) []Delta {
 	if d.ErrorType == "USAGE_LIMIT_EXCEEDED" {
 		r.QuotaExceeded = true
 	}
-	if d.ErrorType == "INPUT_VALIDATION_ERROR" {
+	// 注意顺序：flagged 判定必须先于 INPUT_VALIDATION_ERROR。上游把安全拦截也归入
+	// INPUT_VALIDATION_ERROR（errorType 复用），若先标 RequestRejected，router 的
+	// RequestRejected 分支（在前）会直接 400 终止、不换号——请求会被粘在烧透的号上
+	// 反复 400，池里干净号永远轮不到（2026-10-08 13:36 线上实测）。
+	if strings.Contains(strings.ToLower(d.Message), "flagged by our safety checks") {
+		r.UpstreamFailure = true
+	} else if d.ErrorType == "INPUT_VALIDATION_ERROR" {
 		r.RequestRejected = true
 	}
 	// TOOL_CALL_NOT_FOUND：上游已把这组 pending tool call 消费掉，现在再交回同一组
@@ -344,13 +350,9 @@ func (r *StreamReader) handleFailure(data json.RawMessage) []Delta {
 		r.SessionCorrupt = true
 	}
 	// "This message got flagged by our safety checks"（2026-10 实测）：上游内容安全层拦截，
-	// 经 failure 事件带 message 文案返回（无独立 errorType）。实测同内容换号一挂一过、
-	// 连 "hi" 都可能被拦——拦截依据是「账号+环境信誉分」的概率性判定，不是内容本身。
+	// errorType 复用 INPUT_VALIDATION_ERROR，靠 message 文案区分（见上方 else-if 顺序说明）。
 	// 处置同 UpstreamFailure：账号健康不得 MarkError（否则一次拦截踢废一个号）；
 	// 新对话允许换号 failover，续聊钉住原号（防把同一错误传染给整池）。
-	if strings.Contains(strings.ToLower(d.Message), "flagged by our safety checks") {
-		r.UpstreamFailure = true
-	}
 	if isUpstreamModelFailure(d.ErrorType) {
 		r.UpstreamFailure = true
 	}

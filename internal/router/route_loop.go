@@ -221,6 +221,17 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 		if provider.HasReusableHistory(req.Messages) {
 			pinnedAcc = acc
 		}
+		// flagged（safety checks 拦截）走 UpstreamFailure 口径但额外排除该账号：拦截基于
+		// 账号信誉分，同一请求立刻重选大概率还命中它（2026-10-08 实测同一批烧透的号连续
+		// 撞 flag、池里干净号轮不到）。excluded 让下一轮必须换号；不 MarkError——拦截是
+		// 概率性的，账号没有坏，冷却后应继续可用。
+		if provider.IsSafetyFlaggedMessage(res.Error) {
+			excluded[acc.ID] = true
+			provider.Trace(ctx, "router.safety_flagged", plan.trace(map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "error": res.Error}, acc, false))
+			r.Pool.MarkTransient(acc.ID, res.Error)
+			noBackoff = true
+			continue
+		}
 		if res.UpstreamFailure {
 			// 上游自己调模型失败（Policy Error 等）：账号是健康的。只记录错误文案，绝不 MarkError——
 			// 那会把账号写成 status=error，既踢出 ActiveAccounts 又打断会话粘性（见 usableForSticky）。

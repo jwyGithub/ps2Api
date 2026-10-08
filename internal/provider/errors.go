@@ -32,12 +32,13 @@ func isUpstreamModelFailure(errorType string) bool {
 	return upstreamModelFailureTypes[strings.ToUpper(strings.TrimSpace(errorType))]
 }
 
-// isSafetyFlaggedMessage 识别上游内容安全层的拦截文案（"This message got flagged by our
+// IsSafetyFlaggedMessage 识别上游内容安全层的拦截文案（"This message got flagged by our
 // safety checks…"）。2026-10-08 实测：同内容跨账号一挂一过、连 "hi" 都会被拦，拦截依据是
 // 「账号+环境信誉分」的概率性判定而非内容本身；且同一账号被 flag 后短期内 flag 率迅速升高
 // （17% → 100%）。处置：账号健康（不得 MarkError 踢池），归 UpstreamFailure——新对话允许
 // 换号 failover，续聊由 router 钉住原号，避免把同一错误逐个传染给整个号池。
-func isSafetyFlaggedMessage(msg string) bool {
+// 导出供 router 在换号时排除刚被 flag 的账号（route_loop 的 safety_flagged 分支）。
+func IsSafetyFlaggedMessage(msg string) bool {
 	return strings.Contains(strings.ToLower(msg), "flagged by our safety checks")
 }
 

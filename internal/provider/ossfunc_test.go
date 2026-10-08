@@ -93,6 +93,21 @@ func TestNonUpstreamFailureTypesAreNotFlagged(t *testing.T) {
 	}
 }
 
+// 安全拦截（"flagged by our safety checks"）的 errorType 复用 INPUT_VALIDATION_ERROR，
+// 必须靠 message 文案优先区分：归 UpstreamFailure（账号健康、可换号 failover），
+// 绝不能落进 RequestRejected——否则 router 的 RequestRejected 分支直接 400 终止，
+// 请求粘在烧透的号上反复 400，池里干净号永远轮不到（2026-10-08 13:36 线上实测）。
+func TestSafetyFlaggedIsUpstreamFailureNotRequestRejected(t *testing.T) {
+	r := NewStreamReader()
+	r.Feed(`data: {"eventType":"failure","data":{"errorType":"INPUT_VALIDATION_ERROR","message":"This message got flagged by our safety checks. Try rephrasing your message or reach out to us at help@postman.com with reference ID c4a5cf48.","userMessage":"That was unexpected :("}}`)
+	if !r.UpstreamFailure {
+		t.Fatal("safety-flagged failure must be treated as an upstream failure (account is healthy)")
+	}
+	if r.RequestRejected {
+		t.Fatal("safety-flagged failure must NOT be RequestRejected (else router 400s instead of failing over)")
+	}
+}
+
 func TestNormalizeArgumentsHandlesObjectAndString(t *testing.T) {
 	raw := json.RawMessage(`{"city":"Tokyo","unit":"c"}`)
 	if got, want := normalizeArguments(raw), `{"city":"Tokyo","unit":"c"}`; got != want {
