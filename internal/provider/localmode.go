@@ -17,7 +17,7 @@ import (
 // 同期已验证可正常执行(4367+3027+1143 次成功)。
 var desktopLocalModeExcludedTools = []string{
 	"executeShellCommand", "readFile", "createFile", "showRichOutput", "sendRequest",
-	"listDirectory", "searchInFiles",
+	"listDirectory", "searchInFiles", "editFile",
 	"listDatasets", "createDataset", "previewDataset", "queryDatasetView", "deleteDataset",
 	"getDatasetSchema", "createDatasetView", "deleteDatasetView", "runQuery", "insertDatasetRows",
 	"modifyDatasetView", "refreshDatasource", "addDatasetSource", "editDatasetSource",
