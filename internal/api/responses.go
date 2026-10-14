@@ -97,6 +97,13 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	// 模型映射：出站用映射后的名字，响应回写仍用客户端原名 clientModel。
 	clientModel := req.Model
 	rr.Model = s.applyModelMapping(rr.Model)
+	// toolsets GPT 模型（gpt-6-sol 等 openai/openai-responses 路由）：原生透传到
+	// 「工具集」Responses 端点（客户端与上游同为 OpenAI Responses 协议，零转换）。
+	// 在 normalizeModel 之前分流——否则 gpt-6.x 会被通用 gpt- 规则错改。
+	if provider.IsToolsetsResponsesModel(rr.Model) {
+		s.handleToolsetsResponses(w, r, raw, rr.Model, rr.Stream)
+		return
+	}
 	req.Model = normalizeModel(rr.Model)
 	if name, ok := provider.UnsupportedToolResult(req.Messages); ok {
 		provider.Trace(r.Context(), "client.tool_loop_blocked", map[string]interface{}{"tool": name, "reason": "unsupported custom tool call"})

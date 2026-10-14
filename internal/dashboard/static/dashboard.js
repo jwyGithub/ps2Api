@@ -1608,13 +1608,22 @@
     document.body.appendChild(ov);
   };
   window.closeAccountTest = function () { var o = document.getElementById('acctTestOverlay'); if (o) o.remove(); };
-  // 测试可选模型（对外名，与后端 PostmanModelMap 对齐）；默认 claude-opus-4-8。
+  // 测试可选模型（对外名）：从 /api/models 动态拉取（与后端 PostmanModels 同源，
+  // 加新模型不用改前端）；拉取失败回退内置精简清单。默认选中 claude-opus-4-8。
+  var acctTestModelsCache = null;
   function acctTestModelOptions() {
-    var models = ['claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-opus-4-5', 'claude-sonnet-4-6', 'claude-sonnet-4-5', 'claude-haiku-4-5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.2', 'auto'];
+    var fallback = ['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5', 'gpt-5.6-sol', 'auto'];
+    var models = acctTestModelsCache || fallback;
     return models.map(function (m) {
       return '<option value="' + m + '"' + (m === 'claude-opus-4-8' ? ' selected' : '') + '>' + esc(m) + '</option>';
     }).join('');
   }
+  fetch('/api/models').then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
+    if (!j || !Array.isArray(j.data)) return;
+    acctTestModelsCache = j.data.map(function (m) { return m.id; }).sort();
+    var sel = document.getElementById('acctTestModel');
+    if (sel) { sel.innerHTML = acctTestModelOptions(); }
+  }).catch(function () {});
   window.runAccountTest = function (id, mode) {
     var status = document.getElementById('acctTestStatus');
     var out = document.getElementById('acctTestResult');

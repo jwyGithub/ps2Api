@@ -2,6 +2,7 @@
 // 端点: POST https://gateway.postman.com/toolsets/v1/messages（Istio 网关，12.30.0 客户端
 // 同款路径；旧路径 <subdomain>.postman.co/_gw/toolsets/... 过 Cloudflare WAF，已弃用）。
 // 实测（2026-09-24）: claude-opus-5 / claude-sonnet-5 可用（Agent Mode /chat 白名单外），
+// 2026-10-14（12.32.2 逆向）: claude-opus-5-5 / claude-sonnet-5-5 上线可用。
 // 请求/响应均为标准 Anthropic Messages 协议，故对 /v1/messages 客户端做原生透传（零转换）。
 // 关键头 x-pstmn-req-service: ai-toolsets（缺它一律 404）。
 // 限频: 连续 ~6 请求后 429 rate_limited / upstream_unavailable，需退避重试。
@@ -28,9 +29,8 @@ import (
 )
 
 const (
-	// ToolsetsAppVersion 对齐桌面端构建号（2026-10-08 升到 12.31.3-ui-261007-0231，本机已更新；
-	// toolsets 浏览器侧构造器已迁移到 SW 缓存 bundle）。
-	ToolsetsAppVersion = "12.31.3-ui-261007-0231"
+	// ToolsetsAppVersion 对齐桌面端构建号（2026-10-14 对齐 12.32.2 客户端版本串，main.log 实证）。
+	ToolsetsAppVersion = "12.32.2-ui-261014-0231"
 	// toolsetsRateLimitRetries 是 429 / upstream_unavailable 的退避重试次数（含首发的总尝试 = 1+retries）。
 	toolsetsRateLimitRetries = 2
 	// ToolsetsMaxTokens 上游对 max_tokens 的硬上限（抓包实测 8096，超限 400 invalid_request_error）。
@@ -52,8 +52,10 @@ var toolsetsAllowedFields = map[string]bool{
 
 // ToolsetsModelMap 对外模型名 → 上游 toolsets 路由名（三段式 <name>/anthropic/anthropic-messages）。
 var ToolsetsModelMap = map[string]string{
-	"claude-opus-5":   "claude-opus-5/anthropic/anthropic-messages",
-	"claude-sonnet-5": "claude-sonnet-5/anthropic/anthropic-messages",
+	"claude-opus-5":      "claude-opus-5/anthropic/anthropic-messages",
+	"claude-sonnet-5":    "claude-sonnet-5/anthropic/anthropic-messages",
+	"claude-opus-5-5":    "claude-opus-5-5/anthropic/anthropic-messages",
+	"claude-sonnet-5-5":  "claude-sonnet-5-5/anthropic/anthropic-messages",
 }
 
 // IsToolsetsModel 报告模型名是否走 toolsets 端点。

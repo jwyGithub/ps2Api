@@ -64,6 +64,15 @@ var PostmanModels = []ModelInfo{
 	pm("gpt-5.2", 128000, 32000, false),
 	pm("auto", 200000, 64000, false),
 	// toolsets 端点专属模型（/chat 白名单外）：走 ToolsetsProvider 原生透传。
-	pm("claude-opus-5", 200000, 128000, true),
-	pm("claude-sonnet-5", 200000, 128000, true),
+	// maxOut 标 8096（ToolsetsMaxTokens 上游硬夹紧值），客户端照此填写避免被静默夹断。
+	pm("claude-opus-5", 200000, 8096, true),
+	pm("claude-sonnet-5", 200000, 8096, true),
+	pm("claude-opus-5-5", 200000, 8096, true),
+	pm("claude-sonnet-5-5", 200000, 8096, true),
+	// toolsets Responses 端点（openai/openai-responses 路由）：走 ToolsetsProvider.ChatResponses
+	// /StreamChatResponses 原生透传（仅 /v1/responses 端点可调）。只挂 /chat 白名单外的
+	// gpt-6 系——gpt-5.x 走既有 /chat 管线（PostmanModelMap）。
+	pm("gpt-6-sol", 400000, 8096, true),
+	pm("gpt-6.1-sol", 400000, 8096, true),
+	pm("gpt-6-luna", 400000, 8096, true),
 }

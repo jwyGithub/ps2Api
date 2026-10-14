@@ -232,7 +232,7 @@ func mapsToInterfaces(in []map[string]interface{}) []interface{} {
 func normalizeModel(m string) string {
 	m = strings.ToLower(strings.TrimSpace(m))
 	// toolsets 专属模型直通（在通用 claude- 规则之前，否则被错改成 claude-sonnet-4-6）。
-	if m == "claude-opus-5" || m == "claude-sonnet-5" {
+	if m == "claude-opus-5" || m == "claude-sonnet-5" || m == "claude-opus-5-5" || m == "claude-sonnet-5-5" {
 		return m
 	}
 	if strings.HasPrefix(m, "claude-sonnet-4-20250514") {

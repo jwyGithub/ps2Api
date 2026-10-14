@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	_ "time/tzdata" // 内嵌时区库：alpine 无 tzdata 也能按 TZ 解析
 	"time"
+	_ "time/tzdata" // 内嵌时区库：alpine 无 tzdata 也能按 TZ 解析
 
 	"ps2api/internal/api"
 	"ps2api/internal/store"
@@ -40,8 +40,9 @@ func main() {
 
 	// API Key 不再来自环境变量：改为面板设置并持久化到 SQLite，auth() 每次从库读取。
 	server := api.New(s)
-	// 每日 23:00（本地时区，见 init）自动刷新额度周期已重置的账号。
-	go server.Router.StartDailyQuotaRefresh(context.Background())
+	// 每日 22:00（本地时区，见 init）检查可续期账号并自动开启 Solo Extension Trial
+	// （400k/7 天，槽位幂等；开通后异步刷新额度落库）。
+	go server.Router.StartDailyTrialExtend(context.Background())
 	// 每日 23:00 清理请求日志，只保留最近 7 天（并在启动时先清一次）。
 	go server.Router.StartDailyLogCleanup(context.Background())
 	// 每日 23:10 清理 FREE 套餐账号（风控实验结论：FREE 号分类器阈值过低，留存弊大于利）。
