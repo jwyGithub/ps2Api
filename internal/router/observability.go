@@ -83,6 +83,13 @@ func (r *Router) persistQuota(acc *store.Account, res *provider.Result) {
 			Plan: acc.Plan, State: usage.UsageState,
 		})
 	}
+	// 周期重置时间（quota_cycle_end）只能从对话流 usage 事件的 usageCycle 拿到——billing ops
+	// 直查不返回周期。这里只更新周期字段（SetQuotaCycle 不碰数值），RefreshDueQuotas 靠它
+	// 在周期重置后复活 exhausted 账号。
+	if usage := res.Usage; usage != nil && usage.UsageCycle != nil {
+		cycle := usage.UsageCycle
+		_ = r.Store.SetQuotaCycle(acc.ID, &cycle.Start, &cycle.End)
+	}
 	if rate := res.RateLimit; rate != nil {
 		_ = r.Store.SetRateLimit(acc.ID, rate.Limit, rate.Remaining, rate.WindowSeconds, rate.ResetAt)
 	}

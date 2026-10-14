@@ -421,6 +421,15 @@ func (s *Store) SetQuotaSnapshot(id int64, q QuotaSnapshot) error {
 	return err
 }
 
+// SetQuotaCycle 只更新额度周期字段（quota_cycle_start/end）。对话流 usage 事件里的
+// usageCycle 是周期字段的唯一来源（billing ops 直查不返回周期），故单独落库，
+// 不经 SetQuotaSnapshot 全字段 UPDATE 以免覆盖 billing 权威值。
+func (s *Store) SetQuotaCycle(id int64, start, end *time.Time) error {
+	_, err := s.db.Exec(`UPDATE accounts SET quota_cycle_start=?,quota_cycle_end=?,updated_at=? WHERE id=?`,
+		start, end, time.Now(), id)
+	return err
+}
+
 func (s *Store) SetRateLimit(id int64, limit, remaining, windowSeconds int, resetAt *time.Time) error {
 	_, err := s.db.Exec(`UPDATE accounts SET rate_limit=?,rate_remaining=?,rate_window_seconds=?,rate_reset_at=?,updated_at=? WHERE id=?`,
 		limit, remaining, windowSeconds, resetAt, time.Now(), id)

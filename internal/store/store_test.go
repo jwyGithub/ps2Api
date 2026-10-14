@@ -17,6 +17,34 @@ func newTestStore(t *testing.T) *Store {
 	return s
 }
 
+// TestSetQuotaCycle 钉住周期字段独立更新：只写 cycle start/end，不碰其它快照数值。
+func TestSetQuotaCycle(t *testing.T) {
+	s := newTestStore(t)
+	acc, err := s.UpsertAccount("cycle@test", "", "{}", "manual", "WEB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 10, 8, 12, 0, 19, 0, time.UTC)
+	end := start.Add(7 * 24 * time.Hour)
+	if err := s.SetQuotaCycle(acc.ID, &start, &end); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetAccount(acc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.QuotaCycleStart == nil || !got.QuotaCycleStart.Equal(start) {
+		t.Fatalf("cycle start = %v, want %v", got.QuotaCycleStart, start)
+	}
+	if got.QuotaCycleEnd == nil || !got.QuotaCycleEnd.Equal(end) {
+		t.Fatalf("cycle end = %v, want %v", got.QuotaCycleEnd, end)
+	}
+	// 未触碰的字段保持零值（billing 权威值不被覆盖）。
+	if got.QuotaLimit != 0 {
+		t.Fatalf("quota limit = %v, want 0", got.QuotaLimit)
+	}
+}
+
 // TestWafSignatureLikeSQL 钉住 SQL 片段生成：每个签名一条 LIKE，含 `<` 的签名
 // 自动补转义形变体（json.Marshal 把 < 存成 <，SQL 子串匹配用 u003c）。
 func TestWafSignatureLikeSQL(t *testing.T) {
