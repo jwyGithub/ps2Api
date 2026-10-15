@@ -111,3 +111,90 @@ func TestResponsesSanitizeSkipsStringInput(t *testing.T) {
 		t.Fatalf("string input must pass through, got error: %s", res.Error)
 	}
 }
+
+// —— namespace/web_search 拍平 + input item 毒字段（id/passthrough）回归 ——
+// 2026-10-15 Codex CLI 真实请求体触发："input" / "tools[7]" does not match any of the
+// allowed types。实测矩阵：namespace、web_search 工具类型上游不认（拍平为 <ns>__<tool>
+// function 后 200）；message item 的 id 与 internal_chat_message_metadata_passthrough
+// 各自单独都能炸掉 input（剥掉后 200，developer role 与 id 之外的字段无碍）。
+
+func TestResponsesFlattensNamespaceTools(t *testing.T) {
+	var gotBody string
+	tp := newToolsetsTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		b := make([]byte, r.ContentLength)
+		_, _ = r.Body.Read(b)
+		gotBody = string(b)
+		w.Write([]byte(`{"id":"resp_3","output":[],"usage":{"output_tokens":1}}`))
+	})
+	raw := `{"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"model":"gpt-6.1-sol",
+		"tools":[
+			{"type":"function","name":"exec_command","description":"run","strict":false,"parameters":{"type":"object"}},
+			{"type":"namespace","name":"multi_agent_v1","description":"sub agents","tools":[
+				{"type":"function","name":"spawn_agent","description":"spawn","strict":false,"parameters":{"type":"object"}}
+			]},
+			{"type":"web_search","external_web_access":false}
+		]}`
+	acc := toolsetsTestAccount(t)
+	res, _ := tp.ChatResponses(t.Context(), acc, []byte(raw), "gpt-6.1-sol", 0)
+	if !res.Success {
+		t.Fatalf("expected success, got: %s", res.Error)
+	}
+	var m map[string]json.RawMessage
+	json.Unmarshal([]byte(gotBody), &m)
+	var tools []struct {
+		Type string `json:"type"`
+		Name string `json:"name"`
+	}
+	json.Unmarshal(m["tools"], &tools)
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 tools (function + flattened namespace), got %d: %s", len(tools), gotBody)
+	}
+	for _, tl := range tools {
+		if tl.Type != "function" {
+			t.Fatalf("namespace/web_search must be flattened away, got type %s", tl.Type)
+		}
+	}
+	if tools[1].Name != "multi_agent_v1__spawn_agent" {
+		t.Fatalf("flattened name = %s, want multi_agent_v1__spawn_agent", tools[1].Name)
+	}
+}
+
+func TestResponsesStripsMessageItemPoisonFields(t *testing.T) {
+	var gotBody string
+	tp := newToolsetsTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		b := make([]byte, r.ContentLength)
+		_, _ = r.Body.Read(b)
+		gotBody = string(b)
+		w.Write([]byte(`{"id":"resp_4","output":[],"usage":{"output_tokens":1}}`))
+	})
+	raw := `{"input":[
+		{"type":"message","id":"msg_01a13e55","role":"developer","content":[{"type":"input_text","text":"sys"}],"internal_chat_message_metadata_passthrough":{"turn_id":"t1"}},
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}
+	],"model":"gpt-6.1-sol","stream":true}`
+	acc := toolsetsTestAccount(t)
+	res, _ := tp.ChatResponses(t.Context(), acc, []byte(raw), "gpt-6.1-sol", 0)
+	if !res.Success {
+		t.Fatalf("expected success, got: %s", res.Error)
+	}
+	var m map[string]json.RawMessage
+	json.Unmarshal([]byte(gotBody), &m)
+	var items []map[string]json.RawMessage
+	json.Unmarshal(m["input"], &items)
+	for i, it := range items {
+		for _, poison := range []string{"id", "internal_chat_message_metadata_passthrough", "status"} {
+			if _, ok := it[poison]; ok {
+				t.Fatalf("input[%d] still carries %s", i, poison)
+			}
+		}
+	}
+	// developer role 保留（实测可过，上游认）
+	var roles []string
+	for _, it := range items {
+		var role string
+		json.Unmarshal(it["role"], &role)
+		roles = append(roles, role)
+	}
+	if roles[0] != "developer" {
+		t.Fatalf("developer role must be preserved, got %v", roles)
+	}
+}

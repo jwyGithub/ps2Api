@@ -71,10 +71,16 @@ func (tp *ToolsetsProvider) responsesEndpoint(tokens *Tokens) string {
 	return "https://" + tp.host(tokens) + "/toolsets/v1/responses"
 }
 
-// sanitizeResponsesInput 把 input[] 里 assistant 消息 content 的 input_text 改写为
-// output_text（上游 Responses 校验器：assistant 只认 output_text，带 input_text 一律
-// 503 upstream_unavailable——内容问题换号无用，必须出站前修）。同时剥掉 item 上的
-// status 等上游不认的字段。无改动返回原 slice 长度不变时尽量保字节原样（返回 nil 表示没改）。
+// sanitizeResponsesInput 把 input[] message item 清洗为上游校验器接受的形状
+// （2026-10-15 gateway 实测矩阵）：
+//   - assistant content 的 input_text → output_text（assistant+input_text 回 503
+//     upstream_unavailable 伪装错误，含空文本）
+//   - message item 的 id 剥掉（客户端回传的 msg_01a13e55-... 服务器 id 上游不认，
+//     "input" does not match any of the allowed types；响应里的 id 上游自己生成）
+//   - internal_chat_message_metadata_passthrough（Codex 私有字段）剥掉，同样毒
+//   - status 字段剥掉（上游 "input[N]" does not match any of the allowed types）
+//
+// developer role 与 content 的 input_text（user/developer）实测可过，不动。
 func sanitizeResponsesInput(raw json.RawMessage) (json.RawMessage, bool, error) {
 	var items []map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &items); err != nil {
@@ -82,6 +88,15 @@ func sanitizeResponsesInput(raw json.RawMessage) (json.RawMessage, bool, error) 
 	}
 	changed := false
 	for _, it := range items {
+		// message item 毒字段：id / internal_chat_message_metadata_passthrough / status。
+		// 上游校验器对 message item 的未知字段极苛刻（G1/D2/F1/F2 矩阵实测：id 与
+		// passthrough 各自单独都能炸掉整个 input）。
+		for _, poison := range []string{"id", "internal_chat_message_metadata_passthrough", "status"} {
+			if _, ok := it[poison]; ok {
+				delete(it, poison)
+				changed = true
+			}
+		}
 		roleRaw, ok := it["role"]
 		if !ok {
 			continue
@@ -119,11 +134,6 @@ func sanitizeResponsesInput(raw json.RawMessage) (json.RawMessage, bool, error) 
 			it["content"], _ = json.Marshal(parts)
 			changed = true
 		}
-		// 顺带剥掉 message item 的 status（上游 "input[N]" does not match any of the allowed types）。
-		if _, ok := it["status"]; ok {
-			delete(it, "status")
-			changed = true
-		}
 	}
 	if !changed {
 		return raw, false, nil
@@ -135,11 +145,87 @@ func sanitizeResponsesInput(raw json.RawMessage) (json.RawMessage, bool, error) 
 	return out, true, nil
 }
 
+// flattenNamespaceTools 把 tools[] 里的 namespace 工具组（Codex multi_agent / MCP 服务
+// 分组形态 {type:"namespace",name,tools:[function...]}）拍平为顶层 function：
+// name = <namespace>__<tool>（与 Codex 平铺 MCP 命名 mcp__server__tool 同风格，上游实测
+// 200 接受）。namespace 类型本身上游不认（"tools[N]" does not match any of the allowed
+// types），直接剥会让子代理/MCP 功能静默消失，拍平零功能损失。
+// web_search 类型同样上游不认（external_web_access=false 本来就禁外网，剥掉无损失）。
+// 返回 (新 tools JSON, 是否有改动, 错误)。
+func flattenNamespaceTools(raw json.RawMessage) (json.RawMessage, bool, error) {
+	var tools []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &tools); err != nil {
+		return raw, false, nil // tools 非数组等异常形态，交上游报错
+	}
+	hasSpecial := false
+	for _, t := range tools {
+		typRaw, ok := t["type"]
+		if !ok {
+			continue
+		}
+		var typ string
+		if json.Unmarshal(typRaw, &typ) == nil && (typ == "namespace" || typ == "web_search") {
+			hasSpecial = true
+			break
+		}
+	}
+	if !hasSpecial {
+		return raw, false, nil
+	}
+	var out []map[string]interface{}
+	for _, t := range tools {
+		typRaw, _ := t["type"]
+		var typ string
+		_ = json.Unmarshal(typRaw, &typ)
+		switch typ {
+		case "namespace":
+			var nsName string
+			_ = json.Unmarshal(t["name"], &nsName)
+			var inner []map[string]json.RawMessage
+			if json.Unmarshal(t["tools"], &inner) == nil {
+				for _, st := range inner {
+					fn := mustLooseMap(st)
+					if fn == nil {
+						continue
+					}
+					var subName string
+					_ = json.Unmarshal(st["name"], &subName)
+					var desc string
+					_ = json.Unmarshal(st["description"], &desc)
+					fn["name"] = nsName + "__" + subName
+					fn["description"] = "[" + nsName + "] " + desc
+					out = append(out, fn)
+				}
+			}
+		case "web_search":
+			// 剥掉：上游无此类型；external_web_access=false 时本就无外网能力。
+		default:
+			out = append(out, mustLooseMap(t))
+		}
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return raw, false, err
+	}
+	return b, true, nil
+}
+
+// mustLooseMap 把 RawMessage map 转成 interface{} map（拍平重组 tools 需要可变形状）。
+func mustLooseMap(m map[string]json.RawMessage) map[string]interface{} {
+	out := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		var val interface{}
+		if err := json.Unmarshal(v, &val); err != nil {
+			return nil
+		}
+		out[k] = val
+	}
+	return out
+}
+
 // rewriteResponsesForUpstream 把客户端 Responses body 适配为上游形状：
-// model → 三段式路由名；max_output_tokens 夹紧；input[] assistant 消息 input_text→output_text
-// （上游对 assistant+input_text 回 503 upstream_unavailable，见 sanitizeResponsesInput）；
-// tools[].name 改写（复用 Anthropic 端映射，两端共享 toolNameMap——同客户端同工具名，
-// 回复回写一致）。
+// model → 三段式路由名；max_output_tokens 夹紧；input[] 清洗（见 sanitizeResponsesInput）；
+// tools[].name 改写 + namespace 工具组拍平（见 flattenNamespaceTools）。
 func (tp *ToolsetsProvider) rewriteResponsesForUpstream(raw []byte, clientModel string) ([]byte, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &m); err != nil {
@@ -162,6 +248,14 @@ func (tp *ToolsetsProvider) rewriteResponsesForUpstream(raw []byte, clientModel 
 		}
 	}
 	if toolsRaw, ok := m["tools"]; ok {
+		// namespace/web_search 工具组先拍平/剥除（上游不认这两种 type，见 flattenNamespaceTools），
+		// 拍平产生的 <ns>__<tool> 名随后走同一套 toolsetsToolNameRe 改写管线。
+		if flat, flChanged, err := flattenNamespaceTools(toolsRaw); err != nil {
+			return nil, err
+		} else if flChanged {
+			toolsRaw = flat
+			m["tools"] = flat
+		}
 		var tools []map[string]json.RawMessage
 		if json.Unmarshal(toolsRaw, &tools) == nil {
 			changed := false
