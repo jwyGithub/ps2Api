@@ -290,3 +290,131 @@ func TestToolsetsUpstreamStripsExtendedFieldsAndSystemRole(t *testing.T) {
 		t.Fatalf("system blocks wrong: %+v", sys)
 	}
 }
+
+func TestToolsetsMessagesStripsPoisonFields(t *testing.T) {
+	// messages 端点对称防御（2026-10-15 M2/M4 实测）：message 级 id /
+	// internal_chat_message_metadata_passthrough / phase 上游逐字段点名 400。
+	var gotBody string
+	tp := newToolsetsTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		b := make([]byte, r.ContentLength)
+		_, _ = r.Body.Read(b)
+		gotBody = string(b)
+		w.Write([]byte(`{"id":"msg_o","type":"message","role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"output_tokens":1}}`))
+	})
+	raw := `{"model":"claude-sonnet-5","max_tokens":50,"stream":true,"messages":[
+		{"role":"user","content":"hi","id":"msg_x","internal_chat_message_metadata_passthrough":{"turn_id":"t"},"phase":"final_answer"},
+		{"role":"assistant","content":[{"type":"text","text":"ok"}]}
+	]}`
+	acc := toolsetsTestAccount(t)
+	res, _ := tp.Chat(t.Context(), acc, []byte(raw), "claude-sonnet-5", 0)
+	if !res.Success {
+		t.Fatalf("expected success, got: %s", res.Error)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(gotBody), &m); err != nil {
+		t.Fatal(err)
+	}
+	var msgs []map[string]json.RawMessage
+	json.Unmarshal(m["messages"], &msgs)
+	for i, msg := range msgs {
+		for _, poison := range []string{"id", "internal_chat_message_metadata_passthrough", "phase"} {
+			if _, ok := msg[poison]; ok {
+				t.Fatalf("messages[%d] still carries %s", i, poison)
+			}
+		}
+	}
+}
+
+func TestToolsetsHeadersMatchDesktopCapture(t *testing.T) {
+	// 2026-10-15 三轮 Charles 抓包（1/2/3.chls，桌面 12.32.2 webview 形态全 200）逐字段对齐：
+	// sec-fetch same-site/cors/empty、sec-ch-ua* 三件套、referer=desktop.postman.com、
+	// UA 尾 Safari/605.1.15、x-app-version 纯版本号、无 Origin、无 x-multi-login-token。
+	tp := NewToolsetsProvider(New())
+	tokens := &Tokens{AccessToken: "tok", WorkspaceID: "23458429"}
+	h := tp.buildHeaders(tokens)
+
+	if got := h.Get("sec-fetch-site"); got != "same-site" {
+		t.Fatalf("sec-fetch-site = %q, want same-site", got)
+	}
+	if got := h.Get("sec-fetch-mode"); got != "cors" {
+		t.Fatalf("sec-fetch-mode = %q, want cors", got)
+	}
+	if got := h.Get("sec-fetch-dest"); got != "empty" {
+		t.Fatalf("sec-fetch-dest = %q, want empty", got)
+	}
+	if got := h.Get("sec-ch-ua"); got == "" || !strings.Contains(got, "Chromium") {
+		t.Fatalf("sec-ch-ua missing: %q", got)
+	}
+	if got := h.Get("referer"); !strings.HasPrefix(got, "https://desktop.postman.com/?desktopVersion=12.32.2&") {
+		t.Fatalf("referer = %q", got)
+	}
+	if got := h.Get("x-app-version"); got != toolsetsDisplayVersion {
+		t.Fatalf("x-app-version = %q, want display version %q (no -ui suffix)", got, toolsetsDisplayVersion)
+	}
+	ua := h.Get("User-Agent")
+	if !strings.HasSuffix(ua, "Safari/605.1.15") {
+		t.Fatalf("UA suffix = %q, want Safari/605.1.15", ua)
+	}
+	if !strings.Contains(ua, "Postman/"+toolsetsDisplayVersion+" ") {
+		t.Fatalf("UA must embed display version, got %q", ua)
+	}
+	if h.Get("Origin") != "" {
+		t.Fatalf("Origin must not be sent (capture proves desktop client omits it)")
+	}
+	if h.Get("x-multi-login-token") != "" {
+		t.Fatalf("x-multi-login-token must not be sent (capture proves desktop client omits it)")
+	}
+	if h.Get("accept-language") != "en-US" {
+		t.Fatalf("accept-language = %q", h.Get("accept-language"))
+	}
+	if h.Get("priority") != "u=1, i" {
+		t.Fatalf("priority = %q", h.Get("priority"))
+	}
+	if got := h.Get("accept-encoding"); got != "gzip, deflate, br, zstd" {
+		t.Fatalf("accept-encoding = %q", got)
+	}
+	if h.Get("x-pstmn-req-service") != "ai-toolsets" {
+		t.Fatal("x-pstmn-req-service missing")
+	}
+	if h.Get("x-entity-team-id") != "23458429" {
+		t.Fatal("x-entity-team-id missing")
+	}
+
+	// WEB（postman.sid）登录态：Cookie 前缀保留，其余头同形态。
+	hw := tp.buildHeaders(&Tokens{PostmanSID: "sid123", WorkspaceID: "w"})
+	if hw.Get("Cookie") != "postman.sid=sid123" {
+		t.Fatalf("web cookie = %q", hw.Get("Cookie"))
+	}
+	if hw.Get("sec-fetch-site") != "same-site" {
+		t.Fatalf("web form must also be webview-shaped, got %q", hw.Get("sec-fetch-site"))
+	}
+}
+
+func TestToolsetsRemembersCookiesFromResponses2(t *testing.T) {
+	// 变体：第一次 429 带 Set-Cookie（jar 记下），重试（attempt=1/2）时请求头即应回带。
+	var cookies []string
+	tp := newToolsetsTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		cookies = append(cookies, r.Header.Get("Cookie"))
+		http.SetCookie(w, &http.Cookie{Name: "__cf_bm", Value: "cfv", Path: "/"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":{"code":"rate_limited","message":"Too many requests."}}`))
+	})
+	raw := `{"model":"claude-sonnet-5","max_tokens":50,"stream":false,"messages":[{"role":"user","content":"hi"}]}`
+	acc := toolsetsTestAccount(t)
+	res, _ := tp.Chat(t.Context(), acc, []byte(raw), "claude-sonnet-5", 0)
+	if res.Success {
+		t.Fatal("all attempts are 429, must not succeed")
+	}
+	if len(cookies) < 2 {
+		t.Fatalf("expected 3 attempts, got %d", len(cookies))
+	}
+	if strings.Contains(cookies[0], "__cf_bm") {
+		t.Fatalf("first attempt cannot have the cookie yet: %q", cookies[0])
+	}
+	for i, c := range cookies[1:] {
+		if !strings.Contains(c, "__cf_bm=cfv") {
+			t.Fatalf("attempt %d must carry remembered __cf_bm cookie, got %q", i+2, c)
+		}
+	}
+}

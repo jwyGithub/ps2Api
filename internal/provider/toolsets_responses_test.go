@@ -181,7 +181,7 @@ func TestResponsesStripsMessageItemPoisonFields(t *testing.T) {
 	var items []map[string]json.RawMessage
 	json.Unmarshal(m["input"], &items)
 	for i, it := range items {
-		for _, poison := range []string{"id", "internal_chat_message_metadata_passthrough", "status"} {
+		for _, poison := range []string{"id", "internal_chat_message_metadata_passthrough", "status", "phase"} {
 			if _, ok := it[poison]; ok {
 				t.Fatalf("input[%d] still carries %s", i, poison)
 			}
@@ -196,5 +196,36 @@ func TestResponsesStripsMessageItemPoisonFields(t *testing.T) {
 	}
 	if roles[0] != "developer" {
 		t.Fatalf("developer role must be preserved, got %v", roles)
+	}
+}
+
+func TestResponsesStripsPhaseField(t *testing.T) {
+	// phase="final_answer"（Codex 标记最终回答）是第四个 message item 毒字段
+	// （2026-10-15 15:29 线上 8309-8311："input[7]" does not match any of the allowed types）。
+	var gotBody string
+	tp := newToolsetsTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		b := make([]byte, r.ContentLength)
+		_, _ = r.Body.Read(b)
+		gotBody = string(b)
+		w.Write([]byte(`{"id":"resp_5","output":[],"usage":{"output_tokens":1}}`))
+	})
+	raw := `{"input":[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+		{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"你好"}],"phase":"final_answer"}
+	],"model":"gpt-6.1-sol","stream":true}`
+	acc := toolsetsTestAccount(t)
+	res, _ := tp.ChatResponses(t.Context(), acc, []byte(raw), "gpt-6.1-sol", 0)
+	if !res.Success {
+		t.Fatalf("expected success, got: %s", res.Error)
+	}
+	var m map[string]json.RawMessage
+	json.Unmarshal([]byte(gotBody), &m)
+	var items []map[string]json.RawMessage
+	json.Unmarshal(m["input"], &items)
+	if _, ok := items[1]["phase"]; ok {
+		t.Fatalf("phase must be stripped, got %s", items[1])
+	}
+	if _, ok := items[1]["id"]; ok {
+		t.Fatalf("id must be stripped, got %s", items[1])
 	}
 }

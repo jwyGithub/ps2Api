@@ -31,6 +31,10 @@ import (
 const (
 	// ToolsetsAppVersion 对齐桌面端构建号（2026-10-14 对齐 12.32.2 客户端版本串，main.log 实证）。
 	ToolsetsAppVersion = "12.32.2-ui-261014-0231"
+	// toolsetsDisplayVersion 是 x-app-version/UA/referer 里的显示版本号。2026-10-15 三轮
+	// Charles 抓包实证：桌面客户端 toolsets 请求发纯版本号 "12.32.2"，不带 -ui 构建后缀
+	// （后缀只在 webVersion 查询参数里出现）。
+	toolsetsDisplayVersion = "12.32.2"
 	// toolsetsRateLimitRetries 是 429 / upstream_unavailable 的退避重试次数（含首发的总尝试 = 1+retries）。
 	toolsetsRateLimitRetries = 2
 	// ToolsetsMaxTokens 上游对 max_tokens 的硬上限（抓包实测 8096，超限 400 invalid_request_error）。
@@ -83,10 +87,20 @@ func NewToolsetsProvider(base *Provider) *ToolsetsProvider {
 	return &ToolsetsProvider{base: base}
 }
 
+// ToolsetsReferer 是桌面客户端 toolsets 请求的 referer（2026-10-15 三轮 Charles 抓包
+// 逐字段对照实证）：webview 页面 desktop.postman.com 发起 same-site fetch 到
+// gateway.postman.com，带完整浏览器指纹与桌面参数。desktopVersion 与 UA 的版本号联动。
+func toolsetsReferer() string {
+	return "https://desktop.postman.com/?desktopVersion=" + toolsetsDisplayVersion +
+		"&webVersion=" + ToolsetsAppVersion + "&region=us"
+}
+
 // buildHeaders 构造 toolsets 出站头。缺 x-pstmn-req-service: ai-toolsets 一律 404。
-// 桌面双 token 与 web cookie（postman.sid）两种登录态都支持（抓包实测 cookie 亦通）。
-// 出站目标是 gateway.postman.com（Istio，无 Cloudflare WAF），头形态按 12.30.0 客户端：
-// 桌面壳请求不带 sec-ch-ua*/sec-fetch-* 浏览器指纹头；web cookie 模拟浏览器跨域 fetch。
+// 形态按 2026-10-15 桌面客户端 12.32.2 三轮 Charles 抓包逐字段对齐（1.chls/2.chls/3.chls
+// 全 200）：webview 浏览器形态 —— sec-fetch-site: same-site + cors/empty、sec-ch-ua* 三件套、
+// referer=desktop.postman.com、UA 尾 Safari/605.1.15、x-app-version 纯版本号（无 -ui 构建后缀）、
+// 不发 Origin、不发 x-multi-login-token（抓包实证均未出现，此前多发是错误模拟）。
+// 双 token 与 web cookie（postman.sid）两种登录态都支持。
 func (tp *ToolsetsProvider) buildHeaders(tokens *Tokens) http.Header {
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
@@ -95,32 +109,24 @@ func (tp *ToolsetsProvider) buildHeaders(tokens *Tokens) http.Header {
 	h.Set("x-pstmn-req-service", "ai-toolsets")
 	if tokens.AccessToken != "" {
 		h.Set("x-access-token", tokens.AccessToken)
-		if tokens.MultiLoginToken != "" {
-			h.Set("x-multi-login-token", tokens.MultiLoginToken)
-		}
 	} else if tokens.PostmanSID != "" {
 		h.Set("Cookie", "postman.sid="+tokens.PostmanSID)
 	}
 	h.Set("x-entity-team-id", tokens.WorkspaceID)
-	h.Set("x-app-version", ToolsetsAppVersion)
-	h.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Postman/"+ToolsetsAppVersion+" Electron/37.10.3 Safari/537.36")
+	h.Set("x-app-version", toolsetsDisplayVersion)
+	h.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Postman/"+toolsetsDisplayVersion+" Electron/37.10.3 Safari/605.1.15")
 	h.Set("sec-ch-ua", `"Not)A;Brand";v="8", "Chromium";v="138"`)
 	h.Set("sec-ch-ua-mobile", "?0")
 	h.Set("sec-ch-ua-platform", `"macOS"`)
-	// 浏览器侧（Electron webview）从 <subdomain>.postman.co 页面跨域 fetch 到 gateway.postman.com：
-	// mode=cors + site=cross-site + Origin=页面子域。桌面壳 native fetch 则是同源无这些头。
-	// 桌面双 token 走桌面壳形态（无 sec-fetch/cors 头）；web cookie 模拟浏览器跨域形态。
-	h.Set("Origin", "https://go.postman.co/")
-	if tokens.AccessToken != "" {
-		h.Del("sec-fetch-dest")
-		h.Del("sec-fetch-mode")
-		h.Del("sec-fetch-site")
-		h.Del("sec-ch-ua")
-		h.Del("sec-ch-ua-mobile")
-		h.Del("sec-ch-ua-platform")
-	} else {
-		h.Set("sec-fetch-site", "cross-site")
-	}
+	h.Set("sec-fetch-dest", "empty")
+	h.Set("sec-fetch-mode", "cors")
+	h.Set("sec-fetch-site", "same-site")
+	h.Set("referer", toolsetsReferer())
+	h.Set("accept-language", "en-US")
+	h.Set("priority", "u=1, i")
+	// accept-encoding 与客户端对齐（含 zstd）；Transport 需要 Go 1.21+ 才协商 zstd，
+	// 低版本自动降级 br/gzip 无害。
+	h.Set("accept-encoding", "gzip, deflate, br, zstd")
 	return h
 }
 
@@ -208,6 +214,17 @@ func (tp *ToolsetsProvider) rewriteModelForUpstream(raw []byte, clientModel stri
 			kept := msgs[:0]
 			changed := false
 			for _, msg := range msgs {
+				// message 级毒字段剥离（2026-10-15 实测 M2/M4）：上游对 message 的未知字段
+				// 逐个点名 400 "messages[N].<field>" is not allowed（与 Responses 端的
+				// "input[N]" does not match 同坑）。客户端升级若回传服务器 id（msg_xxx）或
+				// Codex 私有元数据/phase 标记会整请求被拒——对称剥掉（id 配对走 index，
+				// Anthropic tool_use_id 在 content 块里不受影响）。
+				for _, poison := range []string{"id", "internal_chat_message_metadata_passthrough", "phase"} {
+					if _, ok := msg[poison]; ok {
+						delete(msg, poison)
+						changed = true
+					}
+				}
 				if roleRaw, ok := msg["role"]; ok {
 					var role string
 					if json.Unmarshal(roleRaw, &role) == nil && role == "system" {
@@ -439,6 +456,10 @@ func (tp *ToolsetsProvider) doWithRetry(ctx context.Context, acc *store.Account,
 			lastErr = err
 			continue
 		}
+		// CF cookie 保温（2026-10-15 抓包实证桌面客户端携带 __cf_bm）：toolsets 响应的
+		// Set-Cookie（含 Cloudflare bot 管理 cookie）按账号+出口记入 cookie jar，下次请求
+		// applyCookies 自动回带。429/503 响应也可能 Set-Cookie，同样要记。
+		tp.base.cookies.remember(acc.ID, req.URL, egress, resp.Cookies())
 		// 限频/上游波动：读 body 后关闭，进入退避。
 		if resp.StatusCode == 429 || resp.StatusCode == 503 {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 500))

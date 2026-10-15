@@ -88,10 +88,11 @@ func sanitizeResponsesInput(raw json.RawMessage) (json.RawMessage, bool, error) 
 	}
 	changed := false
 	for _, it := range items {
-		// message item 毒字段：id / internal_chat_message_metadata_passthrough / status。
+		// message item 毒字段：id / internal_chat_message_metadata_passthrough / status / phase。
 		// 上游校验器对 message item 的未知字段极苛刻（G1/D2/F1/F2 矩阵实测：id 与
-		// passthrough 各自单独都能炸掉整个 input）。
-		for _, poison := range []string{"id", "internal_chat_message_metadata_passthrough", "status"} {
+		// passthrough 各自单独都能炸掉整个 input；phase="final_answer" 是 Codex 标记
+		// 最终回答的字段，2026-10-15 15:29 日志 8309-8311 实测同样 400）。
+		for _, poison := range []string{"id", "internal_chat_message_metadata_passthrough", "status", "phase"} {
 			if _, ok := it[poison]; ok {
 				delete(it, poison)
 				changed = true
@@ -337,6 +338,9 @@ func (tp *ToolsetsProvider) doWithRetryResponses(ctx context.Context, acc *store
 			lastErr = err
 			continue
 		}
+		// CF cookie 保温（与 messages 端 doWithRetry 同口径）：toolsets 响应的 Set-Cookie
+		// 按账号+出口记入 cookie jar，下次请求自动回带。
+		tp.base.cookies.remember(acc.ID, req.URL, egress, resp.Cookies())
 		if resp.StatusCode == 429 || resp.StatusCode == 503 {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
 			resp.Body.Close()
