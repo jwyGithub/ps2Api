@@ -16,6 +16,11 @@ import (
 	"ps2api/internal/store"
 )
 
+// stubTransport 是 provider 测试内的轻量 RoundTripper（与 router 包 roundTripFunc 同形）。
+type stubTransport func(*http.Request) (*http.Response, error)
+
+func (f stubTransport) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
 func toolsetsTestAccount(t *testing.T) *store.Account {
 	t.Helper()
 	tokens, _ := json.Marshal(map[string]string{
@@ -416,5 +421,56 @@ func TestToolsetsRemembersCookiesFromResponses2(t *testing.T) {
 		if !strings.Contains(c, "__cf_bm=cfv") {
 			t.Fatalf("attempt %d must carry remembered __cf_bm cookie, got %q", i+2, c)
 		}
+	}
+}
+
+func TestToolsetsRetryRotatesEgress(t *testing.T) {
+	// 限频是出口 IP 维度（2026-10-15 回放实验：同 token 同 body 直连 429、代理 200）。
+	// doWithRetry 每次重试必须递增 egressAttempt 轮换出口——钉死同出口的重试在 IP 被限时
+	// 只会再吃 429。此测试用多代理 stub 验证：3 次尝试打到 3 个不同出口。
+	tp := NewToolsetsProvider(New())
+	// 挂 3 个假代理出口：每个出口一个 httptest 服务器
+	servers := make([]*httptest.Server, 3)
+	seen := make([]string, 3)
+	for i := range servers {
+		servers[i] = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// 从 host 区分出口
+			seen[i] = r.Host
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":{"code":"rate_limited"}}`))
+		}))
+	}
+	t.Cleanup(func() {
+		for _, s := range servers {
+			s.Close()
+		}
+	})
+	// stub 代理池：selectFor 按 egressAttempt 返回不同 client
+	attempts := []int{}
+	tp.base.proxies = newProxyPool()
+	tp.base.proxies.list = func() []string {
+		return []string{"http://egress-a:1", "http://egress-b:2", "http://egress-c:3"}
+	}
+	// 直接给 clientFor 塞固定 client（绕过真实拨号）：记录每次请求命中的出口序号
+	tp.base.proxies.mu.Lock()
+	tp.base.proxies.clients = map[string]*http.Client{}
+	for i, u := range []string{"http://egress-a:1", "http://egress-b:2", "http://egress-c:3"} {
+		idx := i
+		tp.base.proxies.clients[u] = &http.Client{Transport: stubTransport(func(req *http.Request) (*http.Response, error) {
+			attempts = append(attempts, idx)
+			return &http.Response{StatusCode: 429, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"rate_limited"}}`)), Header: http.Header{}, Request: req}, nil
+		})}
+	}
+	tp.base.proxies.mu.Unlock()
+
+	raw := `{"model":"claude-sonnet-5","max_tokens":50,"stream":false,"messages":[{"role":"user","content":"hi"}]}`
+	acc := toolsetsTestAccount(t)
+	res, _ := tp.Chat(t.Context(), acc, []byte(raw), "claude-sonnet-5", 0)
+	_ = res
+	if len(attempts) != 3 {
+		t.Fatalf("expected 3 attempts, got %d", len(attempts))
+	}
+	if attempts[0] == attempts[1] || attempts[1] == attempts[2] {
+		t.Fatalf("retry attempts must rotate egress, got %v", attempts)
 	}
 }

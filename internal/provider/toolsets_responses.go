@@ -308,11 +308,8 @@ func (tp *ToolsetsProvider) newUpstreamResponsesRequest(ctx context.Context, tok
 }
 
 // doWithRetryResponses 与 doWithRetry 同逻辑，仅请求目标不同（Responses 端点）。
+// 限频是出口 IP 维度（2026-10-15 回放实验实证）：每次重试递增 egressAttempt 轮换出口。
 func (tp *ToolsetsProvider) doWithRetryResponses(ctx context.Context, acc *store.Account, tokens *Tokens, body []byte, egressAttempt int) (*http.Response, error, string) {
-	client, egress, viaProxy := tp.base.proxies.selectFor(acc.ID, egressAttempt)
-	if !viaProxy {
-		client, egress = tp.base.Client, "direct"
-	}
 	var lastErr error
 	var lastResp *http.Response
 	for attempt := 0; attempt <= toolsetsRateLimitRetries; attempt++ {
@@ -322,8 +319,12 @@ func (tp *ToolsetsProvider) doWithRetryResponses(ctx context.Context, acc *store
 			select {
 			case <-time.After(delay):
 			case <-ctx.Done():
-				return nil, ctx.Err(), egress
+				return nil, ctx.Err(), ""
 			}
+		}
+		client, egress, viaProxy := tp.base.proxies.selectFor(acc.ID, egressAttempt+attempt)
+		if !viaProxy {
+			client, egress = tp.base.Client, "direct"
 		}
 		req, err := tp.newUpstreamResponsesRequest(ctx, tokens, body)
 		if err != nil {
@@ -359,10 +360,8 @@ func (tp *ToolsetsProvider) doWithRetryResponses(ctx context.Context, acc *store
 	if lastErr == nil {
 		lastErr = fmt.Errorf("%w after retries", errToolsetsBusy)
 	}
-	return nil, lastErr, egress
+	return nil, lastErr, ""
 }
-
-// classifyResponsesErrorJSON 解析 Responses 端的 error JSON 并分类。是 error 返回 true。
 // upstream_unavailable 大多是内容问题伪装（assistant+input_text → 503 + 该 code，2026-10-15
 // 实测矩阵）：内容错误换号无用，归 RequestRejected 跳过限频重试；只有明确 rate_limited
 // 才算限频。

@@ -425,11 +425,9 @@ func (tp *ToolsetsProvider) newUpstreamRequest(ctx context.Context, tokens *Toke
 
 // doWithRetry 发出请求并做限频退避。429 / upstream_unavailable 时重试 toolsetsRateLimitRetries 次。
 // 首个成功响应（或非重试类错误）直接返回。
+// 限频是出口 IP 维度（2026-10-15 回放实验实证：同 token 同 body 直连 429、走代理 200），
+// 故每次重试递增 egressAttempt 轮换出口——钉死同出口的重试在 IP 被限时只会再吃 429。
 func (tp *ToolsetsProvider) doWithRetry(ctx context.Context, acc *store.Account, tokens *Tokens, body []byte, egressAttempt int) (*http.Response, error, string) {
-	client, egress, viaProxy := tp.base.proxies.selectFor(acc.ID, egressAttempt)
-	if !viaProxy {
-		client, egress = tp.base.Client, "direct"
-	}
 	var lastErr error
 	var lastResp *http.Response
 	for attempt := 0; attempt <= toolsetsRateLimitRetries; attempt++ {
@@ -439,8 +437,13 @@ func (tp *ToolsetsProvider) doWithRetry(ctx context.Context, acc *store.Account,
 			select {
 			case <-time.After(delay):
 			case <-ctx.Done():
-				return nil, ctx.Err(), egress
+				return nil, ctx.Err(), ""
 			}
+		}
+		// 每次尝试（含首发）独立选出口：egressAttempt + attempt 递增 → IP 池内轮换。
+		client, egress, viaProxy := tp.base.proxies.selectFor(acc.ID, egressAttempt+attempt)
+		if !viaProxy {
+			client, egress = tp.base.Client, "direct"
 		}
 		req, err := tp.newUpstreamRequest(ctx, tokens, body)
 		if err != nil {
@@ -474,7 +477,7 @@ func (tp *ToolsetsProvider) doWithRetry(ctx context.Context, acc *store.Account,
 	if lastErr == nil {
 		lastErr = fmt.Errorf("%w after retries", errToolsetsBusy)
 	}
-	return nil, lastErr, egress
+	return nil, lastErr, ""
 }
 
 func lastRespStatus(r *http.Response) int {
