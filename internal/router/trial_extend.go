@@ -15,6 +15,7 @@ package router
 import (
 	"context"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -153,7 +154,7 @@ func baseTrialActive(st *provider.TrialStatus) bool {
 //   - trial=skipped-base-active：base 仍在活跃期，ext 开了会被截断 → 跳过（前端提示等 base 到期）
 //   - trial=skipped-used：ext 槽位已用过（activationCount>0 / trialStart 非空 / !isAllowed）→ 无续期可开
 //   - trial=started：已开通 ext，稍后额度刷新（异步延迟拉取落库）
-//   - trial=none：额度未耗尽，无需判断
+//   - trial=none：额度未耗尽且非 sync-free-*（无需判断）；禁用号也归此类
 //   - trial=error：槽位查询/开通失败（上游波动），不影响额度探测结果本身
 func (r *Router) RefreshAccountQuotaWithTrial(ctx context.Context, id int64) (ProbeResult, string, error) {
 	pr, err := r.ProbeAccountQuota(ctx, id)
@@ -164,9 +165,18 @@ func (r *Router) RefreshAccountQuotaWithTrial(ctx context.Context, id int64) (Pr
 	if err != nil || acc == nil {
 		return pr, "none", err
 	}
-	// 额度未耗尽（或账号被禁用——禁用号不自动开 trial）不判断试用。
+	// 额度未耗尽时，plan 为 sync-free-* 的账号也要判断试用（2026-10-15 线上实测
+	// pmdd197ed91a）：base trial 到期回落 sync-free 后周期重置会补 100 额度，
+	// 号不再耗尽 → 按旧口径永远走 none，ext 续期断掉。sync-free-* 两种来源
+	// （注册产线纯免费号 / base 到期回落号）开 ext 都是收益（400k/7天），且与
+	// 每晚 ExtendTrialsDue（不看耗尽、base 不活跃就开）口径一致，这里对齐。
+	// 禁用号不自动开 trial（恢复是人工动作）。
 	exhausted := acc.Status == "exhausted" || (pr.OK && pr.Limit > 0 && pr.Remaining <= 0)
-	if !exhausted || !acc.Enabled {
+	fallbackFree := strings.HasPrefix(acc.Plan, "sync-free-")
+	if !exhausted && !fallbackFree {
+		return pr, "none", nil
+	}
+	if !acc.Enabled {
 		return pr, "none", nil
 	}
 	// 额度耗尽 → 查 ext 槽位与 base 活跃期，按 ExtendTrialsDue 同口径决定是否开通。

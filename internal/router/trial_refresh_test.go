@@ -78,6 +78,18 @@ func billingOpsJSON(usage float64) string {
 
 const exhaustedQuotaJSON = `{"operations":[{"name":"ai_millicredits","limit":400000,"usage":400000,"overage":0,"spillage":0,"plan":"solo","is_pooled":"0"}]}`
 
+// billingOpsJSONPlan 同 billingOpsJSON 但可指定 plan（fetchBillingOpsResult 会把该值
+// SetPlan 落库，刷新按钮的 sync-free 回落判定读的就是探测后的落库值）。
+func billingOpsJSONPlan(plan string, usage float64) string {
+	b, _ := json.Marshal(map[string]interface{}{
+		"operations": []map[string]interface{}{{
+			"name": "ai_millicredits", "limit": 100000, "usage": usage,
+			"overage": 0, "spillage": 0, "plan": plan, "is_pooled": "0",
+		}},
+	})
+	return string(b)
+}
+
 func TestRefreshWithTrialNotExhausted(t *testing.T) {
 	// 额度充足 → 不判断试用（action=none），不向上游发 trial 查询。
 	queried := false
@@ -136,6 +148,28 @@ func TestRefreshWithTrialBaseActiveSkips(t *testing.T) {
 	}
 	if action != "skipped-base-active" {
 		t.Fatalf("base active must skip ext (would be truncated), got %s", action)
+	}
+}
+
+func TestRefreshWithTrialFallbackFreeStartsExtension(t *testing.T) {
+	// base trial 到期回落 sync-free 后周期重置补了 100 额度（不耗尽）：
+	// 仍要评估 ext 续期并开通（2026-10-15 线上 pmdd197ed91a 实测回归）。
+	r := stubTrialTransport(t, func(path string) string {
+		if strings.Contains(path, "extension_trial") {
+			return trialStatusJSON(true, 0, "", "")
+		}
+		// base 槽位：base trial 已到期（end 在过去）
+		return trialStatusJSON(true, 1, "2026-10-08 10:01:07", "2026-10-15 10:01:07")
+	}, billingOpsJSONPlan("sync-free-202603", 2000)) // 探测返回 sync-free 的 100/100（非耗尽）
+	acc, _ := r.Store.GetAccount(1)
+	_ = r.Store.SetPlan(acc.ID, "sync-free-202603")
+	_ = r.Store.SetAccountStatus(acc.ID, "active", "")
+	_, action, err := r.RefreshAccountQuotaWithTrial(t.Context(), acc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action != "started" {
+		t.Fatalf("fallback sync-free account must start ext trial, got %s", action)
 	}
 }
 
