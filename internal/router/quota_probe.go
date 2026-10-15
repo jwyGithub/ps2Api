@@ -99,11 +99,20 @@ func (r *Router) ProbeAccountsByIDs(ctx context.Context, ids []int64) []ProbeRes
 // 两条路径产出的 Result.Usage 形状一致（persistQuota/applyUsageState 无感）。
 func (r *Router) probeAccountQuota(ctx context.Context, acc *store.Account, withDetail bool) ProbeResult {
 	pr := ProbeResult{AccountID: acc.ID, Email: acc.Email}
-	var res *provider.Result
+	// 周期字段补采（2026-10-15）：quotaCycleStart/End 唯一来源是对话流 usage 事件的 usageCycle
+	// （billing ops 直查不返回周期）。新导入账号周期为 NULL——RefreshDueQuotas 对 NULL 周期的
+	// 账号永久跳过（quota_reset.go:28），exhausted 后永远等不到周期重置复活。故直查成功但周期
+	// 缺失时，补一次最小烧 token 探测（ProbeQuota，query="ping"）把 usageCycle 落库。
+	// 探测本身走 persistQuota → SetQuotaCycle 写周期；数值仍以 billing 权威值为准不受影响。
+	// 失败（session 死/上游波动）不影响直查结果本身，下次刷新再补。
+	// 周期判定在直查成功、重读账号之后做（入参 acc 可能是过期内存快照，以库值为准）。
 	if r.fetchBillingOpsResult(ctx, acc, pr) {
 		// 直查成功：重读账号再判定（写库后 acc 内存字段已过期，applyUsageState/Detail 需要新值）。
 		if fresh, err := r.Store.GetAccount(acc.ID); err == nil && fresh != nil {
 			acc = fresh
+		}
+		if acc.QuotaCycleStart == nil || acc.QuotaCycleEnd == nil {
+			r.backfillQuotaCycle(ctx, acc)
 		}
 		pr.OK = true
 		pr.Limit = acc.QuotaLimit
@@ -114,7 +123,7 @@ func (r *Router) probeAccountQuota(ctx context.Context, acc *store.Account, with
 		}
 		return pr
 	}
-	res = r.Provider.ProbeQuota(ctx, acc)
+	res := r.Provider.ProbeQuota(ctx, acc)
 	// 限流头可能在没有 usage 对象的响应中返回，也要先落库。
 	if res != nil {
 		r.persistQuota(acc, res)
@@ -144,6 +153,24 @@ func (r *Router) probeAccountQuota(ctx context.Context, acc *store.Account, with
 		pr.Detail = res
 	}
 	return pr
+}
+
+// backfillQuotaCycle 周期字段补采：账号 quotaCycleStart/End 为 NULL 时发一次最小烧 token
+// 探测（ProbeQuota，query="ping"），探测响应里的 usage 事件携带 usageCycle，经 persistQuota
+// → SetQuotaCycle 落库。只写周期字段，额度数值仍以 billing 直查权威值为准。
+// 探测失败（session 失效/上游波动/无 usage 事件）静默返回——周期留待下次刷新或首次对话补上，
+// 不影响探测调用方的额度结果。acc 必须是探测后的新鲜快照（含最新 QuotaCycle 字段）。
+func (r *Router) backfillQuotaCycle(ctx context.Context, acc *store.Account) {
+	res := r.Provider.ProbeQuota(ctx, acc)
+	if res == nil || res.Usage == nil || res.Usage.UsageCycle == nil {
+		return // 拿不到 usageCycle（探测失败/上游没带周期），静默，下次再补
+	}
+	cycle := res.Usage.UsageCycle
+	if err := r.Store.SetQuotaCycle(acc.ID, &cycle.Start, &cycle.End); err != nil {
+		return
+	}
+	// 周期已落库：同步内存快照，让调用方后续读 acc 时看到新值。
+	acc.QuotaCycleStart, acc.QuotaCycleEnd = &cycle.Start, &cycle.End
 }
 
 // ProbeAccountQuota 对指定 ID 的单个账号发起一次额度探测并写库，
