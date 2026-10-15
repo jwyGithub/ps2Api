@@ -130,13 +130,13 @@
   }
   function todayCalls(accountId) { return (state.analytics.todayCalls || {})[accountId] || 0; }
 
-  window.showToast = function (message) {
+  window.showToast = function (message, durationMs) {
     var el = document.getElementById('toast');
     if (!el) { window.alert(message); return; }
     el.textContent = message;
     el.classList.add('show');
     clearTimeout(window.__postmanToastTimer);
-    window.__postmanToastTimer = setTimeout(function () { el.classList.remove('show'); }, 2500);
+    window.__postmanToastTimer = setTimeout(function () { el.classList.remove('show'); }, durationMs || 2500);
   };
   window.closeDrawer = function () {
     var drawer = document.getElementById('drawer');
@@ -1730,10 +1730,21 @@
     var acc = state.accounts.filter(function (a) { return a.id === id; })[0];
     var who = acc ? acc.email : ('#' + id);
     toast('正在刷新 ' + who + ' 的额度…');
-    api('/api/accounts/' + id + '/refresh-quota', { method: 'POST', body: '{}' }).then(function (d) {
+    // withTrial=1：额度耗尽时自动判断 extension trial 能否续期（能开就开，省去等晚上重置）
+    api('/api/accounts/' + id + '/refresh-quota?withTrial=1', { method: 'POST', body: '{}' }).then(function (d) {
       var r = d.result || {};
       var msg = (d.ok ? who + ' 额度已刷新：剩余 ' + fmt(r.remaining) + ' / ' + fmt(r.limit) : who + ' 刷新失败：' + (r.error || '未获取到额度'));
-      loadAll().then(function () { toast(msg); });
+      var ta = d.trialAction;
+      if (ta === 'started') {
+        msg = who + ' 额度已耗尽，已自动开通 7 天试用续期，额度约 2 分钟后生效（再次刷新可见）。';
+      } else if (ta === 'skipped-base-active') {
+        msg = who + ' 额度已耗尽，但当前基础试用未到期（现在续期会被截断），待基础试用到期后再点刷新即可自动续期。';
+      } else if (ta === 'skipped-used') {
+        msg = who + ' 额度已耗尽，且试用续期已用过（无续期可开），等今日额度周期重置（晚间）恢复。';
+      } else if (ta === 'error') {
+        msg += '（试用续期判断失败：上游波动，可稍后重试）';
+      }
+      loadAll().then(function () { toast(msg, ta === 'started' ? 8000 : 5000); });
     }).catch(function (e) { toast('刷新失败：' + e.message); });
   };
   window.exportQuota = function () {

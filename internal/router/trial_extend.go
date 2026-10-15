@@ -141,3 +141,77 @@ func baseTrialActive(st *provider.TrialStatus) bool {
 	}
 	return end.After(time.Now().Add(time.Hour))
 }
+
+// RefreshAccountQuotaWithTrial 是面板「账号卡片 → 刷新」按钮的组合动作：
+// 先按常规探测额度写库（与 ProbeAccountQuota 同路径），随后仅当探测结论为「额度耗尽」时，
+// 自动判断该账号能否继续开 extension trial（exhausted 的号重置时间在晚上，白天点了也白点——
+// 若 ext 槽位可开则立即续上，省去干等）。返回探测结果 + 试用动作说明。
+//
+// 判定与开通复用 extendTrialForAccount 的安全顺序（base 活跃期内不开 ext，避免截断），
+// 但本方法面向单次手动点击，需要把「为什么没开」的类别带回给前端提示，故单独实现判定，
+// 开通动作仍复用同一结论口径：
+//   - trial=skipped-base-active：base 仍在活跃期，ext 开了会被截断 → 跳过（前端提示等 base 到期）
+//   - trial=skipped-used：ext 槽位已用过（activationCount>0 / trialStart 非空 / !isAllowed）→ 无续期可开
+//   - trial=started：已开通 ext，稍后额度刷新（异步延迟拉取落库）
+//   - trial=none：额度未耗尽，无需判断
+//   - trial=error：槽位查询/开通失败（上游波动），不影响额度探测结果本身
+func (r *Router) RefreshAccountQuotaWithTrial(ctx context.Context, id int64) (ProbeResult, string, error) {
+	pr, err := r.ProbeAccountQuota(ctx, id)
+	if err != nil {
+		return pr, "none", err
+	}
+	acc, err := r.Store.GetAccount(id)
+	if err != nil || acc == nil {
+		return pr, "none", err
+	}
+	// 额度未耗尽（或账号被禁用——禁用号不自动开 trial）不判断试用。
+	exhausted := acc.Status == "exhausted" || (pr.OK && pr.Limit > 0 && pr.Remaining <= 0)
+	if !exhausted || !acc.Enabled {
+		return pr, "none", nil
+	}
+	// 额度耗尽 → 查 ext 槽位与 base 活跃期，按 ExtendTrialsDue 同口径决定是否开通。
+	action, started := r.evaluateTrialForExhausted(ctx, acc)
+	_ = started // started 时异步额度刷新已在 evaluate 内启动；action 供前端提示
+	return pr, action, nil
+}
+
+// evaluateTrialForExhausted 对耗尽账号执行 ext trial 判定与开通。
+// 返回动作类别（skipped-base-active / skipped-used / started / error）与是否开通。
+// 开通成功后与 extendTrialForAccount 相同：异步延迟 2 分钟刷新额度落库（传播延迟）。
+func (r *Router) evaluateTrialForExhausted(ctx context.Context, acc *store.Account) (string, bool) {
+	st, err := r.Provider.FetchTrialStatus(ctx, acc, clientSoloExtensionTrial, 0)
+	if err != nil {
+		log.Printf("[trial-refresh] 账号 %d(%s) 查询 ext 槽位失败: %v", acc.ID, acc.Email, err)
+		return "error", false
+	}
+	if !st.IsAllowed || st.TrialActivationCount > 0 || st.TrialStart != "" {
+		return "skipped-used", false
+	}
+	base, err := r.Provider.FetchTrialStatus(ctx, acc, clientSoloBaseTrial, 0)
+	if err != nil {
+		log.Printf("[trial-refresh] 账号 %d(%s) 查询 base 槽位失败: %v", acc.ID, acc.Email, err)
+		return "error", false
+	}
+	if base.TrialStart != "" && baseTrialActive(base) {
+		// base 仍在活跃期：现在开 ext 只会拿到 base 原到期日（被截断）。跳过，等 base 到期。
+		return "skipped-base-active", false
+	}
+	res, err := r.Provider.StartTrial(ctx, acc, clientSoloExtensionTrial, 0)
+	if err != nil {
+		log.Printf("[trial-refresh] 账号 %d(%s) 开通 extension trial 失败: %v", acc.ID, acc.Email, err)
+		return "error", false
+	}
+	log.Printf("[trial-refresh] 账号 %d(%s) 手动刷新触发 extension trial 开通, 截止 %s", acc.ID, acc.Email, res.TrialPeriodEnd)
+	// 开通后额度传播有 1-2 分钟延迟，延迟拉取一次落库（失败静默，晚点定期探测会兜底）。
+	go func(id int64) {
+		time.Sleep(2 * time.Minute)
+		fresh, err := r.Store.GetAccount(id)
+		if err != nil || fresh == nil || !fresh.Enabled {
+			return
+		}
+		if !r.fetchBillingOpsResult(context.Background(), fresh, ProbeResult{AccountID: fresh.ID, Email: fresh.Email}) {
+			log.Printf("[trial-refresh] 账号 %d(%s) 开通后刷新额度失败（静默）", id, fresh.Email)
+		}
+	}(acc.ID)
+	return "started", true
+}

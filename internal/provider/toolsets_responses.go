@@ -39,6 +39,18 @@ var ToolsetsResponsesModelMap = map[string]string{
 	"gpt-6-luna":  "gpt-6-luna/openai/openai-responses",
 }
 
+// responsesAllowedItemContentTypes 是 Responses input item content 各 role 的合法类型
+// （2026-10-15 gateway 实测）：user 只认 input_text/input_image；assistant 只认
+// output_text —— assistant 带任何 input_text（含空文本）整请求 503 upstream_unavailable
+// （不是 400！），是「发布后 503/429」的元凶。B4/B8/B12 用例矩阵验证。
+var responsesAssistantContentTextTypes = map[string]string{
+	"input_text": "output_text", // 客户端（自研 CLI 等）把历史 assistant 回复按 input_text 回传
+}
+
+// responsesInvalidItemError 是上游对「assistant 消息带 input_text」的伪装错误体：
+// 503 + upstream_unavailable。按内容错误处理（换号无用），不进限频重试。
+const responsesInvalidItemHint = "upstream_unavailable"
+
 // IsToolsetsResponsesModel 判断模型名是否走 Responses 端点透传。
 func IsToolsetsResponsesModel(model string) bool {
 	_, ok := ToolsetsResponsesModelMap[strings.ToLower(strings.TrimSpace(model))]
@@ -59,9 +71,75 @@ func (tp *ToolsetsProvider) responsesEndpoint(tokens *Tokens) string {
 	return "https://" + tp.host(tokens) + "/toolsets/v1/responses"
 }
 
+// sanitizeResponsesInput 把 input[] 里 assistant 消息 content 的 input_text 改写为
+// output_text（上游 Responses 校验器：assistant 只认 output_text，带 input_text 一律
+// 503 upstream_unavailable——内容问题换号无用，必须出站前修）。同时剥掉 item 上的
+// status 等上游不认的字段。无改动返回原 slice 长度不变时尽量保字节原样（返回 nil 表示没改）。
+func sanitizeResponsesInput(raw json.RawMessage) (json.RawMessage, bool, error) {
+	var items []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return raw, false, nil // input 是字符串等非 item 形态，无需处理
+	}
+	changed := false
+	for _, it := range items {
+		roleRaw, ok := it["role"]
+		if !ok {
+			continue
+		}
+		var role string
+		if json.Unmarshal(roleRaw, &role) != nil || role != "assistant" {
+			continue
+		}
+		cRaw, ok := it["content"]
+		if !ok {
+			continue
+		}
+		// content 为纯字符串：easy-input 形态，实测可过，不动。
+		var parts []map[string]json.RawMessage
+		if json.Unmarshal(cRaw, &parts) != nil {
+			continue
+		}
+		itemChanged := false
+		for i, p := range parts {
+			typRaw, ok := p["type"]
+			if !ok {
+				continue
+			}
+			var typ string
+			if json.Unmarshal(typRaw, &typ) != nil {
+				continue
+			}
+			if mapped, hit := responsesAssistantContentTextTypes[typ]; hit {
+				p["type"], _ = json.Marshal(mapped)
+				parts[i] = p
+				itemChanged = true
+			}
+		}
+		if itemChanged {
+			it["content"], _ = json.Marshal(parts)
+			changed = true
+		}
+		// 顺带剥掉 message item 的 status（上游 "input[N]" does not match any of the allowed types）。
+		if _, ok := it["status"]; ok {
+			delete(it, "status")
+			changed = true
+		}
+	}
+	if !changed {
+		return raw, false, nil
+	}
+	out, err := json.Marshal(items)
+	if err != nil {
+		return raw, false, err
+	}
+	return out, true, nil
+}
+
 // rewriteResponsesForUpstream 把客户端 Responses body 适配为上游形状：
-// model → 三段式路由名；max_output_tokens 夹紧；tools[].name 改写（复用 Anthropic 端
-// 映射，两端共享 toolNameMap——同客户端同工具名，回复回写一致）。
+// model → 三段式路由名；max_output_tokens 夹紧；input[] assistant 消息 input_text→output_text
+// （上游对 assistant+input_text 回 503 upstream_unavailable，见 sanitizeResponsesInput）；
+// tools[].name 改写（复用 Anthropic 端映射，两端共享 toolNameMap——同客户端同工具名，
+// 回复回写一致）。
 func (tp *ToolsetsProvider) rewriteResponsesForUpstream(raw []byte, clientModel string) ([]byte, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &m); err != nil {
@@ -107,6 +185,15 @@ func (tp *ToolsetsProvider) rewriteResponsesForUpstream(raw []byte, clientModel 
 			if changed {
 				m["tools"], _ = json.Marshal(tools)
 			}
+		}
+	}
+	if inputRaw, ok := m["input"]; ok {
+		fixed, changed, err := sanitizeResponsesInput(inputRaw)
+		if err != nil {
+			return nil, err
+		}
+		if changed {
+			m["input"] = fixed
 		}
 	}
 	return json.Marshal(m)
@@ -159,6 +246,12 @@ func (tp *ToolsetsProvider) doWithRetryResponses(ctx context.Context, acc *store
 		if resp.StatusCode == 429 || resp.StatusCode == 503 {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
 			resp.Body.Close()
+			// 503 + upstream_unavailable 多为内容问题伪装（assistant+input_text，换号无用）——
+			// 不进退避重试，直接把响应交上层按 body 分类（RequestRejected）。
+			if resp.StatusCode == 503 && strings.Contains(string(b), responsesInvalidItemHint) {
+				synth := &http.Response{StatusCode: resp.StatusCode, Body: io.NopCloser(strings.NewReader(string(b))), Request: req}
+				return synth, nil, egress
+			}
 			lastResp = resp
 			lastErr = fmt.Errorf("%w (%d): %s", errToolsetsBusy, resp.StatusCode, strings.TrimSpace(string(b)))
 			continue
@@ -172,6 +265,9 @@ func (tp *ToolsetsProvider) doWithRetryResponses(ctx context.Context, acc *store
 }
 
 // classifyResponsesErrorJSON 解析 Responses 端的 error JSON 并分类。是 error 返回 true。
+// upstream_unavailable 大多是内容问题伪装（assistant+input_text → 503 + 该 code，2026-10-15
+// 实测矩阵）：内容错误换号无用，归 RequestRejected 跳过限频重试；只有明确 rate_limited
+// 才算限频。
 func (tp *ToolsetsProvider) classifyResponsesErrorJSON(res *Result, b []byte) bool {
 	var probe struct {
 		Error *struct {
@@ -187,6 +283,8 @@ func (tp *ToolsetsProvider) classifyResponsesErrorJSON(res *Result, b []byte) bo
 	case "rate_limited":
 		res.RateLimited = true
 	case "not_found_error":
+		res.RequestRejected = true
+	case "upstream_unavailable":
 		res.RequestRejected = true
 	}
 	return true
@@ -230,6 +328,11 @@ func (tp *ToolsetsProvider) ChatResponses(ctx context.Context, acc *store.Accoun
 	}
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2000))
+		// 上游把内容问题伪装成 503+upstream_unavailable（assistant+input_text）——先按
+		// error JSON 分类（RequestRejected 跳过换号重试），兜不住再走通用错误路径。
+		if tp.classifyResponsesErrorJSON(res, b) {
+			return res, nil
+		}
 		res.Error = fmt.Sprintf("toolsets responses error (%d): %s", resp.StatusCode, strings.TrimSpace(string(b)))
 		if resp.StatusCode < 500 {
 			res.RequestRejected = true
@@ -335,6 +438,11 @@ func (tp *ToolsetsProvider) StreamChatResponses(ctx context.Context, acc *store.
 	}
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2000))
+		// 同 ChatResponses：503+upstream_unavailable 先按 error JSON 分类（内容问题 →
+		// RequestRejected），避免当限频换号把号池打挂。
+		if tp.classifyResponsesErrorJSON(res, b) {
+			return res
+		}
 		res.Error = fmt.Sprintf("toolsets responses error (%d): %s", resp.StatusCode, strings.TrimSpace(string(b)))
 		if resp.StatusCode < 500 {
 			res.RequestRejected = true

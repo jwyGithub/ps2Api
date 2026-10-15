@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ps2api/internal/provider"
+	"ps2api/internal/router"
 )
 
 func (s *Server) accounts(w http.ResponseWriter, r *http.Request) {
@@ -243,7 +244,18 @@ func (s *Server) refreshAccountQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	pr, err := s.Router.ProbeAccountQuota(r.Context(), id)
+	// withTrial=1 时（面板账号卡片「刷新」按钮）：额度探测后若发现耗尽，自动判断
+	// extension trial 能否续期——能开就开，省去等晚上重置；base 活跃期等情形返回
+	// trialAction 供前端提示。缺省不带该参数走纯探测（额度管理页批量刷新不受影响）。
+	withTrial := r.URL.Query().Get("withTrial") == "1"
+	var pr router.ProbeResult
+	var trialAction string
+	var err error
+	if withTrial {
+		pr, trialAction, err = s.Router.RefreshAccountQuotaWithTrial(r.Context(), id)
+	} else {
+		pr, err = s.Router.ProbeAccountQuota(r.Context(), id)
+	}
 	if err != nil {
 		jsonError(w, 404, err.Error(), "not_found")
 		return
@@ -254,7 +266,7 @@ func (s *Server) refreshAccountQuota(w http.ResponseWriter, r *http.Request) {
 	} else {
 		failed = 1
 	}
-	jsonWrite(w, 200, map[string]interface{}{"ok": ok, "failed": failed, "result": pr})
+	jsonWrite(w, 200, map[string]interface{}{"ok": ok, "failed": failed, "result": pr, "trialAction": trialAction})
 }
 
 // testAccount 对单个账号发起一次连通性测试并完整留档（请求地址/头/体 + 响应状态/头/体）。
