@@ -129,6 +129,15 @@ func TestRefreshWithTrialStartsExtension(t *testing.T) {
 	if action != "started" {
 		t.Fatalf("exhausted + fresh ext slot must start trial, got %s", action)
 	}
+	// 开通后周期须同步落库（trial_period_end → quotaCycleEnd），否则旧过期周期
+	// 会被 RefreshDueQuotas 每晚重复扫到。stub 返回 trial_period_end=2026-10-22 07:00:00。
+	acc2, _ := r.Store.GetAccount(1)
+	if acc2.QuotaCycleEnd == nil || acc2.QuotaCycleEnd.Format(trialTimeLayout) != "2026-10-22 07:00:00" {
+		t.Fatalf("cycle end must sync from trial_period_end, got %v", acc2.QuotaCycleEnd)
+	}
+	if acc2.QuotaCycleStart == nil {
+		t.Fatal("cycle start must be set (now)")
+	}
 }
 
 func TestRefreshWithTrialBaseActiveSkips(t *testing.T) {

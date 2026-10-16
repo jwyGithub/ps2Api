@@ -111,7 +111,7 @@ func (r *Router) probeAccountQuota(ctx context.Context, acc *store.Account, with
 		if fresh, err := r.Store.GetAccount(acc.ID); err == nil && fresh != nil {
 			acc = fresh
 		}
-		if acc.QuotaCycleStart == nil || acc.QuotaCycleEnd == nil {
+		if acc.QuotaCycleStart == nil || acc.QuotaCycleEnd == nil || !acc.QuotaCycleEnd.After(time.Now()) {
 			r.backfillQuotaCycle(ctx, acc)
 		}
 		pr.OK = true
@@ -155,9 +155,11 @@ func (r *Router) probeAccountQuota(ctx context.Context, acc *store.Account, with
 	return pr
 }
 
-// backfillQuotaCycle 周期字段补采：账号 quotaCycleStart/End 为 NULL 时发一次最小烧 token
-// 探测（ProbeQuota，query="ping"），探测响应里的 usage 事件携带 usageCycle，经 persistQuota
-// → SetQuotaCycle 落库。只写周期字段，额度数值仍以 billing 直查权威值为准。
+// backfillQuotaCycle 周期字段补采：账号 quotaCycleStart/End 为 NULL 或已过期时发一次最小
+// 烧 token 探测（ProbeQuota，query="ping"），探测响应里的 usage 事件携带 usageCycle，经
+// persistQuota → SetQuotaCycle 落库。只写周期字段，额度数值仍以 billing 直查权威值为准。
+// 过期也补采（2026-10-16）：存量号在开通落库（trial_extend）之前周期即过期时，billing 直查
+// 永远不会更新周期——过期旧值会让 RefreshDueQuotas 每晚重复扫到且面板重置时间显示错误。
 // 探测失败（session 失效/上游波动/无 usage 事件）静默返回——周期留待下次刷新或首次对话补上，
 // 不影响探测调用方的额度结果。acc 必须是探测后的新鲜快照（含最新 QuotaCycle 字段）。
 func (r *Router) backfillQuotaCycle(ctx context.Context, acc *store.Account) {

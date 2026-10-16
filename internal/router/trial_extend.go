@@ -96,6 +96,10 @@ func (r *Router) extendTrialForAccount(ctx context.Context, acc *store.Account) 
 	}
 	// 已激活过（activationCount>0 或有 trialStart）或明确不允许 → 跳过。
 	if !st.IsAllowed || st.TrialActivationCount > 0 || st.TrialStart != "" {
+		// 存量周期纠正（2026-10-16）：ext 已激活且未过期的号，库里周期可能还是 base
+		// 时代的旧值（开通后落库是 10-16 才加的）。每晚本来就查了槽位（零消耗），
+		// 顺手把活跃 trial 的周期同步落库。
+		r.syncCycleFromTrial(acc.ID, st.TrialStart, st.TrialEnd)
 		return false, true
 	}
 	// 实测坑（2026-10-14，pmdd197ed91a）：base trial 未到期时开 ext，ext 只给到 base
@@ -107,6 +111,8 @@ func (r *Router) extendTrialForAccount(ctx context.Context, acc *store.Account) 
 		return false, false
 	}
 	if base.TrialStart != "" && baseTrialActive(base) {
+		// base 活跃期内真实周期就是 base trial 周期——同样顺手纠正存量旧值。
+		r.syncCycleFromTrial(acc.ID, base.TrialStart, base.TrialEnd)
 		return false, true
 	}
 	res, err := r.Provider.StartTrial(ctx, acc, clientSoloExtensionTrial, 0)
@@ -115,6 +121,7 @@ func (r *Router) extendTrialForAccount(ctx context.Context, acc *store.Account) 
 		return false, false
 	}
 	log.Printf("[trial-extend] 账号 %d(%s) extension trial 已开通, 截止 %s", acc.ID, acc.Email, res.TrialPeriodEnd)
+	r.syncCycleFromTrialEnd(acc.ID, res.TrialPeriodEnd)
 	// 异步刷新额度：开通后额度传播有 1-2 分钟延迟，延迟拉取一次落库（失败不影响，次日照常兜底）。
 	go func(id int64) {
 		time.Sleep(2 * time.Minute)
@@ -131,6 +138,50 @@ func (r *Router) extendTrialForAccount(ctx context.Context, acc *store.Account) 
 
 // trialTimeLayout 是 trial 接口返回的时间格式（"2006-01-02 15:04:05"，时区为服务端本地）。
 const trialTimeLayout = "2006-01-02 15:04:05"
+
+// syncCycleFromTrialEnd 开通 trial 后把新周期落库：end 取 trial_period_end，start 取当前
+// 时间。quotaCycleStart/End 驱动 RefreshDueQuotas 的周期重置扫描与面板展示——不更新的话
+// 库里还是 base trial 的旧周期（已过期），每晚被当作「周期已重置」重复探测，且面板显示的
+// 重置时间错误。零额外请求：POST /api/trials 响应自带 trial_period_end。
+func (r *Router) syncCycleFromTrialEnd(id int64, trialPeriodEnd string) {
+	end, err := time.ParseInLocation(trialTimeLayout, trialPeriodEnd, time.Local)
+	if err != nil || end.IsZero() {
+		log.Printf("[trial-extend] 账号 %d trial_period_end 解析失败（周期留待下次刷新补正）: %s", id, trialPeriodEnd)
+		return
+	}
+	now := time.Now()
+	if err := r.Store.SetQuotaCycle(id, &now, &end); err != nil {
+		log.Printf("[trial-extend] 账号 %d 周期落库失败: %v", id, err)
+	}
+}
+
+// syncCycleFromTrial 存量周期纠正：用已查到的 trial 槽位时间（start/end，零消耗查询的
+// 副产物）同步账号周期。仅在 trial 仍在活跃期内（end 在未来）且库中周期与 trial 周期
+// 不一致时写库——避免每晚重复写同样的值，也让已过期 trial 的号走 backfill 路径补采
+// usageCycle（其真实周期是额度周期而非 trial 周期）。
+func (r *Router) syncCycleFromTrial(id int64, trialStart, trialEnd string) {
+	if trialStart == "" || trialEnd == "" {
+		return
+	}
+	start, err1 := time.ParseInLocation(trialTimeLayout, trialStart, time.Local)
+	end, err2 := time.ParseInLocation(trialTimeLayout, trialEnd, time.Local)
+	if err1 != nil || err2 != nil || !end.After(time.Now()) {
+		return
+	}
+	acc, err := r.Store.GetAccount(id)
+	if err != nil || acc == nil {
+		return
+	}
+	if acc.QuotaCycleStart != nil && acc.QuotaCycleEnd != nil &&
+		acc.QuotaCycleStart.Equal(start) && acc.QuotaCycleEnd.Equal(end) {
+		return // 库里已是 trial 周期，无需写
+	}
+	if err := r.Store.SetQuotaCycle(id, &start, &end); err != nil {
+		log.Printf("[trial-extend] 账号 %d 周期纠正失败: %v", id, err)
+		return
+	}
+	log.Printf("[trial-extend] 账号 %d 周期已按活跃 trial 纠正: %s → %s", id, trialStart, trialEnd)
+}
 
 // baseTrialActive 判断 base trial 是否仍在活跃期：trialEnd 能解析且在未来（留 1h 缓冲，
 // 临期 1 小时内也不开 ext，避免边界上截断 base）。解析失败视为不活跃（开 ext 由服务端
@@ -212,6 +263,7 @@ func (r *Router) evaluateTrialForExhausted(ctx context.Context, acc *store.Accou
 		return "error", false
 	}
 	log.Printf("[trial-refresh] 账号 %d(%s) 手动刷新触发 extension trial 开通, 截止 %s", acc.ID, acc.Email, res.TrialPeriodEnd)
+	r.syncCycleFromTrialEnd(acc.ID, res.TrialPeriodEnd)
 	// 开通后额度传播有 1-2 分钟延迟，延迟拉取一次落库（失败静默，晚点定期探测会兜底）。
 	go func(id int64) {
 		time.Sleep(2 * time.Minute)

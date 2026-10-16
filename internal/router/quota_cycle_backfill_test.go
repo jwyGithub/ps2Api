@@ -79,14 +79,36 @@ func TestNoBackfillWhenCyclePresent(t *testing.T) {
 	probes := &atomic.Int64{}
 	r := stubCycleTransport(t, probes)
 	acc, _ := r.Store.GetAccount(1)
-	// 模拟周期已有值（此前聊天已写入）
-	start, end := *parseT(t, "2026-10-01T00:00:00Z"), *parseT(t, "2026-10-08T00:00:00Z")
+	// 模拟周期已有值且未过期（此前聊天已写入）——只有未过期的周期才跳过补采。
+	// （2026-10-16 起过期周期也要补采，见 TestBackfillCycleWhenExpired。）
+	start := time.Now().Add(-2 * 24 * time.Hour)
+	end := time.Now().Add(5 * 24 * time.Hour)
 	if err := r.Store.SetQuotaCycle(acc.ID, &start, &end); err != nil {
 		t.Fatal(err)
 	}
 	r.probeAccountQuota(t.Context(), acc, false)
 	if probes.Load() != 0 {
-		t.Fatalf("cycle present: no chat probe expected, got %d", probes.Load())
+		t.Fatalf("future cycle present: no chat probe expected, got %d", probes.Load())
+	}
+}
+
+func TestBackfillCycleWhenExpired(t *testing.T) {
+	// 过期周期同样补采：billing 直查永不更新周期，过期旧值若不纠正会被
+	// RefreshDueQuotas 每晚重复扫到且面板重置时间显示错误（2026-10-16）。
+	probes := &atomic.Int64{}
+	r := stubCycleTransport(t, probes)
+	acc, _ := r.Store.GetAccount(1)
+	start, end := *parseT(t, "2026-10-01T00:00:00Z"), *parseT(t, "2026-10-08T00:00:00Z")
+	if err := r.Store.SetQuotaCycle(acc.ID, &start, &end); err != nil {
+		t.Fatal(err)
+	}
+	r.probeAccountQuota(t.Context(), acc, false)
+	if probes.Load() != 1 {
+		t.Fatalf("expired cycle: exactly one chat probe expected, got %d", probes.Load())
+	}
+	fresh, _ := r.Store.GetAccount(acc.ID)
+	if fresh.QuotaCycleEnd == nil || fresh.QuotaCycleEnd.Before(time.Now()) {
+		t.Fatalf("expired cycle must be replaced by fresh usageCycle, got %v", fresh.QuotaCycleEnd)
 	}
 }
 
