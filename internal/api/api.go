@@ -139,6 +139,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 //     未设 ADMIN_PASSWORD 时无登录可言，维持开放引导态（兼容既有无密码部署）。
 //   - /v1/* 对外模型协议：只认 Bearer/x-api-key（resolveKey），不认浏览器会话。
 //     api_keys 表为空时全开放（首次创建密钥前的引导态）。
+//
 // opsReadOnlyAPI 报告路径是否属于「排查类」端点：只读分析 + SQL 只读查询 + WAF
 // 在线探针。任何有效 API Key 可调（与 /api/accounts* 同款先例：先 Key 后会话），
 // 供外部排查代理自助取数（见 docs/superpowers/specs/2026-09-17-ops-api-key-design.md）。

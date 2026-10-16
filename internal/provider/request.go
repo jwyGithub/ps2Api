@@ -78,7 +78,7 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 	if tokens.IsDesktop() {
 		input["product"] = "workspace_localmode_v12"
 		body = map[string]interface{}{
-			"input":    input,
+			"input": input,
 			// 12.31.3 客户端按 OS platform() 映射：win32→DESKTOP_WINDOWS/darwin→DESKTOP_MACOS/linux→DESKTOP_LINUX
 			"platform": "DESKTOP_WINDOWS",
 			"clientTools": map[string]interface{}{

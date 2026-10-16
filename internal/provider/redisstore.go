@@ -43,9 +43,9 @@ func (r *redisConversationStore) Mode() string {
 }
 
 const (
-	defaultConvTTL   = 72 * time.Hour        // 会话映射默认存活时长，可用 REDIS_CONV_TTL 覆盖
-	defaultOpTimeout = 3 * time.Second        // 单次 Redis 操作超时上限，防止 Redis 卡顿拖垮请求
-	scanCount        = 256                     // SCAN 每批游标步长
+	defaultConvTTL   = 72 * time.Hour  // 会话映射默认存活时长，可用 REDIS_CONV_TTL 覆盖
+	defaultOpTimeout = 3 * time.Second // 单次 Redis 操作超时上限，防止 Redis 卡顿拖垮请求
+	scanCount        = 256             // SCAN 每批游标步长
 	defaultKeyPrefix = "ps2api"
 )
 

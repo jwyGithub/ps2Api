@@ -11,7 +11,7 @@ const (
 	// Desktop* 取自真实 macOS 桌面端「本地模式(localmode)」会话抓包(native/openai/openai.chls)——
 	// 只有 localmode workspace 才暴露 executeShellCommand/readFile/listDirectory/searchInFiles
 	// 这些本地工具。hash 是工具目录快照的指纹,随桌面构建版本漂移;换新版桌面端重新抓包对齐即可。
-	DesktopAppVersion  = "12.31.3-ui-261007-0231"
+	DesktopAppVersion = "12.31.3-ui-261007-0231"
 	// 2026-10-08 从 12.31.3 客户端 bundle（ai-chat-*.min.js，Code Cache 提取）逆向对齐：
 	// hash 按平台（win32/darwin/linux）区分，win32 与 darwin 同值：
 	//   clienttools: clienttools-workspace_localmode_v12-desktop-<plat>-12.31.3-ui-261007-0231-cd9d36e0ac49
@@ -157,6 +157,73 @@ type ChatRequest struct {
 	ContextSeed bool `json:"-"`
 }
 
+// ResultKind 是失败请求的首要分类（互斥）。KindNone 为零值表示「未分类」；
+// 成功由 Result.Success 单独标记，不占用 Kind。原先散落在 Result 上的 6 个互斥
+// 错误 bool（RateLimited/QuotaExhausted/AuthFailed/RequestRejected/UpstreamFailure/
+// GatewayBlocked）统一收敛到此枚举，router 据此做单路分支决策。
+type ResultKind int
+
+const (
+	// KindNone 未分类（默认零值）。
+	KindNone ResultKind = iota
+	// KindRateLimited 限频/上游波动：router 退避重试（排除该号换下一个）。
+	KindRateLimited
+	// KindQuotaExhausted 账号配额耗尽。
+	KindQuotaExhausted
+	// KindAuthFailed 会话失效属账号自身问题：标账号离线、换下一个号。
+	KindAuthFailed
+	// KindRequestRejected 失败源于请求内容本身(坏请求、工具名冲突等),而非账号健康。
+	// 换账号重试无用且会污染整个号池,router 应直接返回、不标记账号。
+	KindRequestRejected
+	// KindUpstreamFailure 失败发生在上游调模型那一段(Postman → Bedrock,如 Policy Error),
+	// 既非请求内容问题也非账号故障。router 不把账号标记为 error(避免一次上游抖动踢出号),
+	// 且续聊时钉住原账号重试而不换号。详见 provider.isUpstreamModelFailure。
+	KindUpstreamFailure
+	// KindGatewayBlocked 请求被上游网关(Cloudflare)安全/风控拦截(WAF、Bot 评分、速率限制、
+	// Managed Challenge)。有状态、按评分/速率判定的瞬时 403,router 应退避重试(不标记账号、不换号),
+	// 而不是像 KindRequestRejected 那样直接返回。
+	KindGatewayBlocked
+)
+
+// String 便于在 Trace/日志里读出分类名。
+func (k ResultKind) String() string {
+	switch k {
+	case KindRateLimited:
+		return "rate_limited"
+	case KindQuotaExhausted:
+		return "quota_exhausted"
+	case KindAuthFailed:
+		return "auth_failed"
+	case KindRequestRejected:
+		return "request_rejected"
+	case KindUpstreamFailure:
+		return "upstream_failure"
+	case KindGatewayBlocked:
+		return "gateway_blocked"
+	default:
+		return "none"
+	}
+}
+
+// Diagnostics 汇集仅供排查/日志的字段，不参与重试或路由决策。
+type Diagnostics struct {
+	// RejectionDetail 是请求被网关拒绝时采集的排查上下文(如 Cloudflare Ray ID、
+	// 出站 body 大小、响应体片段)。WAF 探测会抽取其中的 Ray ID 供证据表展示,
+	// 方便定位 403 的具体诱因。
+	RejectionDetail string
+	// RequestBytes 是本次出站请求体(JSON marshal 后)的字节数。写入 request_logs 后
+	// 用于按体积分桶统计 403 发生率,判断 body 大小与 Cloudflare 403 是否相关。
+	RequestBytes int
+	// UpstreamBody 是本次实际转发给上游 Postman 的请求体(JSON 原文)，供请求日志排查。
+	UpstreamBody string
+	// UpstreamHeaders 是本次实际发送给上游 Postman 的请求头(JSON 原文)，供请求日志排查。
+	UpstreamHeaders string
+	// UpstreamURL 是本次出站的上游 URL。
+	UpstreamURL string
+	// Egress 是本次出站选用的出口标识（代理标签或 direct）。
+	Egress string
+}
+
 type Result struct {
 	Success          bool
 	Content          string
@@ -171,45 +238,20 @@ type Result struct {
 	// Credits 是本次请求实际消耗的 AI credits：由上游 usage 的累计用量(usage.Usage) 相对
 	// 账号请求前的快照(Account.QuotaUsed)的增量得到，取代 token 估算作为计量/计费口径。
 	// PromptTokens/CompletionTokens 仅继续用于对外 OpenAI/Anthropic 响应的 usage 字段(客户端兼容)。
-	Credits        float64
-	Error          string
-	RateLimited    bool
-	QuotaExhausted bool
-	AuthFailed     bool
-	// RequestRejected 表示失败源于请求内容本身(坏请求、工具名冲突等),而非账号健康。
-	// 这种错误换账号重试无用、且会污染整个号池,router 应直接返回、不标记账号。
-	RequestRejected bool
+	Credits float64
+	Error   string
+	// Kind 是失败请求的首要分类（互斥）。成功时为 KindNone，由 Success 标记成功。
+	Kind ResultKind
 	// SessionCorrupt 表示本次失败意味着 Postman 服务端会话已损坏、不可再复用：要么上游把
 	// TOOL_RESPONSE 消费后回了空流(没有 [DONE]/正文/工具/failure),要么再交同一组 tool call
 	// 收到 TOOL_CALL_NOT_FOUND。provider 据此定点失效该会话映射(见 InvalidateConversation),
 	// 使下一轮续聊因 LookupConversation 落空而降级为 conversationId=null 的 USER_QUERY 重建,
-	// 不再反复把已消费的 toolCallId 交回死会话。
+	// 不再反复把已消费的 toolCallId 交回死会话。它与 Kind 正交：随 KindRequestRejected
+	// (TOOL_CALL_NOT_FOUND) 或 KindUpstreamFailure(空流) 一同置位。
 	SessionCorrupt bool
-	// UpstreamFailure 表示失败发生在上游自己调模型那一段(Postman → Bedrock,如 Policy Error),
-	// 既非请求内容问题也非账号故障。router 据此:不把账号标记为 error(避免一次上游抖动就把号
-	// 踢出 ActiveAccounts),且续聊时钉住原账号重试而不换号(换号会丢服务端会话上下文)。
-	// 详见 provider.isUpstreamModelFailure。
-	UpstreamFailure bool
-	// GatewayBlocked 表示请求被上游网关(Cloudflare)的安全/风控拦截(WAF、Bot 评分、
-	// 速率限制、Managed Challenge)。这类 403 是有状态、按评分/速率判定的瞬时拦截,而非
-	// 请求内容错误也非账号损坏——退避后重试常能成功。router 应退避重试(不标记账号、不换号),
-	// 而不是像 RequestRejected 那样直接返回。
-	GatewayBlocked bool
-	// RejectionDetail 是请求被网关拒绝时采集的排查上下文(如 Cloudflare Ray ID、
-	// 出站 body 大小、响应体片段)。WAF 探测会抽取其中的 Ray ID 供证据表展示,
-	// 方便定位 403 的具体诱因。仅诊断用,不影响重试/路由决策。
-	RejectionDetail string
-	// RequestBytes 是本次出站请求体(JSON marshal 后)的字节数。写入 request_logs 后
-	// 用于按体积分桶统计 403 发生率,判断 body 大小与 Cloudflare 403 是否相关。
-	RequestBytes int
-	// UpstreamBody 是本次实际转发给上游 Postman 的请求体(JSON 原文)，供请求日志排查。
-	UpstreamBody string
-	// UpstreamHeaders 是本次实际发送给上游 Postman 的请求头(JSON 原文)，供请求日志排查。
-	UpstreamHeaders string
-	// UpstreamURL 是本次出站的上游 URL。
-	UpstreamURL string
-	// Egress 是本次出站选用的出口标识（代理标签或 direct）。
-	Egress string
+	// Diag 汇集仅诊断/日志用的字段(Ray ID、出站体积、上游 body/头/URL、出口)，
+	// 不参与重试或路由决策。
+	Diag Diagnostics
 	// Cached 表示本结果来自网关响应缓存回放（零上游调用）。HTTP 层据此在 usage 里
 	// 报告 cached_tokens（OpenAI prompt_tokens_details / Anthropic cache_read_input_tokens）。
 	Cached bool

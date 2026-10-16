@@ -345,21 +345,21 @@ func classify(res *Result) (label, ray string) {
 		label = "nil"
 	case res.Success:
 		label = "success"
-	case res.GatewayBlocked:
+	case res.Kind == KindGatewayBlocked:
 		label = "GATEWAY_BLOCKED(403)"
-	case res.RequestRejected:
+	case res.Kind == KindRequestRejected:
 		label = "request_rejected"
-	case res.QuotaExhausted:
+	case res.Kind == KindQuotaExhausted:
 		label = "quota_exhausted"
-	case res.RateLimited:
+	case res.Kind == KindRateLimited:
 		label = "rate_limited"
-	case res.AuthFailed:
+	case res.Kind == KindAuthFailed:
 		label = "auth_failed"
 	default:
 		label = "other_error"
 	}
-	if res != nil && res.RejectionDetail != "" {
-		for _, ln := range strings.Split(res.RejectionDetail, "\n") {
+	if res != nil && res.Diag.RejectionDetail != "" {
+		for _, ln := range strings.Split(res.Diag.RejectionDetail, "\n") {
 			if strings.HasPrefix(strings.TrimSpace(ln), "Cf-Ray:") {
 				ray = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(ln), "Cf-Ray:"))
 			}
@@ -462,17 +462,17 @@ func TestRepro403ContentSignature(t *testing.T) {
 
 			label, ray := classify(res)
 			a.counts[label]++
-			if res.RequestBytes < a.bytesMin {
-				a.bytesMin = res.RequestBytes
+			if res.Diag.RequestBytes < a.bytesMin {
+				a.bytesMin = res.Diag.RequestBytes
 			}
-			if res.RequestBytes > a.bytesMax {
-				a.bytesMax = res.RequestBytes
+			if res.Diag.RequestBytes > a.bytesMax {
+				a.bytesMax = res.Diag.RequestBytes
 			}
 			if ray != "" {
 				a.rays = append(a.rays, ray)
 			}
 			t.Logf("[%s #%d] -> %-20s bytes=%d ray=%s err=%.80s",
-				v.name, i+1, label, res.RequestBytes, ray, oneLine(res.Error))
+				v.name, i+1, label, res.Diag.RequestBytes, ray, oneLine(res.Error))
 
 			time.Sleep(1500 * time.Millisecond) // 轻微退避，避免把结果污染成纯速率限制
 		}

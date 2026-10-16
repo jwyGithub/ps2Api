@@ -11,15 +11,15 @@ import (
 
 // ProbeResult 单个账号额度探测的结果。
 type ProbeResult struct {
-	AccountID int64             `json:"accountId"`
-	Email     string            `json:"email"`
-	OK        bool              `json:"ok"`
-	Limit     float64           `json:"limit"`
-	Remaining float64           `json:"remaining"`
-	Error     string            `json:"error,omitempty"`
+	AccountID int64   `json:"accountId"`
+	Email     string  `json:"email"`
+	OK        bool    `json:"ok"`
+	Limit     float64 `json:"limit"`
+	Remaining float64 `json:"remaining"`
+	Error     string  `json:"error,omitempty"`
 	// Detail 仅在单账号探测时填充，携带上游返回的完整原始结果（内容、usage、错误状态等），
 	// 供「刷新额度」按钮的调用方展示完整响应现场；批量探测时为 nil 以节省内存。
-	Detail    *provider.Result  `json:"detail,omitempty"`
+	Detail *provider.Result `json:"detail,omitempty"`
 }
 
 // probeConcurrency 额度探测的并发数。
@@ -129,7 +129,7 @@ func (r *Router) probeAccountQuota(ctx context.Context, acc *store.Account, with
 		r.persistQuota(acc, res)
 		// session 失效（guest_unusable / Jwt is missing / 401 等）：账号离线并停用，
 		// 刷新额度页能直观看到哪些号 session 已死。探测通过时 applyUsageState 会自动恢复。
-		if res.AuthFailed {
+		if res.Kind == provider.KindAuthFailed {
 			r.markOffline(acc, "session 失效: "+res.Error)
 		}
 		// 依据网关返回的 usageState 同步账号健康：BLOCKED 视为账号异常（error）并停用，
@@ -138,7 +138,7 @@ func (r *Router) probeAccountQuota(ctx context.Context, acc *store.Account, with
 	}
 	if res != nil && res.Usage != nil && res.Usage.Limit > 0 {
 		remaining := res.Usage.Limit - res.Usage.Usage - res.Usage.Overage
-		if remaining < 0 || res.QuotaExhausted {
+		if remaining < 0 || res.Kind == provider.KindQuotaExhausted {
 			remaining = 0
 		}
 		pr.OK = true
@@ -263,7 +263,7 @@ func resQuotaExhausted(res *provider.Result) bool {
 		return false
 	}
 	remaining := res.Usage.Limit - res.Usage.Usage - res.Usage.Overage
-	return remaining <= 0 || res.QuotaExhausted
+	return remaining <= 0 || res.Kind == provider.KindQuotaExhausted
 }
 
 // fetchBillingOpsResult 用 billing operations 零消耗直查额度并落库。

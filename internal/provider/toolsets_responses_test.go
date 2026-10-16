@@ -74,10 +74,10 @@ func TestResponsesUpstreamUnavailableClassifiedRejected(t *testing.T) {
 	if res.Success {
 		t.Fatalf("must not be success")
 	}
-	if !res.RequestRejected {
-		t.Fatalf("503+upstream_unavailable must classify RequestRejected (content error), got RateLimited=%v err=%s", res.RateLimited, res.Error)
+	if res.Kind != KindRequestRejected {
+		t.Fatalf("503+upstream_unavailable must classify RequestRejected (content error), got RateLimited=%v err=%s", res.Kind == KindRateLimited, res.Error)
 	}
-	if res.RateLimited {
+	if res.Kind == KindRateLimited {
 		t.Fatalf("must not classify RateLimited — that drives pointless account rotation")
 	}
 	if !strings.Contains(res.Error, "upstream_unavailable") {
@@ -94,8 +94,8 @@ func TestResponsesRateLimitedStillClassifiedRateLimited(t *testing.T) {
 	raw := `{"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"model":"gpt-6.1-sol","stream":true}`
 	acc := toolsetsTestAccount(t)
 	res := tp.StreamChatResponses(t.Context(), acc, []byte(raw), "gpt-6.1-sol", 0, func(string, []byte) error { return nil })
-	if !res.RateLimited || res.RequestRejected {
-		t.Fatalf("429 must stay RateLimited, got RL=%v RR=%v", res.RateLimited, res.RequestRejected)
+	if res.Kind != KindRateLimited || res.Kind == KindRequestRejected {
+		t.Fatalf("429 must stay RateLimited, got RL=%v RR=%v", res.Kind == KindRateLimited, res.Kind == KindRequestRejected)
 	}
 }
 

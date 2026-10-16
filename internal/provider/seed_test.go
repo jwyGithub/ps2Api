@@ -327,7 +327,7 @@ func TestStreamInternalSeedAccountFailurePropagates(t *testing.T) {
 	msgs = append(msgs, mustMsg(t, "user", "最新"))
 
 	res := p.Chat(context.Background(), acc, &ChatRequest{Model: "claude-opus-4-8", Messages: msgs})
-	if res.QuotaExhausted != true {
+	if res.Kind != KindQuotaExhausted {
 		t.Fatalf("seed quota exhaustion must propagate to main res, got %+v", res)
 	}
 	if len(bodies) != 1 {

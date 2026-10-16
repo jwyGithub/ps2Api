@@ -377,34 +377,34 @@ func (tp *ToolsetsProvider) ChatResponses(ctx context.Context, acc *store.Accoun
 	tokens, err := tp.base.GetTokens(acc)
 	if err != nil {
 		res.Error = err.Error()
-		res.AuthFailed = true
+		res.Kind = KindAuthFailed
 		return res, nil
 	}
 	body, err := tp.rewriteResponsesForUpstream(raw, clientModel)
 	if err != nil {
 		res.Error = err.Error()
-		res.RequestRejected = true
+		res.Kind = KindRequestRejected
 		return res, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, RequestTimeout)
 	defer cancel()
 	resp, err, egress := tp.doWithRetryResponses(ctx, acc, tokens, body, egressAttempt)
-	res.Egress = egress
-	res.RequestBytes = len(body)
-	res.UpstreamBody = string(body)
-	res.UpstreamURL = tp.responsesEndpoint(tokens)
+	res.Diag.Egress = egress
+	res.Diag.RequestBytes = len(body)
+	res.Diag.UpstreamBody = string(body)
+	res.Diag.UpstreamURL = tp.responsesEndpoint(tokens)
 	if err != nil {
 		res.Error = err.Error()
 		if errors.Is(err, errToolsetsBusy) {
-			res.RateLimited = true
+			res.Kind = KindRateLimited
 		}
 		return res, nil
 	}
 	defer resp.Body.Close()
-	res.UpstreamHeaders = headersToJSON(resp.Request.Header)
+	res.Diag.UpstreamHeaders = headersToJSON(resp.Request.Header)
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
 		res.Error = fmt.Sprintf("toolsets responses auth failed (%d)", resp.StatusCode)
-		res.AuthFailed = true
+		res.Kind = KindAuthFailed
 		return res, nil
 	}
 	if resp.StatusCode >= 400 {
@@ -416,7 +416,7 @@ func (tp *ToolsetsProvider) ChatResponses(ctx context.Context, acc *store.Accoun
 		}
 		res.Error = fmt.Sprintf("toolsets responses error (%d): %s", resp.StatusCode, strings.TrimSpace(string(b)))
 		if resp.StatusCode < 500 {
-			res.RequestRejected = true
+			res.Kind = KindRequestRejected
 		}
 		return res, nil
 	}
@@ -487,34 +487,34 @@ func (tp *ToolsetsProvider) StreamChatResponses(ctx context.Context, acc *store.
 	tokens, err := tp.base.GetTokens(acc)
 	if err != nil {
 		res.Error = err.Error()
-		res.AuthFailed = true
+		res.Kind = KindAuthFailed
 		return res
 	}
 	body, err := tp.rewriteResponsesForUpstream(raw, clientModel)
 	if err != nil {
 		res.Error = err.Error()
-		res.RequestRejected = true
+		res.Kind = KindRequestRejected
 		return res
 	}
 	ctx, cancel := context.WithTimeout(ctx, RequestTimeout)
 	defer cancel()
 	resp, err, egress := tp.doWithRetryResponses(ctx, acc, tokens, body, egressAttempt)
-	res.Egress = egress
-	res.RequestBytes = len(body)
-	res.UpstreamBody = string(body)
-	res.UpstreamURL = tp.responsesEndpoint(tokens)
+	res.Diag.Egress = egress
+	res.Diag.RequestBytes = len(body)
+	res.Diag.UpstreamBody = string(body)
+	res.Diag.UpstreamURL = tp.responsesEndpoint(tokens)
 	if err != nil {
 		res.Error = err.Error()
 		if errors.Is(err, errToolsetsBusy) {
-			res.RateLimited = true
+			res.Kind = KindRateLimited
 		}
 		return res
 	}
 	defer resp.Body.Close()
-	res.UpstreamHeaders = headersToJSON(resp.Request.Header)
+	res.Diag.UpstreamHeaders = headersToJSON(resp.Request.Header)
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
 		res.Error = fmt.Sprintf("toolsets responses auth failed (%d)", resp.StatusCode)
-		res.AuthFailed = true
+		res.Kind = KindAuthFailed
 		return res
 	}
 	if resp.StatusCode >= 400 {
@@ -526,7 +526,7 @@ func (tp *ToolsetsProvider) StreamChatResponses(ctx context.Context, acc *store.
 		}
 		res.Error = fmt.Sprintf("toolsets responses error (%d): %s", resp.StatusCode, strings.TrimSpace(string(b)))
 		if resp.StatusCode < 500 {
-			res.RequestRejected = true
+			res.Kind = KindRequestRejected
 		}
 		return res
 	}
@@ -574,7 +574,7 @@ func (tp *ToolsetsProvider) StreamChatResponses(ctx context.Context, acc *store.
 		} else {
 			res.Error = "toolsets responses upstream returned non-SSE body: " + truncateRunes(string(b), 500)
 		}
-		res.RateLimited = true
+		res.Kind = KindRateLimited
 		return res
 	}
 	res.Success = true

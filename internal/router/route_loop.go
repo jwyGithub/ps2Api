@@ -126,7 +126,7 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 			provider.Trace(ctx, "router.client_gone", plan.trace(map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "error": last}, acc, false))
 			return nil, nil, &RouteError{Message: last}
 		}
-		if res.GatewayBlocked {
+		if res.Kind == provider.KindGatewayBlocked {
 			// 网关错误（上游 Cloudflare 风控 → 403）按出站体特征二分：
 			//   - 含 HTML/JS 注入特征 = 内容型：同一内容换号/换 IP/重试必然复现（实测前端项目
 			//     100% 被拦、后端项目从不被拦），不重试、不冷却，直接终止并返回 529。
@@ -138,7 +138,7 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 			// 流式下：延迟开流（首个 delta 前不落 200 / 不发事件）保证网关 403 时 emitted 仍为 false；
 			// 若已吐出过内容则 abort() 走「已开流」终止路径，避免重复输出。
 			provider.Trace(ctx, "router.gateway_blocked", plan.trace(map[string]interface{}{"account_id": acc.ID, "error": res.Error}, acc, true))
-			if provider.WafSignatureHitCount(res.UpstreamBody) == 0 {
+			if provider.WafSignatureHitCount(res.Diag.UpstreamBody) == 0 {
 				r.Pool.MarkGatewayBlocked(acc.ID, r.gatewayCooldownDur())
 				if !gwRetried {
 					if e, done := abort(); done {
@@ -154,7 +154,7 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 			}
 			return nil, nil, &RouteError{Message: res.Error, GatewayBlocked: true}
 		}
-		if res.RequestRejected {
+		if res.Kind == provider.KindRequestRejected {
 			// 请求内容被拒(坏请求、工具名冲突等)——账号本身可用,不标记、不换号重试,直接返回。
 			provider.Trace(ctx, "router.request_rejected", plan.trace(map[string]interface{}{"account_id": acc.ID, "error": res.Error}, acc, false))
 			return nil, nil, &RouteError{Message: res.Error, Rejected: true}
@@ -175,7 +175,7 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 			noBackoff = true
 			continue
 		}
-		if res.QuotaExhausted {
+		if res.Kind == provider.KindQuotaExhausted {
 			excluded[acc.ID] = true
 			// 额度耗尽（余量算到 0）标记为 exhausted：额度问题而非账号故障，不停用，
 			// 等额度周期重置后经探测自然恢复。（BLOCKED 的停用由上面的 applyUsageState 另行处理。）
@@ -185,7 +185,7 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 			}
 			continue
 		}
-		if res.AuthFailed {
+		if res.Kind == provider.KindAuthFailed {
 			// session 失效（guest_unusable / Jwt is missing / 401 等）：账号 session 已死，
 			// 属账号自身问题，标离线并停用（markOffline），从选号池与粘性中摘除，立即换号。
 			r.markOffline(acc, "session 失效: "+res.Error)
@@ -203,7 +203,7 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 			noBackoff = true
 			continue
 		}
-		if res.RateLimited || pool.IsTransient(res.Error) {
+		if res.Kind == provider.KindRateLimited || pool.IsTransient(res.Error) {
 			r.Pool.MarkTransient(acc.ID, res.Error)
 			if e, done := abort(); done {
 				return nil, nil, e
@@ -232,7 +232,7 @@ func (r *Router) runAttempts(ctx context.Context, req *provider.ChatRequest, pla
 			noBackoff = true
 			continue
 		}
-		if res.UpstreamFailure {
+		if res.Kind == provider.KindUpstreamFailure {
 			// 上游自己调模型失败（Policy Error 等）：账号是健康的。只记录错误文案，绝不 MarkError——
 			// 那会把账号写成 status=error，既踢出 ActiveAccounts 又打断会话粘性（见 usableForSticky）。
 			provider.Trace(ctx, "router.upstream_failure", plan.trace(map[string]interface{}{"attempt": attempt + 1, "account_id": acc.ID, "error": res.Error}, acc, false))

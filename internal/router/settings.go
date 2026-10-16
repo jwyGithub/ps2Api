@@ -46,6 +46,7 @@ func gatewayBlockedError(triedAccounts int) string {
 //   - "off"      → RoundRobin：关闭额度优先，403 换号也走普通轮询；
 //   - "absolute" → Absolute：按剩余额度绝对值最高优先；
 //   - 其他/""/"ratio"（默认）→ Ratio：按剩余额度比例最高优先。
+//
 // 仅影响 403 网关 failover 换号那一步；普通轮询选号与会话粘性不受此开关影响。
 func (r *Router) preferQuotaMode() pool.QuotaMode {
 	v, _ := r.Store.GetSetting("prefer_quota_on_403")

@@ -69,7 +69,7 @@ func IsToolsetsModel(model string) bool {
 }
 
 // errToolsetsBusy 是限频/上游波动的分类错误（429/503 重试耗尽），供调用方判
-// res.RateLimited——取代此前对错误消息文本 "(429)" 的字符串匹配。
+// res.Kind == KindRateLimited——取代此前对错误消息文本 "(429)" 的字符串匹配。
 var errToolsetsBusy = errors.New("toolsets upstream busy")
 
 // ToolsetsProvider 复用 PostmanProvider 的出口基础设施（代理池/cookie jar/指纹 Transport），
@@ -494,42 +494,42 @@ func (tp *ToolsetsProvider) Chat(ctx context.Context, acc *store.Account, raw []
 	tokens, err := tp.base.GetTokens(acc)
 	if err != nil {
 		res.Error = err.Error()
-		res.AuthFailed = true
+		res.Kind = KindAuthFailed
 		return res, nil
 	}
 	body, err := tp.rewriteModelForUpstream(raw, clientModel)
 	if err != nil {
 		res.Error = err.Error()
-		res.RequestRejected = true
+		res.Kind = KindRequestRejected
 		return res, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, RequestTimeout)
 	defer cancel()
 	resp, err, egress := tp.doWithRetry(ctx, acc, tokens, body, egressAttempt)
-	res.Egress = egress
-	res.RequestBytes = len(body)
-	res.UpstreamBody = string(body)
-	res.UpstreamURL = tp.endpoint(tokens)
+	res.Diag.Egress = egress
+	res.Diag.RequestBytes = len(body)
+	res.Diag.UpstreamBody = string(body)
+	res.Diag.UpstreamURL = tp.endpoint(tokens)
 	if err != nil {
 		res.Error = err.Error()
 		// doWithRetry 内部已把 429/503 归为重试耗尽——按限频处理让 router 退避。
 		if errors.Is(err, errToolsetsBusy) {
-			res.RateLimited = true
+			res.Kind = KindRateLimited
 		}
 		return res, nil
 	}
 	defer resp.Body.Close()
-	res.UpstreamHeaders = headersToJSON(resp.Request.Header)
+	res.Diag.UpstreamHeaders = headersToJSON(resp.Request.Header)
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
 		res.Error = fmt.Sprintf("toolsets auth failed (%d)", resp.StatusCode)
-		res.AuthFailed = true
+		res.Kind = KindAuthFailed
 		return res, nil
 	}
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2000))
 		res.Error = fmt.Sprintf("toolsets error (%d): %s", resp.StatusCode, strings.TrimSpace(string(b)))
 		if resp.StatusCode < 500 {
-			res.RequestRejected = true
+			res.Kind = KindRequestRejected
 		}
 		return res, nil
 	}
@@ -567,12 +567,12 @@ func (tp *ToolsetsProvider) classifyToolsetsErrorJSON(res *Result, b []byte, pre
 	res.Error = prefix + probe.Error.Code + ": " + probe.Error.Message
 	switch probe.Error.Code {
 	case "rate_limited":
-		res.RateLimited = true
+		res.Kind = KindRateLimited
 	case "not_found_error":
-		res.RequestRejected = true
+		res.Kind = KindRequestRejected
 	case "upstream_unavailable":
 		if upstreamUnavailableRejected {
-			res.RequestRejected = true
+			res.Kind = KindRequestRejected
 		}
 	}
 	return true
@@ -592,41 +592,41 @@ func (tp *ToolsetsProvider) StreamChat(ctx context.Context, acc *store.Account, 
 	tokens, err := tp.base.GetTokens(acc)
 	if err != nil {
 		res.Error = err.Error()
-		res.AuthFailed = true
+		res.Kind = KindAuthFailed
 		return res
 	}
 	body, err := tp.rewriteModelForUpstream(raw, clientModel)
 	if err != nil {
 		res.Error = err.Error()
-		res.RequestRejected = true
+		res.Kind = KindRequestRejected
 		return res
 	}
 	ctx, cancel := context.WithTimeout(ctx, RequestTimeout)
 	defer cancel()
 	resp, err, egress := tp.doWithRetry(ctx, acc, tokens, body, egressAttempt)
-	res.Egress = egress
-	res.RequestBytes = len(body)
-	res.UpstreamBody = string(body)
-	res.UpstreamURL = tp.endpoint(tokens)
+	res.Diag.Egress = egress
+	res.Diag.RequestBytes = len(body)
+	res.Diag.UpstreamBody = string(body)
+	res.Diag.UpstreamURL = tp.endpoint(tokens)
 	if err != nil {
 		res.Error = err.Error()
 		if errors.Is(err, errToolsetsBusy) {
-			res.RateLimited = true
+			res.Kind = KindRateLimited
 		}
 		return res
 	}
 	defer resp.Body.Close()
-	res.UpstreamHeaders = headersToJSON(resp.Request.Header)
+	res.Diag.UpstreamHeaders = headersToJSON(resp.Request.Header)
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
 		res.Error = fmt.Sprintf("toolsets auth failed (%d)", resp.StatusCode)
-		res.AuthFailed = true
+		res.Kind = KindAuthFailed
 		return res
 	}
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2000))
 		res.Error = fmt.Sprintf("toolsets error (%d): %s", resp.StatusCode, strings.TrimSpace(string(b)))
 		if resp.StatusCode < 500 {
-			res.RequestRejected = true
+			res.Kind = KindRequestRejected
 		}
 		return res
 	}
@@ -721,7 +721,7 @@ func (tp *ToolsetsProvider) classifyNonSSEBody(res *Result, b []byte) *Result {
 	} else {
 		res.Error = "toolsets upstream returned non-SSE body: " + truncateRunes(string(b), 500)
 	}
-	res.RateLimited = true // 空流/未知 body 视为上游波动，让调用方换号重试
+	res.Kind = KindRateLimited // 空流/未知 body 视为上游波动，让调用方换号重试
 	return res
 }
 

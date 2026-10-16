@@ -334,5 +334,3 @@ func maxInt(value, floor int) int {
 	}
 	return value
 }
-
-

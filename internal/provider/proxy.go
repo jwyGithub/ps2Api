@@ -97,7 +97,7 @@ func (p *Provider) CheckProxyDetail(ctx context.Context, raw string) ProxyCheckR
 // selectFor 返回本次出站应使用的代理 client 与出口标签。
 // ok=false 仅表示未配置任何可用出口代理（proxy_enabled 关闭或 proxy_urls 为空/全部无效）
 // → 走本机直连。只要配置了至少一个出口代理，本次请求就一定经代理出站：egressAttempt 越界
-//（>=N 或 <0）时按出口数环回到有效出口，而非回退本机直连——即「开启启用出口代理后所有发往
+// （>=N 或 <0）时按出口数环回到有效出口，而非回退本机直连——即「开启启用出口代理后所有发往
 // 上游的请求都走代理」。egressAttempt 递增仅用于在多出口间轮换 IP（403 换号时）。
 func (pp *proxyPool) selectFor(accountID int64, egressAttempt int) (client *http.Client, egress string, ok bool) {
 	if pp == nil {

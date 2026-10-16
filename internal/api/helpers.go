@@ -95,6 +95,7 @@ func protoError(w http.ResponseWriter, r *http.Request, status int, msg, anthrop
 	}
 	openAIError(w, status, msg, openAIType, openAICode...)
 }
+
 // sseWriter 把 Server-Sent Events 序列化写出到 w，每帧后 Flush，并延迟到首帧才提交 SSE
 // 响应头——这样开流前的失败仍能回退为干净的 HTTP JSON 错误（而非半截空流让调用方挂起）。
 // 各流式端点共用它，统一 SSE 线格式（事件帧 / data 帧 / [DONE]）。用 newSSEWriter 构造；

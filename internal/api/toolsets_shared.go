@@ -44,11 +44,11 @@ type toolsetsProto struct {
 // 错误类型/状态码随协议而变，由 proto 的数据字段承载。
 func (p toolsetsProto) errorStatus(res *provider.Result) (string, int) {
 	switch {
-	case res.AuthFailed:
+	case res.Kind == provider.KindAuthFailed:
 		return "authentication_error", 401
-	case res.RequestRejected:
+	case res.Kind == provider.KindRequestRejected:
 		return "invalid_request_error", 400
-	case res.RateLimited:
+	case res.Kind == provider.KindRateLimited:
 		return p.rateLimitedType, p.rateLimitedStatus
 	default:
 		return p.genericErrType, 500
@@ -82,11 +82,11 @@ func (s *Server) runToolsetsNonStream(
 		}
 		lastRes = res
 		// 请求内容错误：换号无用，直接返回。
-		if res.RequestRejected {
+		if res.Kind == provider.KindRequestRejected {
 			break
 		}
 		// session 失效属账号自身问题：标离线摘号（与主路由 AuthFailed 同口径），换下一个。
-		if res.AuthFailed {
+		if res.Kind == provider.KindAuthFailed {
 			s.Router.MarkAccountOffline(acc, "session 失效: "+res.Error)
 			excluded[acc.ID] = true
 			continue
@@ -135,13 +135,13 @@ func (s *Server) runToolsetsStream(
 			sw.EventRaw("error", p.streamErrEvent(res.Error))
 			return
 		}
-		if res.AuthFailed {
+		if res.Kind == provider.KindAuthFailed {
 			// session 失效属账号自身问题：标离线摘号（与主路由 AuthFailed 同口径），换下一个。
 			s.Router.MarkAccountOffline(acc, "session 失效: "+res.Error)
 			excluded[acc.ID] = true
 			continue
 		}
-		if res.RequestRejected {
+		if res.Kind == provider.KindRequestRejected {
 			typ, code := p.errorStatus(res)
 			p.writeErr(w, code, res.Error, typ)
 			return

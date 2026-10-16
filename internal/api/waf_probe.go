@@ -51,16 +51,16 @@ func classifyProbeOutcome(res *provider.Result) probeOutcome {
 	if res == nil {
 		return probeOutcome{Label: "other", Detail: "nil result"}
 	}
-	out := probeOutcome{Bytes: res.RequestBytes, Detail: oneLineProbe(res.Error)}
+	out := probeOutcome{Bytes: res.Diag.RequestBytes, Detail: oneLineProbe(res.Error)}
 	switch {
 	case res.Success:
 		out.Label = "pass"
-	case res.GatewayBlocked:
+	case res.Kind == provider.KindGatewayBlocked:
 		out.Label = "403"
 	default:
 		out.Label = "other"
 	}
-	for _, ln := range strings.Split(res.RejectionDetail, "\n") {
+	for _, ln := range strings.Split(res.Diag.RejectionDetail, "\n") {
 		if ray, ok := strings.CutPrefix(strings.TrimSpace(ln), "Cf-Ray:"); ok {
 			out.Ray = strings.TrimSpace(ray)
 		}

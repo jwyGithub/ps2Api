@@ -126,7 +126,7 @@ func (s *Server) exportAccounts(w http.ResponseWriter, r *http.Request) {
 		out.Accounts = append(out.Accounts, accountFileAccount{
 			Email: account.Email, Password: account.Password, Source: account.Source,
 			AccountType: account.AccountType,
-			Enabled: &enabled, Tokens: tokens,
+			Enabled:     &enabled, Tokens: tokens,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

@@ -89,7 +89,7 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 	// （AuthFailed/QuotaExhausted/RateLimited）上抛给 router 换号重试。
 	if p.shouldSeed(acc.ID, req) {
 		seedRes := p.seedConversation(ctx, acc, req, tokens, postmanModel)
-		if seedRes.AuthFailed || seedRes.QuotaExhausted || seedRes.RateLimited {
+		if seedRes.Kind == KindAuthFailed || seedRes.Kind == KindQuotaExhausted || seedRes.Kind == KindRateLimited {
 			*res = *seedRes
 			return fmt.Errorf("%s", res.Error)
 		}
@@ -100,12 +100,12 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 		res.Error = err.Error()
 		return err
 	}
-	res.RequestBytes = len(bodyBytes) // 记录出站体积，供 403 与请求体大小相关性分析
-	res.UpstreamBody = string(bodyBytes)
-	res.UpstreamURL = p.chatURL(tokens)
+	res.Diag.RequestBytes = len(bodyBytes) // 记录出站体积，供 403 与请求体大小相关性分析
+	res.Diag.UpstreamBody = string(bodyBytes)
+	res.Diag.UpstreamURL = p.chatURL(tokens)
 	// WAF 中和漏网兜底：出站体应已零特征（wafNeutralize 在 query/toolResponses 出口
 	// 处理）。此处仍命中说明有未覆盖的文本出口（如自定义工具 schema），告警定位，不改行为。
-	if n := WafSignatureHitCount(res.UpstreamBody); n > 0 {
+	if n := WafSignatureHitCount(res.Diag.UpstreamBody); n > 0 {
 		Trace(ctx, "upstream.request.waf_signature_leak", map[string]interface{}{
 			"account_id": acc.ID, "hits": n, "body_bytes": len(bodyBytes),
 		})
@@ -143,9 +143,9 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 	if !viaProxy {
 		client, egress = p.Client, "direct"
 	}
-	res.Egress = egress
+	res.Diag.Egress = egress
 	p.applyCookies(acc.ID, httpReq, egress)
-	res.UpstreamHeaders = headersToJSON(httpReq.Header)
+	res.Diag.UpstreamHeaders = headersToJSON(httpReq.Header)
 	Trace(ctx, "upstream.request", map[string]interface{}{
 		"method": httpReq.Method, "url": httpReq.URL.String(), "headers": httpReq.Header,
 		"body": json.RawMessage(bodyBytes), "account_id": acc.ID, "egress": egress,
@@ -163,8 +163,8 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 			httpReq = r
 			client, egress, viaProxy = p.Client, "direct", false
 			p.applyCookies(acc.ID, httpReq, egress)
-			res.Egress = egress
-			res.UpstreamHeaders = headersToJSON(httpReq.Header)
+			res.Diag.Egress = egress
+			res.Diag.UpstreamHeaders = headersToJSON(httpReq.Header)
 			resp, err = client.Do(httpReq)
 		}
 	}
@@ -188,28 +188,28 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 	res.RateLimit = parseRateLimit(resp.Header, time.Now())
 	if identityError := postmanIdentityError(resp.Header); identityError != "" {
 		res.Error = "Postman authentication failed: " + identityError
-		res.AuthFailed = true
+		res.Kind = KindAuthFailed
 		return fmt.Errorf("%s", res.Error)
 	}
 	if isCloudflareHTMLRejection(resp.StatusCode, resp.Header) {
 		res.Error = "Postman gateway rejected request (403, Cloudflare)"
 		// 这是 Cloudflare 边缘的安全/风控拦截(瞬时、按评分/速率判定),不是请求内容错误也不是
 		// 账号损坏——标记 GatewayBlocked 让 router 退避重试,而非当作 RequestRejected 直接返回。
-		res.GatewayBlocked = true
+		res.Kind = KindGatewayBlocked
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2000))
 		Trace(ctx, "upstream.response.body", map[string]interface{}{"body": string(body), "account_id": acc.ID})
-		res.RejectionDetail = cloudflareRejectionDetail(resp.StatusCode, resp.Header, string(body), string(bodyBytes)) + "\n出口: " + egress
+		res.Diag.RejectionDetail = cloudflareRejectionDetail(resp.StatusCode, resp.Header, string(body), string(bodyBytes)) + "\n出口: " + egress
 		return fmt.Errorf("%s", res.Error)
 	}
 
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
 		res.Error = fmt.Sprintf("Postman auth failed (%d)", resp.StatusCode)
-		res.AuthFailed = true
+		res.Kind = KindAuthFailed
 		return fmt.Errorf("%s", res.Error)
 	}
 	if resp.StatusCode == 429 {
 		res.Error = "Postman rate limited"
-		res.RateLimited = true
+		res.Kind = KindRateLimited
 		return fmt.Errorf("%s", res.Error)
 	}
 	if resp.StatusCode >= 400 {
@@ -219,7 +219,7 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 		// 4xx(除已处理的 401/403/429)是请求内容问题——坏请求、工具名冲突等,
 		// 换账号重试无用,标记为 RequestRejected 让 router 直接返回、不污染账号。
 		if resp.StatusCode < 500 {
-			res.RequestRejected = true
+			res.Kind = KindRequestRejected
 		}
 		return fmt.Errorf("%s", res.Error)
 	}
@@ -238,8 +238,8 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 			firstPayloadLine = false
 			if looksLikeHTML(line) {
 				res.Error = "Postman gateway rejected request (Cloudflare HTML in stream)"
-				res.RequestRejected = true
-				res.RejectionDetail = cloudflareRejectionDetail(resp.StatusCode, resp.Header, line, string(bodyBytes)) + "\n出口: " + egress
+				res.Kind = KindRequestRejected
+				res.Diag.RejectionDetail = cloudflareRejectionDetail(resp.StatusCode, resp.Header, line, string(bodyBytes)) + "\n出口: " + egress
 				return fmt.Errorf("%s", res.Error)
 			}
 		}
@@ -260,7 +260,7 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 
 	if reader.QuotaExceeded {
 		res.Error = "Postman AI quota exceeded"
-		res.QuotaExhausted = true
+		res.Kind = KindQuotaExhausted
 		res.Usage = reader.Usage
 		return fmt.Errorf("%s", res.Error)
 	}
@@ -269,17 +269,19 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 		res.Usage = reader.Usage
 		// 上游自己调模型失败(Policy Error 等):账号健康、请求也没问题,router 据此不标记账号、
 		// 续聊也不换号(换号会丢服务端会话上下文)。见 isUpstreamModelFailure。
-		res.UpstreamFailure = reader.UpstreamFailure
+		if reader.UpstreamFailure {
+			res.Kind = KindUpstreamFailure
+		}
 		// "flagged by our safety checks"（2026-10 实测）是「账号+环境信誉分」的概率性拦截，
 		// 同内容换号一挂一过——账号本身健康，绝不 MarkError（否则一次拦截踢废一个号）。
 		// 归 UpstreamFailure：新对话允许换号 failover，续聊经 router 钉住原号原地重试。
 		if IsSafetyFlaggedMessage(reader.Err) {
-			res.UpstreamFailure = true
+			res.Kind = KindUpstreamFailure
 		}
 		// 工具相关的 failure(工具名冲突、无可用工具等)是请求内容问题,不是账号故障——
 		// 换账号重试无用,标记 RequestRejected 让 router 直接返回、不把账号踢出池。
 		if reader.RequestRejected || isRequestRejectionMessage(reader.Err) {
-			res.RequestRejected = true
+			res.Kind = KindRequestRejected
 		}
 		res.SessionCorrupt = reader.SessionCorrupt
 		return fmt.Errorf("%s", res.Error)
@@ -309,7 +311,7 @@ func (p *Provider) streamInternal(ctx context.Context, acc *store.Account, req *
 		} else {
 			res.Error = "Upstream returned an empty stream (no content and no completion marker)"
 		}
-		res.UpstreamFailure = true
+		res.Kind = KindUpstreamFailure
 		res.SessionCorrupt = true
 		return fmt.Errorf("%s", res.Error)
 	}

@@ -21,7 +21,7 @@ func (p *Provider) ProbeQuota(ctx context.Context, acc *store.Account) *Result {
 	tokens, err := p.GetTokens(acc)
 	if err != nil {
 		res.Error = err.Error()
-		res.AuthFailed = true
+		res.Kind = KindAuthFailed
 		return res
 	}
 	req := &ChatRequest{

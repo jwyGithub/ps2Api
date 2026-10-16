@@ -150,7 +150,7 @@ func TestProbeUpstreamQueryLimit(t *testing.T) {
 			if gotRunes > maxOK {
 				maxOK = gotRunes
 			}
-		} else if res != nil && res.RequestRejected {
+		} else if res != nil && res.Kind == KindRequestRejected {
 			if minReject == 0 || gotRunes < minReject {
 				minReject = gotRunes
 			}

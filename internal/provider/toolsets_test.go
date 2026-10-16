@@ -52,7 +52,7 @@ func TestToolsetsStreamNonSSEErrorClassified(t *testing.T) {
 	if res.Success {
 		t.Fatal("non-SSE error body must not be Success (client would hang on empty stream)")
 	}
-	if !res.RateLimited {
+	if res.Kind != KindRateLimited {
 		t.Fatalf("upstream_unavailable must classify RateLimited for account failover, got error: %s", res.Error)
 	}
 	if len(got) != 0 {
@@ -67,8 +67,8 @@ func TestToolsetsStreamRateLimitedJSON(t *testing.T) {
 		fmt.Fprint(w, `{"error":{"code":"rate_limited","message":"Too many requests. Please try again shortly."}}`)
 	})
 	res := tp.StreamChat(context.Background(), toolsetsTestAccount(t), []byte(`{"model":"claude-opus-5","messages":[]}`), "claude-opus-5", 0, func(string, []byte) error { return nil })
-	if res.Success || !res.RateLimited {
-		t.Fatalf("rate_limited JSON must classify RateLimited, got success=%v rateLimited=%v err=%s", res.Success, res.RateLimited, res.Error)
+	if res.Success || res.Kind != KindRateLimited {
+		t.Fatalf("rate_limited JSON must classify RateLimited, got success=%v rateLimited=%v err=%s", res.Success, res.Kind == KindRateLimited, res.Error)
 	}
 }
 
@@ -108,7 +108,7 @@ func TestToolsetsChatNonSSEErrorClassified(t *testing.T) {
 		fmt.Fprint(w, `{"error":{"code":"rate_limited","message":"Too many requests."}}`)
 	})
 	res, _ := tp.Chat(context.Background(), toolsetsTestAccount(t), []byte(`{"model":"claude-opus-5","messages":[]}`), "claude-opus-5", 0)
-	if res.Success || !res.RateLimited {
+	if res.Success || res.Kind != KindRateLimited {
 		t.Fatalf("rate_limited JSON must classify RateLimited, got success=%v err=%s", res.Success, res.Error)
 	}
 }

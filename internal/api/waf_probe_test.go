@@ -34,12 +34,12 @@ func TestProbePad(t *testing.T) {
 // TestClassifyProbeOutcome 归类口径同 repro403 实验的 classify：成功=pass、
 // 网关拦截=403、其余=other；Cf-Ray 从 RejectionDetail 行提取。
 func TestClassifyProbeOutcome(t *testing.T) {
-	if o := classifyProbeOutcome(&provider.Result{Success: true, RequestBytes: 42}); o.Label != "pass" || o.Bytes != 42 {
+	if o := classifyProbeOutcome(&provider.Result{Success: true, Diag: provider.Diagnostics{RequestBytes: 42}}); o.Label != "pass" || o.Bytes != 42 {
 		t.Fatalf("success should be pass, got %+v", o)
 	}
-	o := classifyProbeOutcome(&provider.Result{GatewayBlocked: true, RequestBytes: 10,
+	o := classifyProbeOutcome(&provider.Result{Kind: provider.KindGatewayBlocked,
 		Error: "(403, Cloudflare)",
-		RejectionDetail: "HTTP 状态: 403\nCf-Ray: 8b2c1d3e4f5a6b7c-SJC\n出站请求体: 10 字节"})
+		Diag:  provider.Diagnostics{RequestBytes: 10, RejectionDetail: "HTTP 状态: 403\nCf-Ray: 8b2c1d3e4f5a6b7c-SJC\n出站请求体: 10 字节"}})
 	if o.Label != "403" || o.Ray != "8b2c1d3e4f5a6b7c-SJC" {
 		t.Fatalf("gateway blocked misclassified: %+v", o)
 	}

@@ -65,7 +65,7 @@ func (p *Provider) Chat(ctx context.Context, acc *store.Account, req *ChatReques
 	tokens, err := p.GetTokens(acc)
 	if err != nil {
 		res.Error = err.Error()
-		res.AuthFailed = true
+		res.Kind = KindAuthFailed
 		return res
 	}
 
@@ -128,7 +128,7 @@ func (p *Provider) StreamChat(ctx context.Context, acc *store.Account, req *Chat
 	tokens, err := p.GetTokens(acc)
 	if err != nil {
 		res.Error = err.Error()
-		res.AuthFailed = true
+		res.Kind = KindAuthFailed
 		return res
 	}
 	tools, _ := selectedTools(req.Tools, req.ToolChoice)
