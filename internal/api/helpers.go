@@ -1,6 +1,6 @@
 // helpers.go —— 包内共享的小工具：JSON 写出（jsonWrite/jsonError）、
 // 协议专属错误体（anthropicError/openAIError/protoError）、
-// SSE 帧写出（sse）、mustJSON、ID 生成（newID）与时间戳（nowUnix）。
+// SSE 流式写出（sseWriter）、mustJSON、ID 生成（newID）与时间戳（nowUnix）。
 package api
 
 import (
@@ -95,10 +95,64 @@ func protoError(w http.ResponseWriter, r *http.Request, status int, msg, anthrop
 	}
 	openAIError(w, status, msg, openAIType, openAICode...)
 }
-func sse(w http.ResponseWriter, fl http.Flusher, v interface{}) error {
-	_, e := fmt.Fprintf(w, "data: %s\n\n", mustJSON(v))
-	fl.Flush()
-	return e
+// sseWriter 把 Server-Sent Events 序列化写出到 w，每帧后 Flush，并延迟到首帧才提交 SSE
+// 响应头——这样开流前的失败仍能回退为干净的 HTTP JSON 错误（而非半截空流让调用方挂起）。
+// 各流式端点共用它，统一 SSE 线格式（事件帧 / data 帧 / [DONE]）。用 newSSEWriter 构造；
+// extraHeaders 在首帧随标准 SSE 头一并写出（如 Responses/OpenAI 的 Connection: keep-alive）。
+type sseWriter struct {
+	w            http.ResponseWriter
+	fl           http.Flusher
+	started      bool
+	extraHeaders map[string]string
+}
+
+func newSSEWriter(w http.ResponseWriter, fl http.Flusher, extraHeaders map[string]string) *sseWriter {
+	return &sseWriter{w: w, fl: fl, extraHeaders: extraHeaders}
+}
+
+// Started 报告是否已提交过 SSE 响应头/首帧。
+func (s *sseWriter) Started() bool { return s.started }
+
+// ensureStarted 幂等地提交 SSE 响应头（延迟到首帧）。
+func (s *sseWriter) ensureStarted() {
+	if s.started {
+		return
+	}
+	s.started = true
+	s.w.Header().Set("Content-Type", "text/event-stream")
+	s.w.Header().Set("Cache-Control", "no-cache")
+	for k, v := range s.extraHeaders {
+		s.w.Header().Set(k, v)
+	}
+}
+
+// Event 写一个具名 SSE 事件，data 行为 v 的 JSON 编码。写出错误按既有流式端点口径忽略。
+func (s *sseWriter) Event(name string, v interface{}) {
+	s.ensureStarted()
+	fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", name, mustJSON(v))
+	s.fl.Flush()
+}
+
+// EventRaw 写一个具名 SSE 事件，data 行为已编码字节（上游 SSE 原样透传场景）。
+func (s *sseWriter) EventRaw(name string, data []byte) {
+	s.ensureStarted()
+	fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", name, data)
+	s.fl.Flush()
+}
+
+// Data 写一个仅含 data 行的 SSE 帧（OpenAI chat.completion.chunk 形态），data 为 v 的 JSON 编码。
+// 返回写出错误：OpenAI 流式据此感知客户端断连并中止上游。
+func (s *sseWriter) Data(v interface{}) error {
+	s.ensureStarted()
+	_, err := fmt.Fprintf(s.w, "data: %s\n\n", mustJSON(v))
+	s.fl.Flush()
+	return err
+}
+
+// Done 写 OpenAI 的 data: [DONE] 终止帧（流正常完成标记）。
+func (s *sseWriter) Done() {
+	fmt.Fprint(s.w, "data: [DONE]\n\n")
+	s.fl.Flush()
 }
 func mustJSON(v interface{}) string { b, _ := json.Marshal(v); return string(b) }
 

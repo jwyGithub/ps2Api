@@ -1,7 +1,6 @@
 package api
 
 import (
-	"fmt"
 	"net/http"
 
 	"ps2api/internal/provider"
@@ -21,27 +20,22 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *pr
 	}
 	respID := newID("resp_")
 	seq := 0
+	sw := newSSEWriter(w, fl, map[string]string{"Connection": "keep-alive"})
 	emit := func(typ string, obj map[string]interface{}) {
 		obj["type"] = typ
 		obj["sequence_number"] = seq
 		seq++
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", typ, mustJSON(obj))
-		fl.Flush()
+		sw.Event(typ, obj)
 	}
 	skeleton := func(status string, output []interface{}) map[string]interface{} {
 		return map[string]interface{}{"id": respID, "object": "response", "status": status, "model": clientModel, "output": output}
 	}
-	// started：延迟提交 SSE 响应头 + response.created 到首个增量到达。若产出任何输出前就失败，
-	// 回退为干净的 HTTP 503 JSON 错误，避免半截流让调用方挂起。
-	started := false
+	// 延迟提交 SSE 响应头 + response.created 到首个增量到达（sw.Event 内部 ensureStarted 落头）。
+	// 产出任何输出前就失败时（!sw.Started()）回退为干净的 HTTP 503 JSON 错误，避免半截流让调用方挂起。
 	ensureStarted := func() {
-		if started {
+		if sw.Started() {
 			return
 		}
-		started = true
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
 		emit("response.created", map[string]interface{}{"response": skeleton("in_progress", []interface{}{})})
 	}
 
@@ -198,7 +192,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req *pr
 
 	if err != nil {
 		// 产出任何输出前就失败：还没开流，回退为干净的 HTTP 错误，调用方可明确停止任务。
-		if !started {
+		if !sw.Started() {
 			openAIError(w, upstreamErrorStatus(err), err.Error(), "service_unavailable")
 			return
 		}

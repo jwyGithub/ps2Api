@@ -362,29 +362,13 @@ func (tp *ToolsetsProvider) doWithRetryResponses(ctx context.Context, acc *store
 	}
 	return nil, lastErr, ""
 }
-// upstream_unavailable 大多是内容问题伪装（assistant+input_text → 503 + 该 code，2026-10-15
-// 实测矩阵）：内容错误换号无用，归 RequestRejected 跳过限频重试；只有明确 rate_limited
-// 才算限频。
+
+// classifyResponsesErrorJSON 是 OpenAI-Responses /v1/responses toolsets 端点的 error JSON
+// 分类（见共享实现 classifyToolsetsErrorJSON）。upstream_unavailable 大多是内容问题伪装
+// （assistant+input_text → 503 + 该 code，2026-10-15 实测矩阵）：内容错误换号无用，
+// 归 RequestRejected 跳过限频重试；只有明确 rate_limited 才算限频。
 func (tp *ToolsetsProvider) classifyResponsesErrorJSON(res *Result, b []byte) bool {
-	var probe struct {
-		Error *struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if json.Unmarshal(b, &probe) != nil || probe.Error == nil {
-		return false
-	}
-	res.Error = "toolsets responses error: " + probe.Error.Code + ": " + probe.Error.Message
-	switch probe.Error.Code {
-	case "rate_limited":
-		res.RateLimited = true
-	case "not_found_error":
-		res.RequestRejected = true
-	case "upstream_unavailable":
-		res.RequestRejected = true
-	}
-	return true
+	return tp.classifyToolsetsErrorJSON(res, b, "toolsets responses error: ", true)
 }
 
 // ChatResponses 非流式透传：raw 为客户端原始 OpenAI Responses 请求体，返回上游原始 JSON。

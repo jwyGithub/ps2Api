@@ -71,29 +71,19 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, req *provi
 	}
 	id := newID("chatcmpl-")
 	created := nowUnix()
-	// started：延迟提交 SSE 响应头到首个增量到达。失败若发生在任何输出之前，可回退为干净的
-	// HTTP 503 JSON 错误，而不是一个空的 SSE 流，便于调用方明确识别失败。
-	started := false
-	ensureStarted := func() {
-		if started {
-			return
-		}
-		started = true
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-	}
+	// sw 延迟提交 SSE 响应头到首个增量到达（Data 内部 ensureStarted）。失败若发生在任何输出
+	// 之前（!sw.Started()），可回退为干净的 HTTP 503 JSON 错误，而不是一个空的 SSE 流。
+	sw := newSSEWriter(w, fl, map[string]string{"Connection": "keep-alive"})
 	emit := func(d provider.Delta) error {
-		ensureStarted()
 		chunk := map[string]interface{}{"id": id, "object": "chat.completion.chunk", "created": created, "model": clientModel, "choices": []interface{}{map[string]interface{}{"index": 0, "delta": deltaMap(d), "finish_reason": nil}}}
 		if d.HasFinish {
 			chunk["choices"] = []interface{}{map[string]interface{}{"index": 0, "delta": map[string]interface{}{}, "finish_reason": d.FinishReason}}
 		}
-		return sse(w, fl, chunk)
+		return sw.Data(chunk)
 	}
 	res, _, err := s.Router.Stream(r.Context(), req, emit)
 	s.chargeKey(r.Context(), res)
-	if err != nil && !started {
+	if err != nil && !sw.Started() {
 		openAIError(w, upstreamErrorStatus(err), err.Error(), "service_unavailable")
 		return
 	}
@@ -103,13 +93,12 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, req *provi
 		// 中间数据、认定本轮成功但内容为空，于是 agent 不报错、直接进入下一轮。
 		// 这正是「网关失败但客户端不停止」的直接原因。省掉 [DONE] 后，连接 EOF 即流终止，
 		// SDK 读到 error 帧就抛异常停止。
-		_ = sse(w, fl, map[string]interface{}{"error": map[string]interface{}{
+		_ = sw.Data(map[string]interface{}{"error": map[string]interface{}{
 			"message": err.Error(), "type": "service_unavailable", "param": nil, "code": nil,
 		}})
 		return
 	}
-	_, _ = io.WriteString(w, "data: [DONE]\n\n")
-	fl.Flush()
+	sw.Done()
 }
 func deltaMap(d provider.Delta) map[string]interface{} {
 	m := map[string]interface{}{}

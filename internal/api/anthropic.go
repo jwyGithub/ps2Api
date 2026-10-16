@@ -280,23 +280,16 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, req *pr
 		return
 	}
 	id := newID("msg_")
-	// started 表示是否已向客户端提交 SSE 响应头 + message_start。
-	// 关键修复：延迟到「首个真实增量到达」时才开流，而不是联系上游前就乐观开流。
+	// sw 延迟提交 SSE 响应头 + message_start 到「首个真实增量到达」，而不是联系上游前就乐观开流。
 	// 这样若所有账号在产出任何输出前就被网关拦截(403)，可回退为一个干净的 HTTP 503 JSON 错误，
 	// 客户端(agent 终端)据此明确停止任务；不会留下一个已发 message_start 却无 message_stop 的
-	// 半截流导致终端永久挂起。
-	started := false
-	writeEvent := func(name string, v interface{}) {
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", name, mustJSON(v))
-		fl.Flush()
-	}
+	// 半截流导致终端永久挂起。sw.Started() 即「是否已提交 SSE 头 + message_start」。
+	sw := newSSEWriter(w, fl, nil)
+	writeEvent := sw.Event
 	ensureStarted := func() {
-		if started {
+		if sw.Started() {
 			return
 		}
-		started = true
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
 		writeEvent("message_start", map[string]interface{}{"type": "message_start", "message": map[string]interface{}{"id": id, "type": "message", "role": "assistant", "model": clientModel, "content": []interface{}{}, "stop_reason": nil, "usage": map[string]int{"input_tokens": provider.EstimateMessagesTokens(req.Messages), "output_tokens": 0}}})
 	}
 	thinkingOpen := false
@@ -375,7 +368,7 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, req *pr
 	// 「一直在请求中」等不到 message_stop 而永久挂起（见 docs/403-gateway-block-failover.md §2.3 缺陷2）。
 	// 修复：即便产出任何增量前就失败，也照常开流(ensureStarted 发 message_start)，
 	// 随后统一走下方 error + message_delta + message_stop 的终止序列，保证终端必定收到 message_stop。
-	if err != nil && !started {
+	if err != nil && !sw.Started() {
 		ensureStarted()
 	}
 	closeThinking()

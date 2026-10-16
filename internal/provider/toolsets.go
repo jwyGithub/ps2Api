@@ -56,10 +56,10 @@ var toolsetsAllowedFields = map[string]bool{
 
 // ToolsetsModelMap 对外模型名 → 上游 toolsets 路由名（三段式 <name>/anthropic/anthropic-messages）。
 var ToolsetsModelMap = map[string]string{
-	"claude-opus-5":      "claude-opus-5/anthropic/anthropic-messages",
-	"claude-sonnet-5":    "claude-sonnet-5/anthropic/anthropic-messages",
-	"claude-opus-5-5":    "claude-opus-5-5/anthropic/anthropic-messages",
-	"claude-sonnet-5-5":  "claude-sonnet-5-5/anthropic/anthropic-messages",
+	"claude-opus-5":     "claude-opus-5/anthropic/anthropic-messages",
+	"claude-sonnet-5":   "claude-sonnet-5/anthropic/anthropic-messages",
+	"claude-opus-5-5":   "claude-opus-5-5/anthropic/anthropic-messages",
+	"claude-sonnet-5-5": "claude-sonnet-5-5/anthropic/anthropic-messages",
 }
 
 // IsToolsetsModel 报告模型名是否走 toolsets 端点。
@@ -547,9 +547,14 @@ func (tp *ToolsetsProvider) Chat(ctx context.Context, acc *store.Account, raw []
 	return res, tp.rewriteModelInResponse(b, clientModel)
 }
 
-// classifyErrorJSON 尝试把 body 解析为 toolsets 的 error JSON 并分类写入 res。
+// classifyToolsetsErrorJSON 把 body 解析为 toolsets 的 error JSON 并分类写入 res，
 // 是 error JSON 时返回 true（res 已带分类），否则 res 不变、返回 false。
-func (tp *ToolsetsProvider) classifyErrorJSON(res *Result, b []byte) bool {
+// 两个 toolsets 端点（Anthropic /v1/messages 与 OpenAI-Responses /v1/responses）共享：
+// error 体结构与 rate_limited / not_found_error 分类完全一致，仅错误文案前缀不同。
+// upstreamUnavailableRejected 处理 Responses 端点独有的 upstream_unavailable——该 code
+// 大多是内容问题伪装（2026-10-15 实测矩阵）→ 归 RequestRejected 跳过限频重试；
+// Anthropic 端点无此 code（传 false 时该分支无副作用）。
+func (tp *ToolsetsProvider) classifyToolsetsErrorJSON(res *Result, b []byte, prefix string, upstreamUnavailableRejected bool) bool {
 	var probe struct {
 		Error *struct {
 			Code    string `json:"code"`
@@ -559,14 +564,23 @@ func (tp *ToolsetsProvider) classifyErrorJSON(res *Result, b []byte) bool {
 	if json.Unmarshal(b, &probe) != nil || probe.Error == nil {
 		return false
 	}
-	res.Error = "toolsets error: " + probe.Error.Code + ": " + probe.Error.Message
+	res.Error = prefix + probe.Error.Code + ": " + probe.Error.Message
 	switch probe.Error.Code {
 	case "rate_limited":
 		res.RateLimited = true
 	case "not_found_error":
 		res.RequestRejected = true
+	case "upstream_unavailable":
+		if upstreamUnavailableRejected {
+			res.RequestRejected = true
+		}
 	}
 	return true
+}
+
+// classifyErrorJSON 是 Anthropic /v1/messages toolsets 端点的 error JSON 分类（见共享实现）。
+func (tp *ToolsetsProvider) classifyErrorJSON(res *Result, b []byte) bool {
+	return tp.classifyToolsetsErrorJSON(res, b, "toolsets error: ", false)
 }
 
 // StreamChat 流式透传：上游 Anthropic SSE 事件逐条经 emit 回调写给客户端。

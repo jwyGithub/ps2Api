@@ -3,11 +3,11 @@
 // 客户端请求体与上游同构，直接透传零转换（thinking/signature/图片 blocks 原样保留）。
 // 端点无 credits usage 事件 → 不参与 credits 计费（chargeKey 对 Credits<=0 是 no-op），
 // 请求日志直写存储保持面板可见。
+// 重试/换号循环与 OpenAI-Responses 端点同构，共享驱动见 toolsets_shared.go。
 
 package api
 
 import (
-	"fmt"
 	"net/http"
 	"time"
 
@@ -20,10 +20,43 @@ import (
 func (s *Server) handleToolsetsMessages(w http.ResponseWriter, r *http.Request, raw []byte, ar AnthropicReq) {
 	lc := toolsetsLogContext{clientBody: string(raw), clientHeaders: inboundHeadersJSON(r.Header)}
 	if !ar.Stream {
-		s.toolsetsNonStream(w, r, raw, ar, lc)
+		s.runToolsetsNonStream(w, anthropicToolsetsProto,
+			func(acc *store.Account, attempt int) (*provider.Result, []byte) {
+				return s.Router.Toolsets.Chat(r.Context(), acc, raw, ar.Model, attempt)
+			},
+			func(acc *store.Account, res *provider.Result, started time.Time) {
+				s.logToolsetsAttempt(acc, r, res, ar, false, lc, started)
+			})
 		return
 	}
-	s.toolsetsStream(w, r, raw, ar, lc)
+	s.runToolsetsStream(w, anthropicToolsetsProto,
+		func(acc *store.Account, attempt int, emit func(event string, data []byte) error) *provider.Result {
+			return s.Router.Toolsets.StreamChat(r.Context(), acc, raw, ar.Model, attempt, emit)
+		},
+		func(acc *store.Account, res *provider.Result, started time.Time) {
+			s.logToolsetsAttempt(acc, r, res, ar, true, lc, started)
+		})
+}
+
+// anthropicToolsetsProto 把共享 toolsets 驱动适配到 Anthropic /v1/messages 协议
+// （错误体格式、状态码映射、已开流时的 error 事件）。
+var anthropicToolsetsProto = toolsetsProto{
+	writeErr:        anthropicError,
+	noAccountType:   "api_error",
+	streamUnsupType: "api_error",
+	// 529 overloaded_error 是 Anthropic 表达「上游暂时不可用」的标准方式（503 不在其枚举内）。
+	rateLimitedType:   "overloaded_error",
+	rateLimitedStatus: 529,
+	genericErrType:    "api_error",
+	busyStatus:        529,
+	busyMsg:           "toolsets upstream busy after retries",
+	busyType:          "overloaded_error",
+	streamErrEvent: func(msg string) []byte {
+		return []byte(mustJSON(map[string]interface{}{
+			"type":  "error",
+			"error": map[string]string{"type": "api_error", "message": msg},
+		}))
+	},
 }
 
 // toolsetsLogContext 携带单次客户端请求的入站排查上下文（body/头），各 attempt 共用。
@@ -37,119 +70,6 @@ func (s *Server) pickToolsetsAccount(excluded map[int64]bool) (*store.Account, e
 	// selectAccount(pinned=nil) 退化为 pickAccount 轮询；messages 传 nil（指纹粘性不适用）。
 	acc, _, err := s.Router.SelectAccount(nil, excluded, nil, false)
 	return acc, err
-}
-
-func (s *Server) toolsetsNonStream(w http.ResponseWriter, r *http.Request, raw []byte, ar AnthropicReq, lc toolsetsLogContext) {
-	excluded := map[int64]bool{}
-	var lastRes *provider.Result
-	for attempt := 0; attempt < 3; attempt++ {
-		acc, err := s.pickToolsetsAccount(excluded)
-		if err != nil {
-			anthropicError(w, 503, "no available account: "+err.Error(), "api_error")
-			return
-		}
-		started := time.Now()
-		res, body := s.Router.Toolsets.Chat(r.Context(), acc, raw, ar.Model, attempt)
-		s.logToolsetsAttempt(acc, r, res, ar, false, lc, started)
-		if res.Success {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			w.Write(body)
-			return
-		}
-		lastRes = res
-		// 请求内容错误：换号无用，直接返回。
-		if res.RequestRejected {
-			break
-		}
-		// session 失效属账号自身问题：标离线摘号（与主路由 AuthFailed 同口径），换下一个。
-		if res.AuthFailed {
-			s.Router.MarkAccountOffline(acc, "session 失效: "+res.Error)
-			excluded[acc.ID] = true
-			continue
-		}
-		// 限频/上游波动：排除该号换下一个重试。
-		excluded[acc.ID] = true
-	}
-	_, typ, code := toolsetsErrorStatus(lastRes)
-	anthropicError(w, code, lastRes.Error, typ)
-}
-
-func (s *Server) toolsetsStream(w http.ResponseWriter, r *http.Request, raw []byte, ar AnthropicReq, lc toolsetsLogContext) {
-	fl, ok := w.(http.Flusher)
-	if !ok {
-		anthropicError(w, 500, "stream unsupported", "api_error")
-		return
-	}
-	started := false
-	writeEvent := func(name string, data []byte) {
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", name, data)
-		fl.Flush()
-	}
-	ensureStarted := func() {
-		if started {
-			return
-		}
-		started = true
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-	}
-
-	excluded := map[int64]bool{}
-	for attempt := 0; attempt < 3; attempt++ {
-		acc, err := s.pickToolsetsAccount(excluded)
-		if err != nil {
-			anthropicError(w, 503, "no available account: "+err.Error(), "api_error")
-			return
-		}
-		reqStart := time.Now()
-		res := s.Router.Toolsets.StreamChat(r.Context(), acc, raw, ar.Model, attempt, func(event string, data []byte) error {
-			ensureStarted()
-			writeEvent(event, data)
-			return nil
-		})
-		s.logToolsetsAttempt(acc, r, res, ar, true, lc, reqStart)
-		if res.Success {
-			return
-		}
-		if started {
-			// 已向客户端开流，无法回退 JSON 错误——发 Anthropic 标准 error 事件让 SDK 干净收尾。
-			writeEvent("error", []byte(mustJSON(map[string]interface{}{
-				"type":  "error",
-				"error": map[string]string{"type": "api_error", "message": res.Error},
-			})))
-			return
-		}
-		if res.AuthFailed {
-			// session 失效属账号自身问题：标离线摘号（与主路由 AuthFailed 同口径），换下一个。
-			s.Router.MarkAccountOffline(acc, "session 失效: "+res.Error)
-			excluded[acc.ID] = true
-			continue
-		}
-		if res.RequestRejected {
-			_, typ, code := toolsetsErrorStatus(res)
-			anthropicError(w, code, res.Error, typ)
-			return
-		}
-		// 限频/上游波动：排除该号换下一个。
-		excluded[acc.ID] = true
-	}
-	anthropicError(w, 529, "toolsets upstream busy after retries", "overloaded_error")
-}
-
-// toolsetsErrorStatus 把 Result 的错误分类映射为 Anthropic 协议的 (错误类型, 状态码)。
-func toolsetsErrorStatus(res *provider.Result) (string, string, int) {
-	switch {
-	case res.AuthFailed:
-		return "authentication_error", "authentication_error", 401
-	case res.RequestRejected:
-		return "invalid_request_error", "invalid_request_error", 400
-	case res.RateLimited:
-		// 529 overloaded_error 是 Anthropic 表达「上游暂时不可用」的标准方式（503 不在其枚举内）。
-		return "overloaded_error", "overloaded_error", 529
-	default:
-		return "api_error", "api_error", 500
-	}
 }
 
 // logToolsetsAttempt 把 toolsets 请求直写面板请求日志（toolsets 无 credits 计量，
