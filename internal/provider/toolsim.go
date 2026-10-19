@@ -108,6 +108,11 @@ var requestRejectionMarkers = []string{
 	"no available tool",
 	"unsupported custom tool call",
 	"unsupported call:",
+	// 工具数超模型上限（"Agent Mode has N tools enabled, which is more than this model
+	// supports… | Tool limit exceeded"，2026-10-19 线上 opus-4-8 + 109 个 MCP 工具实测）。
+	// 按模型档位卡的上限,与账号无关——换号/重试必然复现,直接 400 让客户端减工具或换模型。
+	"tool limit exceeded",
+	"more than this model supports",
 }
 
 func isRequestRejectionMessage(msg string) bool {

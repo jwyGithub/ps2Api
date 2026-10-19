@@ -4,6 +4,15 @@ import (
 	"strings"
 )
 
+// MaxThirdPartyTools 是 thirdParty 工具的出站数量硬上限。
+// 2026-10-19 线上实测（二分探针，opus-4-8 与 opus-5-5 同结果）：上游按「Agent Mode
+// 启用工具总数」卡上限——报数 = thirdParty 数 + 12（恒定偏移，nativeToolsHash 全集里
+// 未被 excludedTools 盖住的计数口径），边界 thirdParty 108 过 / 109 挂 → 总数上限 120
+// （"Agent Mode has 121 tools enabled, which is more than this model supports… |
+// Tool limit exceeded"）。超限按客户端声明顺序保留前 108 个——被裁掉的 MCP 工具模型
+// 不调而已，客户端本地工具执行不受影响。
+const MaxThirdPartyTools = 108
+
 func (p *Provider) buildThirdPartyTools(tools []interface{}) map[string]interface{} {
 	if len(tools) == 0 {
 		return map[string]interface{}{}
@@ -13,6 +22,9 @@ func (p *Provider) buildThirdPartyTools(tools []interface{}) map[string]interfac
 		name := extractToolName(tool)
 		if name == "" || isClientReservedTool(name) {
 			continue
+		}
+		if len(mcpTools) >= MaxThirdPartyTools {
+			break
 		}
 		desc := extractToolDesc(tool)
 		if desc == "" {
