@@ -107,6 +107,9 @@ func (s *Server) Register(mux *http.ServeMux) {
 	// /api/models 供面板「模型映射」页渲染上游模型下拉（复用 /v1/models 同一份清单，
 	// 走 /api/* 会话鉴权而非 API Key——面板页面 fetch 不带 Key）。
 	mux.HandleFunc("GET /api/models", s.models)
+	// /api/models/refresh 实时拉上游 /config 模型清单（Agent Mode /chat 端 selectedModel
+	// 合法值），写入动态缓存并返回；/v1/models 与 /api/models 随即合并展示。
+	mux.HandleFunc("POST /api/models/refresh", s.refreshModels)
 	mux.HandleFunc("DELETE /api/cache-probe", s.cacheProbeReset)
 	mux.HandleFunc("POST /api/sql-query", s.sqlQuery)
 
@@ -196,5 +199,48 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 	if !s.auth(w, r) {
 		return
 	}
-	jsonWrite(w, 200, map[string]interface{}{"object": "list", "data": provider.PostmanModels})
+	jsonWrite(w, 200, map[string]interface{}{"object": "list", "data": s.modelList()})
+}
+
+// modelList 合并静态 PostmanModels 与 /config 动态拉到的 /chat 模型（去重，静态优先）。
+// 动态清单未拉取过时只有静态表——行为与接入前一致。
+func (s *Server) modelList() []provider.ModelInfo {
+	out := append([]provider.ModelInfo{}, provider.PostmanModels...)
+	seen := map[string]bool{}
+	for _, m := range out {
+		seen[strings.ToLower(m.ID)] = true
+	}
+	for _, key := range provider.DynamicModelKeys() {
+		id := strings.ToLower(key)
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, provider.ModelInfo{ID: id, Object: "model", Created: 1700000000, OwnedBy: "postman"})
+	}
+	return out
+}
+
+// refreshModels 用号池第一个在线账号实时拉 /config 模型清单并写入动态缓存。
+// 面板「模型映射」页与 /v1/models 的动态模型来源；失败回 502 带上游错误细节。
+func (s *Server) refreshModels(w http.ResponseWriter, r *http.Request) {
+	if !s.auth(w, r) {
+		return
+	}
+	acc, err := s.Router.Pool.Next(nil)
+	if err != nil {
+		jsonError(w, 503, "无可用账号: "+err.Error(), "service_unavailable")
+		return
+	}
+	cfg, err := s.Router.Provider.FetchAgentModeModels(r.Context(), acc)
+	if err != nil {
+		jsonError(w, 502, err.Error(), "upstream_error")
+		return
+	}
+	jsonWrite(w, 200, map[string]interface{}{
+		"default_model":      cfg.DefaultModel,
+		"models":             cfg.Models,
+		"primary_model_keys": cfg.PrimaryModelKeys,
+		"dynamic_keys":       provider.DynamicModelKeys(),
+	})
 }

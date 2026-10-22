@@ -45,7 +45,7 @@
     return html + arrow(1, p.page >= p.pages, p.page + 1);
   }
   var charts = {};
-  var providerModels = ['gpt-5.6-luna','gpt-5.6-sol','gpt-5.6-terra','gpt-5.5','gpt-5.4','gpt-5.2','claude-opus-4-8','claude-sonnet-4-6','claude-haiku-4-5','auto'];
+  var providerModels = ['gpt-6.1-sol','gpt-6-sol','gpt-6-luna','gpt-5.6-luna','gpt-5.6-sol','gpt-5.6-terra','gpt-5.5','gpt-5.4','gpt-5.2','claude-opus-4-8','claude-sonnet-4-6','claude-haiku-4-5','auto'];
 
   function loadFragment(path) {
     return fetch('/dashboard/' + path).then(function (r) {
@@ -1612,7 +1612,7 @@
   // 加新模型不用改前端）；拉取失败回退内置精简清单。默认选中 claude-opus-4-8。
   var acctTestModelsCache = null;
   function acctTestModelOptions() {
-    var fallback = ['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5', 'gpt-5.6-sol', 'auto'];
+    var fallback = ['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5', 'gpt-6.1-sol', 'gpt-5.6-sol', 'auto'];
     var models = acctTestModelsCache || fallback;
     return models.map(function (m) {
       return '<option value="' + m + '"' + (m === 'claude-opus-4-8' ? ' selected' : '') + '>' + esc(m) + '</option>';

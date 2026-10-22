@@ -47,6 +47,8 @@ func main() {
 	go server.Router.StartDailyLogCleanup(context.Background())
 	// 每日 23:10 清理 FREE 套餐账号（风控实验结论：FREE 号分类器阈值过低，留存弊大于利）。
 	go server.Router.StartDailyFreeCleanup(context.Background())
+	// /chat 端模型清单实时发现（启动一次 + 每 6 小时同步；失败静态映射兜底）。
+	go server.Router.StartModelRefresh(context.Background())
 	mux := http.NewServeMux()
 	server.Register(mux)
 
