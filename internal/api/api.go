@@ -204,19 +204,24 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 
 // modelList 合并静态 PostmanModels 与 /config 动态拉到的 /chat 模型（去重，静态优先）。
 // 动态清单未拉取过时只有静态表——行为与接入前一致。
+// 去重按「上游 selectedModel 值」比对而非对外名：动态 key 是下划线形态（GPT_61_SOL）、
+// 静态对外名是连字符（gpt-6.1-sol），字面对不上；同一上游模型的两种形态只保留静态条目。
 func (s *Server) modelList() []provider.ModelInfo {
 	out := append([]provider.ModelInfo{}, provider.PostmanModels...)
-	seen := map[string]bool{}
-	for _, m := range out {
-		seen[strings.ToLower(m.ID)] = true
+	// 静态表已覆盖的上游模型值集合（含 auto → DefaultPostmanModel）。
+	covered := map[string]bool{}
+	for _, v := range provider.PostmanModelMap {
+		if v == "" {
+			v = provider.DefaultPostmanModel
+		}
+		covered[v] = true
 	}
 	for _, key := range provider.DynamicModelKeys() {
-		id := strings.ToLower(key)
-		if seen[id] {
+		if covered[key] {
 			continue
 		}
-		seen[id] = true
-		out = append(out, provider.ModelInfo{ID: id, Object: "model", Created: 1700000000, OwnedBy: "postman"})
+		covered[key] = true
+		out = append(out, provider.ModelInfo{ID: strings.ToLower(key), Object: "model", Created: 1700000000, OwnedBy: "postman"})
 	}
 	return out
 }
