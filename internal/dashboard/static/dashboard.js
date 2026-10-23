@@ -261,6 +261,18 @@
   // ─── 号池管理 ───────────────────────────────────────────────
   // 卡片视图每页张数：xl 三列 × 四行。
   var POOLS_CARD_SIZE = 12;
+  // quotaResetDead 判断账号的周期重置是否已成死局：耗尽 + ext 续期已用 + 周期已过。
+  // free 回落号的上游额度是累计型（cumulative）没有重置概念，库里的 cycleEnd 只是
+  // ext trial 的到期残留——显示倒计时是永远不会兑现的假承诺（2026-10-23 排查结论）。
+  function quotaResetDead(a) {
+    if (a.status !== 'exhausted' || Number(a.extTrialCount || 0) <= 0) return false;
+    return !a.quotaCycleEnd || new Date(a.quotaCycleEnd).getTime() <= Date.now();
+  }
+  // quotaResetLabel 卡片「重置」位的文案：死局号显示「无周期」；其余照旧（时间+倒计时）。
+  function quotaResetLabel(a) {
+    if (quotaResetDead(a)) return '无周期（额度不重置）';
+    return fmtDate(a.quotaCycleEnd) + (a.quotaCycleEnd ? '（' + countdown(a.quotaCycleEnd) + '后）' : '');
+  }
   function renderPoolsReal() {
     var grid = document.getElementById('poolsCards'); if (!grid) return;
     var list = state.accounts.filter(function (a) {
@@ -280,7 +292,8 @@
             '<span class="dot ' + s.dot + '"></span>' +
             '<div class="min-w-0">' +
               '<div class="font-mono font-semibold text-[13px] truncate" title="' + esc(a.email) + '">' + esc(a.email) + '</div>' +
-              '<div class="text-[11px]" style="color:var(--muted)">ID ' + a.id + ' · ' + esc(sourceName(a.source)) + ' · ' + esc(a.plan || 'FREE_USER') + '</div>' +
+              '<div class="text-[11px]" style="color:var(--muted)">ID ' + a.id + ' · ' + esc(sourceName(a.source)) + ' · ' + esc(a.plan || 'FREE_USER') +
+                ' · 续期 <span class="font-mono" style="color:' + (Number(a.extTrialCount || 0) > 0 ? 'var(--accent)' : 'var(--muted)') + '" title="extension trial 已激活次数">' + (Number(a.extTrialCount || 0) > 0 ? '已用 1 次' : '未用') + '</span></div>' +
             '</div>' +
           '</div>' +
           '<span class="tag ' + s.tag + '">' + s.label + '</span>' +
@@ -293,7 +306,7 @@
           '<div class="progress" style="height:6px"><div class="progress-fill" style="width:' + pct + '%;background:' + color + '"></div></div>' +
         '</div>' +
         '<div class="flex items-center justify-between text-[11px]">' +
-          '<span style="color:var(--muted)">重置 <span class="font-mono" style="color:var(--fg-2)">' + fmtDate(a.quotaCycleEnd) + (a.quotaCycleEnd ? '（' + countdown(a.quotaCycleEnd) + '后）' : '') + '</span></span>' +
+          '<span style="color:var(--muted)">重置 <span class="font-mono" style="color:' + (quotaResetDead(a) ? 'var(--danger)' : 'var(--fg-2)') + '">' + quotaResetLabel(a) + '</span></span>' +
           '<span style="color:var(--muted)">今日调用 <span class="font-mono" style="color:var(--fg-2)">' + fmt(todayCalls(a.id)) + '</span></span>' +
         '</div>' +
         '<div class="flex items-center gap-1 pt-3" style="border-top:1px solid var(--border)">' +
@@ -1740,7 +1753,14 @@
       } else if (ta === 'skipped-base-active') {
         msg = who + ' 额度已耗尽，但当前基础试用未到期（现在续期会被截断），待基础试用到期后再点刷新即可自动续期。';
       } else if (ta === 'skipped-used') {
-        msg = who + ' 额度已耗尽，且试用续期已用过（无续期可开），等今日额度周期重置（晚间）恢复。';
+        // 试用/续期用尽回落 free 的号，free 额度是累计型没有周期重置——周期已过或没有周期
+        // 时「等晚间重置」是误导（2026-10-23 线上 pmc6ed7a0b99 实测），按周期状态分流提示。
+        var cyc = acc && acc.quotaCycleEnd ? new Date(acc.quotaCycleEnd) : null;
+        if (cyc && cyc.getTime() > Date.now()) {
+          msg = who + ' 额度已耗尽，且试用续期已用过（无续期可开），等额度周期重置（' + fmtDate(acc.quotaCycleEnd) + '，' + countdown(acc.quotaCycleEnd) + '后）恢复。';
+        } else {
+          msg = who + ' 额度已耗尽，且试用续期均已用尽——免费计划额度为累计型不会重置，此号已无可恢复额度。';
+        }
       } else if (ta === 'error') {
         msg += '（试用续期判断失败：上游波动，可稍后重试）';
       }

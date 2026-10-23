@@ -94,6 +94,9 @@ func (r *Router) extendTrialForAccount(ctx context.Context, acc *store.Account) 
 		log.Printf("[trial-extend] 账号 %d(%s) 查询 ext 槽位失败: %v", acc.ID, acc.Email, err)
 		return false, false
 	}
+	// 槽位查询是零消耗的：顺手把上游真实激活次数镜像落库（存改动前已开过 ext 的存量号
+	// 库里还是 0，每晚对齐一次即与上游一致；值相同则跳过写库）。
+	r.syncExtTrialCount(acc.ID, acc.ExtTrialCount, st.TrialActivationCount)
 	// 已激活过（activationCount>0 或有 trialStart）或明确不允许 → 跳过。
 	if !st.IsAllowed || st.TrialActivationCount > 0 || st.TrialStart != "" {
 		// 存量周期纠正（2026-10-16）：ext 已激活且未过期的号，库里周期可能还是 base
@@ -121,6 +124,9 @@ func (r *Router) extendTrialForAccount(ctx context.Context, acc *store.Account) 
 		return false, false
 	}
 	log.Printf("[trial-extend] 账号 %d(%s) extension trial 已开通, 截止 %s", acc.ID, acc.Email, res.TrialPeriodEnd)
+	if err := r.Store.SetExtTrialCount(acc.ID, 1); err != nil {
+		log.Printf("[trial-extend] 账号 %d 续期次数落库失败: %v", acc.ID, err)
+	}
 	r.syncCycleFromTrialEnd(acc.ID, res.TrialPeriodEnd)
 	// 异步刷新额度：开通后额度传播有 1-2 分钟延迟，延迟拉取一次落库（失败不影响，次日照常兜底）。
 	go func(id int64) {
@@ -138,6 +144,19 @@ func (r *Router) extendTrialForAccount(ctx context.Context, acc *store.Account) 
 
 // trialTimeLayout 是 trial 接口返回的时间格式（"2006-01-02 15:04:05"，时区为服务端本地）。
 const trialTimeLayout = "2006-01-02 15:04:05"
+
+// syncExtTrialCount 把上游 ext 槽位的激活次数镜像落库。仅在次数变化时写（避免每晚重复
+// UPDATE 推高 updated_at）；上游查询失败不影响调用方主流程（本函数零 panic、静默失败）。
+func (r *Router) syncExtTrialCount(id int64, current, upstream int) {
+	if current == upstream {
+		return
+	}
+	if err := r.Store.SetExtTrialCount(id, upstream); err != nil {
+		log.Printf("[trial-extend] 账号 %d 续期次数同步失败: %v", id, err)
+		return
+	}
+	log.Printf("[trial-extend] 账号 %d 续期次数已同步: %d → %d", id, current, upstream)
+}
 
 // syncCycleFromTrialEnd 开通 trial 后把新周期落库：end 取 trial_period_end，start 取当前
 // 时间。quotaCycleStart/End 驱动 RefreshDueQuotas 的周期重置扫描与面板展示——不更新的话
@@ -245,6 +264,8 @@ func (r *Router) evaluateTrialForExhausted(ctx context.Context, acc *store.Accou
 		log.Printf("[trial-refresh] 账号 %d(%s) 查询 ext 槽位失败: %v", acc.ID, acc.Email, err)
 		return "error", false
 	}
+	// 与每晚 ExtendTrialsDue 同口径：零消耗查询顺手镜像上游激活次数（存量号对齐）。
+	r.syncExtTrialCount(acc.ID, acc.ExtTrialCount, st.TrialActivationCount)
 	if !st.IsAllowed || st.TrialActivationCount > 0 || st.TrialStart != "" {
 		return "skipped-used", false
 	}
@@ -263,6 +284,9 @@ func (r *Router) evaluateTrialForExhausted(ctx context.Context, acc *store.Accou
 		return "error", false
 	}
 	log.Printf("[trial-refresh] 账号 %d(%s) 手动刷新触发 extension trial 开通, 截止 %s", acc.ID, acc.Email, res.TrialPeriodEnd)
+	if err := r.Store.SetExtTrialCount(acc.ID, 1); err != nil {
+		log.Printf("[trial-refresh] 账号 %d 续期次数落库失败: %v", acc.ID, err)
+	}
 	r.syncCycleFromTrialEnd(acc.ID, res.TrialPeriodEnd)
 	// 开通后额度传播有 1-2 分钟延迟，延迟拉取一次落库（失败静默，晚点定期探测会兜底）。
 	go func(id int64) {

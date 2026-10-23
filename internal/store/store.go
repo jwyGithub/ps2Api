@@ -35,6 +35,8 @@ type Account struct {
 	QuotaWarningThresholds []QuotaThreshold `json:"quotaWarningThresholds"`
 	QuotaCycleStart        *time.Time       `json:"quotaCycleStart"`
 	QuotaCycleEnd          *time.Time       `json:"quotaCycleEnd"`
+	// ExtTrialCount 是 extension trial 已激活次数（上游 trialActivationCount 镜像，0/1）。
+	ExtTrialCount          int              `json:"extTrialCount"`
 	RateLimit              int              `json:"rateLimit"`
 	RateRemaining          int              `json:"rateRemaining"`
 	RateWindowSeconds      int              `json:"rateWindowSeconds"`
@@ -136,6 +138,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   quota_warning_thresholds TEXT NOT NULL DEFAULT '[]',
   quota_cycle_start DATETIME,
   quota_cycle_end DATETIME,
+  ext_trial_count INTEGER NOT NULL DEFAULT 0,
   rate_limit INTEGER NOT NULL DEFAULT 0,
   rate_remaining INTEGER NOT NULL DEFAULT 0,
   rate_window_seconds INTEGER NOT NULL DEFAULT 0,
@@ -193,6 +196,9 @@ CREATE TABLE IF NOT EXISTS api_keys (
 		{"quota_state", "TEXT NOT NULL DEFAULT ''"}, {"quota_allow_overage", "INTEGER NOT NULL DEFAULT 0"},
 		{"quota_team_pooled", "INTEGER NOT NULL DEFAULT 0"}, {"quota_warning_thresholds", "TEXT NOT NULL DEFAULT '[]'"},
 		{"quota_cycle_start", "DATETIME"}, {"quota_cycle_end", "DATETIME"},
+		// ext_trial_count：extension trial 已激活次数（上游 trialActivationCount 的落库镜像）。
+		// 卡片展示 + skipped-used 判定参考；每晚零消耗槽位查询顺手回填对齐上游。
+		{"ext_trial_count", "INTEGER NOT NULL DEFAULT 0"},
 		{"rate_limit", "INTEGER NOT NULL DEFAULT 0"}, {"rate_remaining", "INTEGER NOT NULL DEFAULT 0"},
 		{"rate_window_seconds", "INTEGER NOT NULL DEFAULT 0"}, {"rate_reset_at", "DATETIME"},
 		// 账号类型：WEB | DESKTOP
@@ -266,6 +272,7 @@ func (s *Store) ListAccounts() ([]*Account, error) {
 	rows, err := s.db.Query(`SELECT id,email,password,status,enabled,tokens,account_type,source,plan,
 		quota_limit,quota_used,quota_remaining,quota_overage,quota_spillage,quota_state,
 		quota_allow_overage,quota_team_pooled,quota_warning_thresholds,quota_cycle_start,quota_cycle_end,
+		ext_trial_count,
 		rate_limit,rate_remaining,rate_window_seconds,rate_reset_at,
 		last_used_at,last_login_at,error_message,created_at,updated_at FROM accounts ORDER BY id`)
 	if err != nil {
@@ -282,6 +289,7 @@ func (s *Store) ListAccounts() ([]*Account, error) {
 			&a.ID, &a.Email, &a.Password, &a.Status, &enabled, &tokens, &accountType, &source, &plan,
 			&a.QuotaLimit, &a.QuotaUsed, &a.QuotaRemaining, &a.QuotaOverage, &a.QuotaSpillage, &quotaState,
 			&allowOverage, &teamPooled, &thresholds, &cycleStart, &cycleEnd,
+			&a.ExtTrialCount,
 			&a.RateLimit, &a.RateRemaining, &a.RateWindowSeconds, &rateReset,
 			&lastUsed, &lastLogin, &errmsg, &a.CreatedAt, &a.UpdatedAt,
 		); err != nil {
@@ -427,6 +435,13 @@ func (s *Store) SetQuotaSnapshot(id int64, q QuotaSnapshot) error {
 func (s *Store) SetQuotaCycle(id int64, start, end *time.Time) error {
 	_, err := s.db.Exec(`UPDATE accounts SET quota_cycle_start=?,quota_cycle_end=?,updated_at=? WHERE id=?`,
 		start, end, time.Now(), id)
+	return err
+}
+
+// SetExtTrialCount 更新 extension trial 已激活次数（上游 trialActivationCount 的镜像）。
+// 开通成功置 1；每晚零消耗槽位查询顺手对齐上游真实值。
+func (s *Store) SetExtTrialCount(id int64, count int) error {
+	_, err := s.db.Exec(`UPDATE accounts SET ext_trial_count=?,updated_at=? WHERE id=?`, count, time.Now(), id)
 	return err
 }
 
