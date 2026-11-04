@@ -14,7 +14,7 @@ type Provider struct {
 	Client    *http.Client
 	proxies   *proxyPool
 	cookies   *accountCookieJars
-	convStore ConversationStore // 会话 ID / 归属账号 / 工具调用组映射（默认进程内内存，配置 REDIS_URL 时用 Redis）
+	convStore ConversationStore // 会话 ID / 归属账号 / 工具调用组映射（默认进程内内存，配置 Redis 时用 Redis）
 }
 
 func New() *Provider {

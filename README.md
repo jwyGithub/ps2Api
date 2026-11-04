@@ -186,7 +186,7 @@ curl http://127.0.0.1:1930/v1/messages \
 | `DATABASE_PATH`         | `/data/gateway.db`（镜像内）     | SQLite 路径                                                       |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | （空）               | 面板登录凭据。设置 `ADMIN_PASSWORD` 即启用登录（未登录访问跳 `/login`），留空维持无密码模式 |
 | `GATEWAY_SESSION_SECRET` | 进程随机生成                    | 登录会话 Cookie 的 HMAC 签名密钥。多副本 / 重启后会话仍有效需显式设置 |
-| `REDIS_URL` / `REDIS_ADDR` | （空）                        | Redis 连接串（`redis://user:pass@host:port/db`；`REDIS_ADDR` 兼容裸 `host:port`）。配置后**会话映射**（指纹→conversationId / 归属账号）跨实例共享，解析或连接失败自动回退进程内存储 |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_USERNAME` / `REDIS_PASSWORD` / `REDIS_DB` | `host.docker.internal` / `6379` / （空） / （空） / `1` | Redis 分项连接配置；用户名和密码可留空。连接成功后**会话映射**（指纹→conversationId / 归属账号）跨实例共享，连接失败自动回退进程内存储 |
 | `REDIS_KEY_PREFIX`      | `ps2api`                         | Redis 键前缀（多套网关共用一个 Redis 时区分）                      |
 | `REDIS_CONV_TTL`        | `72h`                            | 会话映射的 TTL（Go duration 串；`0`/`off` 永不过期）                |
 | `GATEWAY_LOG_LEVEL`     | `debug`                          | 控制台链路日志级别：`debug`/`info`/`warn`/`error`/`off`。默认 `debug`（全量）；每条请求恒有 `trace_id`，关键事件按行输出，可 `grep <trace_id>` 捞出完整链路 |

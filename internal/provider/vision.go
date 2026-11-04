@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,7 +52,7 @@ type MediaResolver struct {
 	clients   map[string]*http.Client // 按出口代理 URL 缓存，复用连接池；"" = 直连
 }
 
-// NewMediaResolver 构造一个 resolver。cache 依 REDIS_URL/REDIS_ADDR 选择 Redis 或进程内实现。
+// NewMediaResolver 构造一个 resolver。cache 依 Redis 配置选择 Redis 或进程内实现。
 func NewMediaResolver(s *store.Store) *MediaResolver {
 	return &MediaResolver{
 		store:  s,
@@ -451,24 +450,14 @@ func newVisionCache() visionCache {
 	return newMemoryVisionCache()
 }
 
-// dialRedis 复用 newConversationStore 同款配置（REDIS_URL/REDIS_ADDR），拨号成功返回 client，否则 nil。
+// dialRedis 复用会话存储的 Redis 配置，拨号成功返回 client，否则 nil。
 func dialRedis() *redis.Client {
-	raw := strings.TrimSpace(os.Getenv("REDIS_URL"))
-	if raw == "" {
-		if addr := strings.TrimSpace(os.Getenv("REDIS_ADDR")); addr != "" {
-			if strings.Contains(addr, "://") {
-				raw = addr
-			} else {
-				raw = "redis://" + addr
-			}
-		}
-	}
-	if raw == "" {
+	opt, err := redisOptionsFromEnv()
+	if err != nil {
+		log.Printf("WARN: 图片识别缓存解析 Redis 配置失败，回退进程内缓存: %v", err)
 		return nil
 	}
-	opt, err := redis.ParseURL(raw)
-	if err != nil {
-		log.Printf("WARN: 图片识别缓存解析 Redis 连接串失败，回退进程内缓存: %v", err)
+	if opt == nil {
 		return nil
 	}
 	rdb := redis.NewClient(opt)

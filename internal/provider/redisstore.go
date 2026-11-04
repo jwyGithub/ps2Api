@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"log"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -241,27 +242,15 @@ func (r *redisConversationStore) scanDelete(ctx context.Context, match string) e
 // ─── 工厂与配置 ─────────────────────────────────────────────────
 
 // newConversationStore 依配置选择会话存储实现：
-//   - 设了 REDIS_URL（或 REDIS_ADDR）且探活成功 -> Redis 实现（多实例共享 + TTL 回收）。
+//   - 配置 Redis 连接信息且探活成功 -> Redis 实现（多实例共享 + TTL 回收）。
 //   - 未配置，或解析/连接失败 -> 回退进程内内存实现，保证网关永不因 Redis 不可用而拒服务。
 func newConversationStore() ConversationStore {
-	raw := strings.TrimSpace(os.Getenv("REDIS_URL"))
-	if raw == "" {
-		// 兼容裸 host:port 写法（REDIS_ADDR），补上 scheme 交给 ParseURL。
-		if addr := strings.TrimSpace(os.Getenv("REDIS_ADDR")); addr != "" {
-			if strings.Contains(addr, "://") {
-				raw = addr
-			} else {
-				raw = "redis://" + addr
-			}
-		}
-	}
-	if raw == "" {
+	opt, err := redisOptionsFromEnv()
+	if err != nil {
+		log.Printf("WARN: 解析 Redis 配置失败，回退进程内会话存储: %v", err)
 		return newMemoryConversationStore()
 	}
-
-	opt, err := redis.ParseURL(raw)
-	if err != nil {
-		log.Printf("WARN: 解析 Redis 连接串失败，回退进程内会话存储: %v", err)
+	if opt == nil {
 		return newMemoryConversationStore()
 	}
 	rdb := redis.NewClient(opt)
@@ -276,6 +265,32 @@ func newConversationStore() ConversationStore {
 	store.addr = opt.Addr
 	store.db = opt.DB
 	return store
+}
+
+// redisOptionsFromEnv reads the host-based Redis settings.
+func redisOptionsFromEnv() (*redis.Options, error) {
+	host := strings.TrimSpace(os.Getenv("REDIS_HOST"))
+	if host == "" {
+		return nil, nil
+	}
+	port := strings.TrimSpace(os.Getenv("REDIS_PORT"))
+	if port == "" {
+		port = "6379"
+	}
+	db := 0
+	if rawDB := strings.TrimSpace(os.Getenv("REDIS_DB")); rawDB != "" {
+		var err error
+		db, err = strconv.Atoi(rawDB)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &redis.Options{
+		Addr:     net.JoinHostPort(host, port),
+		Username: os.Getenv("REDIS_USERNAME"),
+		Password: os.Getenv("REDIS_PASSWORD"),
+		DB:       db,
+	}, nil
 }
 
 func redisKeyPrefix() string {

@@ -13,9 +13,11 @@ services:
       # - GATEWAY_PORT=1930
       - GATEWAY_TRACE_LOG=1
       - GATEWAY_TRACE_DIR=/data/traces
-      # 复用服务器上已有的 redis:8-alpine（容器名 sub2api-redis，在 sub2api_sub2api-network 网络内）。
-      # 用独立 DB 索引 /1 + 键前缀 ps2api，与 sub2api 隔离，避免键冲突。
-      - REDIS_URL=redis://sub2api-redis:6379/1
+      - REDIS_HOST=host.docker.internal
+      - REDIS_PORT=6379
+      - REDIS_USERNAME=${REDIS_USERNAME:-}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_DB=${REDIS_DB:-1}
       - REDIS_KEY_PREFIX=ps2api
       # 面板登录：ADMIN_PASSWORD 不设则关闭登录（保持无密码引导态）。
       # 多副本或希望重启后会话不掉线时，再设一个固定的 GATEWAY_SESSION_SECRET。
@@ -25,7 +27,6 @@ services:
       # - REDIS_CONV_TTL=72h      # 会话映射存活时长，0/off/none/never 表示永不过期
     networks:
       - default
-      - sub2api-net
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:1930/health"]
       interval: 30s
@@ -36,7 +37,3 @@ services:
 networks:
   # 项目自身的默认网络（保持 ps2api 原有的对外/对内连通性）
   default:
-  # 复用已存在的外部网络，用于连到 sub2api-redis
-  sub2api-net:
-    external: true
-    name: sub2api_sub2api-network

@@ -1,6 +1,8 @@
 package provider
 
 import (
+	"net"
+	"reflect"
 	"testing"
 	"time"
 
@@ -124,17 +126,36 @@ func TestRedisConversation_Reset(t *testing.T) {
 }
 
 func TestNewConversationStore_FallbackWhenNoRedis(t *testing.T) {
-	t.Setenv("REDIS_URL", "")
-	t.Setenv("REDIS_ADDR", "")
+	for _, key := range []string{"REDIS_HOST", "REDIS_PORT", "REDIS_USERNAME", "REDIS_PASSWORD", "REDIS_DB"} {
+		t.Setenv(key, "")
+	}
 	if _, ok := newConversationStore().(*memoryConversationStore); !ok {
 		t.Fatal("未配置 Redis 时应回退内存实现")
 	}
 }
 
-func TestNewConversationStore_FallbackWhenBadURL(t *testing.T) {
-	t.Setenv("REDIS_URL", "not-a-valid-url")
+func TestRedisOptionsFromHostEnv(t *testing.T) {
+	for key, value := range map[string]string{
+		"REDIS_HOST": "host.docker.internal",
+		"REDIS_PORT": "6379", "REDIS_USERNAME": "user", "REDIS_PASSWORD": "secret", "REDIS_DB": "1",
+	} {
+		t.Setenv(key, value)
+	}
+
+	opt, err := redisOptionsFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (redis.Options{Addr: "host.docker.internal:6379", Username: "user", Password: "secret", DB: 1}); !reflect.DeepEqual(*opt, want) {
+		t.Fatalf("Redis options = %#v, want %#v", *opt, want)
+	}
+}
+
+func TestNewConversationStore_FallbackWhenBadDB(t *testing.T) {
+	t.Setenv("REDIS_HOST", "localhost")
+	t.Setenv("REDIS_DB", "invalid")
 	if _, ok := newConversationStore().(*memoryConversationStore); !ok {
-		t.Fatal("Redis 连接串非法时应回退内存实现")
+		t.Fatal("Redis DB 配置非法时应回退内存实现")
 	}
 }
 
@@ -145,7 +166,15 @@ func TestNewConversationStore_UsesRedisWhenReachable(t *testing.T) {
 	}
 	defer mr.Close()
 
-	t.Setenv("REDIS_URL", "redis://"+mr.Addr())
+	host, port, err := net.SplitHostPort(mr.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REDIS_HOST", host)
+	t.Setenv("REDIS_PORT", port)
+	t.Setenv("REDIS_USERNAME", "")
+	t.Setenv("REDIS_PASSWORD", "")
+	t.Setenv("REDIS_DB", "1")
 	store := newConversationStore()
 	if _, ok := store.(*redisConversationStore); !ok {
 		t.Fatalf("Redis 可达时应使用 Redis 实现，得到 %T", store)
