@@ -527,8 +527,12 @@
     }).join('') || '<tr><td colspan="9" style="text-align:center;padding:30px;color:var(--muted)">暂无 API Key，点击右上角「新增 API KEY」创建</td></tr>';
   }
   window.copyKey = function (k) {
-    if (navigator.clipboard) navigator.clipboard.writeText(k).then(function () { toast('密钥已复制'); });
-    else toast(k);
+    var done = function () { toast('密钥已复制'); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(k).then(done, function () { fallbackCopy(k, done); });
+    } else {
+      fallbackCopy(k, done);
+    }
   };
   window.openKeyDrawer = function (id) {
     var drawer = document.getElementById('keyDrawer'), backdrop = document.getElementById('keyDrawerBackdrop');
