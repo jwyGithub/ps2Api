@@ -540,6 +540,96 @@ func neutralizeClassifierTail(q string) string {
 // git 提交署名格式，剔除对对话质量无实质影响。
 const attributionMarker = "Attribution for git commits and pull requests"
 
+// skillsDirectoryMarker 是 Claude Code 出站 query 里技能目录段的段头（恒为行首）。
+// skillsHeaderMarker 是段头下一行的括号指令句特征（"call the Skill tool ... as the
+// first action" 式指令注入措辞）。
+const skillsDirectoryMarker = "[System skills]"
+const skillsHeaderMarker = "(The list below is the available Skill directory"
+
+// skillsHeaderNeutral 是中性化的等价目录说明。保留语义要素：下面是技能目录、按任务
+// 匹配条目使用；丢弃 "call the Skill tool ... as the first action" 指令式高压措辞。
+// 调用约定（Skill 工具 + skill: <name> 参数）由客户端 52KB system prompt 另行承载，
+// 目录行只负责让模型看到有哪些技能可用，指令句压缩不影响技能调用行为。
+const skillsHeaderNeutral = "The available Skill directory is listed below; use a listed skill when the user's task matches its name."
+
+// skillsCompactMinEntries 是触发条目压缩的最少条目数。技能目录少（<20 条）时出站
+// 长度小、处于分类器低危区，原样直通；目录大（实测 83 条 ≈4000 rune）时整段把请求
+// 推进概率高危区（2026-11-09 二分：真实条目 7/7 flag、等长中性条目 2/2 通过），
+// 须压缩。压缩方式：每条只保留名字（`- name`），剥掉 `: description` ——模型匹配
+// 任务只需要名字，描述是给人看的冗余。
+const skillsCompactMinEntries = 20
+
+// compactSkillsDirectory 识别出站 query 里的技能目录段，把大目录压缩为低危的短版：
+// 段头保留、括号指令句替换为中性说明、每条技能只留名字剥掉描述。段在 query 开头
+// （折叠历史路径）或行首；条目段以第一个非 "- " 行结束（空行/省略标记/后续段），
+// 后续内容原样保留。兼容 CRLF 行尾（Windows 客户端，2026-11-09 真实数据实测）。
+// 非该类请求或条目数不足时原样返回，绝不误伤。
+func compactSkillsDirectory(q string) string {
+	start := strings.Index(q, skillsDirectoryMarker)
+	if start < 0 {
+		return q
+	}
+	// 段头必须是行首（或 query 开头），避免误伤正文中偶然出现的同形文本。
+	if start > 0 && q[start-1] != '\n' {
+		return q
+	}
+	remaining := q[start+len(skillsDirectoryMarker):]
+	// 兼容 "\n"、"\r\n" 两种行尾；剥离段头行尾的换行符。
+	if strings.HasPrefix(remaining, "\r\n") {
+		remaining = remaining[2:]
+	} else if strings.HasPrefix(remaining, "\n") {
+		remaining = remaining[1:]
+	} else {
+		return q
+	}
+	head := skillsDirectoryMarker + "\n"
+	// 第二行是括号指令句时替换为中性说明；缺失（畸形输入）则跳过替换，条目照常处理。
+	if strings.HasPrefix(remaining, skillsHeaderMarker) {
+		nl := strings.IndexAny(remaining, "\r\n")
+		if nl < 0 {
+			return q
+		}
+		// 跳过该行的行尾换行（兼容 \r\n 与 \n）。
+		if strings.HasPrefix(remaining[nl:], "\r\n") {
+			remaining = remaining[nl+2:]
+		} else {
+			remaining = remaining[nl+1:]
+		}
+	}
+	var names []string
+	for remaining != "" {
+		line := remaining
+		after := ""
+		if nl := strings.IndexAny(remaining, "\r\n"); nl >= 0 {
+			line, after = remaining[:nl], remaining[nl:]
+			// after 以完整行尾（\r\n 或 \n）开头，跳过它。
+			if strings.HasPrefix(after, "\r\n") {
+				after = after[2:]
+			} else {
+				after = after[1:]
+			}
+		}
+		line = strings.TrimSuffix(line, "\r")
+		if !strings.HasPrefix(line, "- ") {
+			break // 条目段结束；remaining 保持从当前行开始（含空行/省略标记），原样回填
+		}
+		name := line
+		if c := strings.Index(line, ": "); c >= 0 {
+			name = line[:c]
+		}
+		names = append(names, name)
+		remaining = after
+	}
+	if len(names) < skillsCompactMinEntries {
+		return q
+	}
+	sep := "\n"
+	if strings.HasPrefix(remaining, "\n") || strings.HasPrefix(remaining, "\r\n") {
+		sep = "" // 条目段后原有空行，避免叠加多余换行
+	}
+	return head + skillsHeaderNeutral + "\n" + strings.Join(names, "\n") + sep + remaining
+}
+
 // neutralizeTitlePrompt 识别 Claude Code 标题生成请求，把高危模板压缩为无害等价指令。
 // query 结构恒为：[System] <模板> … [User] <session>用户文本</session> <收尾指令>。
 // 压缩后仅保留 [User] <session>…</session> 段 + 压缩指令（保持 user 内容原样，

@@ -43,7 +43,9 @@ func TestFoldedSystemKeepsSkillList(t *testing.T) {
 	}
 	// 使用指令必须随清单同段：中段省略吃掉 user 段 system-reminder 里的调用说明后，
 	// 模型见名单却不知如何调用（2026-09-23）。指令与清单绑死才能同步存活。
-	if !strings.HasPrefix(query, "[System skills]\n(The list below is the available Skill directory.") {
+	// 2026-11-09 起：出站层 compactSkillsDirectory 把 ≥20 条的目录压缩为名字-only +
+	// 中性指令句（原括号指令句是概率性 flag 信号），故这里断言中性版而非原版措辞。
+	if !strings.HasPrefix(query, "[System skills]\n"+skillsHeaderNeutral) {
 		t.Fatalf("skill invocation instruction must be bound to the skill list section, got head: %q", query[:160])
 	}
 	// 89 条名字应全数存活（描述超预算的降级为名字-only）

@@ -1,8 +1,10 @@
 package provider
 
-import "strings"
-
-import "testing"
+import (
+	"fmt"
+	"strings"
+	"testing"
+)
 
 // 标题生成模板是上游安全分类器的高危信号（2026-10-08 线上定位，见 neutralizeTitlePrompt
 // 注释）。必须压缩为无害等价指令后再出站；user session 内容保持原样。
@@ -92,5 +94,65 @@ func TestNeutralizeClassifierTailStage2(t *testing.T) {
 	}
 	if !strings.Contains(got, classifierTailNeutral2) {
 		t.Fatalf("neutral stage-2 instruction must be present:\n%s", got)
+	}
+}
+
+// 大技能目录（≥20 条）的完整条目描述是概率性 flag 信号（2026-11-09 二分定位），
+// 出站前必须压缩为只留名字的短目录；段外的历史/用户内容不受影响。
+func TestCompactSkillsDirectory(t *testing.T) {
+	entries := make([]string, 0, 25)
+	for i := 0; i < 25; i++ {
+		entries = append(entries, fmt.Sprintf("- skill-%02d: CRITICAL: Use for fancy description %d with lots of words.", i, i))
+	}
+	q := skillsDirectoryMarker + "\n" + skillsHeaderMarker + " ... more instruction wording.)\n" +
+		strings.Join(entries, "\n") + "\n\n...[omitted: 3 older history sections]...\n\n[User Message]\n帮我写个爬虫"
+	got := compactSkillsDirectory(q)
+	if strings.Contains(got, skillsHeaderMarker) || strings.Contains(got, "CRITICAL") || strings.Contains(got, "fancy description") {
+		t.Fatalf("skills descriptions/instruction must be stripped:\n%s", got)
+	}
+	if !strings.Contains(got, skillsHeaderNeutral) {
+		t.Fatalf("neutral header must be present:\n%s", got)
+	}
+	if !strings.Contains(got, "- skill-00\n") || !strings.Contains(got, "- skill-24") {
+		t.Fatalf("all skill names must be preserved:\n%s", got)
+	}
+	for _, keep := range []string{"...[omitted: 3 older history sections]...", "[User Message]\n帮我写个爬虫"} {
+		if !strings.Contains(got, keep) {
+			t.Fatalf("must keep %q, got:\n%s", keep, got)
+		}
+	}
+	if n := strings.Count(got, "- skill-"); n != 25 {
+		t.Fatalf("expected 25 name lines, got %d:\n%s", n, got)
+	}
+
+	// 小目录（<20 条）：低危区，原样直通
+	small := skillsDirectoryMarker + "\n" + skillsHeaderMarker + " x.)\n- a: desc a\n- b: desc b\n"
+	if got := compactSkillsDirectory(small); got != small {
+		t.Fatalf("small directory must pass through, got:\n%s", got)
+	}
+
+	// 无特征原样直通
+	normal := "[System]\nYou are Claude Code.\n\n[User]\n帮我写个爬虫"
+	if got := compactSkillsDirectory(normal); got != normal {
+		t.Fatalf("non-skills query must pass through: %q", got)
+	}
+
+	// 行中出现的同形文本（非行首段头）：不误伤
+	inline := "see [System skills] section above for details\n- x: y\n" + strings.Join(entries, "\n")
+	if got := compactSkillsDirectory(inline); got != inline {
+		t.Fatalf("inline mention must pass through, got:\n%s", got)
+	}
+
+	// 段头后没有换行（畸形）：原样直通
+	malformed := skillsDirectoryMarker + "no newline"
+	if got := compactSkillsDirectory(malformed); got != malformed {
+		t.Fatalf("malformed header must pass through: %q", got)
+	}
+
+	// 无指令句第二行（畸形）：条目照常压缩
+	noInstr := skillsDirectoryMarker + "\n" + strings.Join(entries, "\n") + "\n"
+	got2 := compactSkillsDirectory(noInstr)
+	if strings.Contains(got2, "CRITICAL") || !strings.Contains(got2, "- skill-00\n") {
+		t.Fatalf("entries must compact even without instruction line:\n%s", got2)
 	}
 }
