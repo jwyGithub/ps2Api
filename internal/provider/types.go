@@ -11,14 +11,15 @@ const (
 	// Desktop* 取自真实 macOS 桌面端「本地模式(localmode)」会话抓包(native/openai/openai.chls)——
 	// 只有 localmode workspace 才暴露 executeShellCommand/readFile/listDirectory/searchInFiles
 	// 这些本地工具。hash 是工具目录快照的指纹,随桌面构建版本漂移;换新版桌面端重新抓包对齐即可。
-	DesktopAppVersion = "12.31.3-ui-261007-0231"
-	// 2026-10-08 从 12.31.3 客户端 bundle（ai-chat-*.min.js，Code Cache 提取）逆向对齐：
-	// hash 按平台（win32/darwin/linux）区分，win32 与 darwin 同值：
-	//   clienttools: clienttools-workspace_localmode_v12-desktop-<plat>-12.31.3-ui-261007-0231-cd9d36e0ac49
-	//   kbterms:     kbterms-workspace_localmode_v12-desktop-<plat>-12.31.3-ui-261007-0231-dcf90dad047d
+	DesktopAppVersion = "12.35.2-ui-261104-0231"
+	// 2026-11-11 从 12.36.2 客户端 webview bundle（ai-chat-*.min.js，SW CacheStorage 提取，
+	// 构建串 12.35.2-ui-261104-0231）逆向对齐。注意：装机 12.36.2 的云资产仍基于 12.35.2
+	// UI build 生成 hash，版本串与 hash 必须同一套（错配是指纹破绽）：
+	//   clienttools: clienttools-workspace_localmode_v12-desktop-<plat>-12.35.2-ui-261104-0231-94cfb9eae173
+	//   kbterms:     kbterms-workspace_localmode_v12-desktop-<plat>-12.35.2-ui-261104-0231-640ccf1d524b
 	// 平台形态同步切到 win32/Windows（与真实出站环境一致），见 buildHeaders。
-	DesktopToolsHash   = "clienttools-workspace_localmode_v12-desktop-win32-12.31.3-ui-261007-0231-cd9d36e0ac49"
-	DesktopKBTermsHash = "kbterms-workspace_localmode_v12-desktop-win32-12.31.3-ui-261007-0231-dcf90dad047d"
+	DesktopToolsHash   = "clienttools-workspace_localmode_v12-desktop-win32-12.35.2-ui-261104-0231-94cfb9eae173"
+	DesktopKBTermsHash = "kbterms-workspace_localmode_v12-desktop-win32-12.35.2-ui-261104-0231-640ccf1d524b"
 	DesktopChatURL     = "https://gateway.postman.com/chat"
 
 	// Web* 取自真实浏览器 Web 会话抓包(native/claude/web-chat-1.txt，已知正常、未触发 403)。
@@ -151,10 +152,39 @@ type ChatRequest struct {
 	// Cloudflare 拦截——中和会掐灭已知特征（叶子轮假阴性），截断会破坏二分切片的
 	// 等长 padding（方法论：唯一变量是内容形状，不是长度）。
 	WafProbe bool `json:"-"`
+	// Skills 是要注入出站体的技能清单（12.36.2 逆向，2026-11-11）。两个通道：
+	//   - 顶层 availableSkills[]：{name,description,origin,source}，模型可见目录，
+	//     服务端将其渲染进 query 的 [System skills] 段（透传无校验，见
+	//     available-skills-experiment 结论）。
+	//   - input.skills[]：{name,source,body?}，等价真实客户端「用户 @ 挂载技能」；
+	//     source=postman 时 body 可省（服务端 fallback invokeSkill / discovery cache）。
+	// 为空时两通道都发空数组，与真实客户端「无技能」形态一致。
+	Skills []UpstreamSkill `json:"skills,omitempty"`
+	// SkillsCatalogOnly 只发顶层目录（availableSkills），不发 input.skills ——
+	// 对应「让模型知道技能存在但不预挂载正文」的用法；nil/空切片 = 无技能。
+	// 仅当 len(Skills)>0 且此标志为 true 时生效。
+	SkillsCatalogOnly bool `json:"skills_catalog_only,omitempty"`
 	// ContextSeed 标记本请求是「上下文补种」轮：冷启动折叠时把 tail（最新消息渲染）
 	// 替换为一段摘要指令，让上游模型复述任务状态后在服务端建立带完整历史的会话。
 	// 由 streamInternal 的补种逻辑注入，客户端不可见（json:"-"）。
 	ContextSeed bool `json:"-"`
+}
+
+// UpstreamSkill 是出站 skills 注入的单条技能（12.36.2 逆向形态）。
+// 顶层目录条目 = Name+Description+Origin+Source；挂载条目 = Name+Source(+Body)。
+type UpstreamSkill struct {
+	// Name 是技能名（真实客户端里即 SKILL.md frontmatter 的 name）。
+	Name string `json:"name"`
+	// Description 是目录条目的描述（availableSkills 通道；挂载通道不带）。
+	Description string `json:"description,omitempty"`
+	// Origin 是技能来源目录标识：postman | postman|<dir>（如 .claude 目录扫出的条目）。
+	// 空 postman 通道条目缺省为 "postman"。
+	Origin string `json:"origin,omitempty"`
+	// Source 枚举：postman（云端 postmanSkills）| repository（本地目录扫描）。
+	Source string `json:"source,omitempty"`
+	// Body 是 SKILL.md 正文（仅 input.skills 挂载通道；≤20000 字符时真实客户端才内联，
+	// 网关侧放宽：有值就发，服务端接受；超长由调用方自行截断）。
+	Body string `json:"body,omitempty"`
 }
 
 // ResultKind 是失败请求的首要分类（互斥）。KindNone 为零值表示「未分类」；

@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"sort"
@@ -128,7 +129,6 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 	if req.ParallelToolCalls != nil {
 		parallel = *req.ParallelToolCalls
 	}
-	thinkingLevel := normalizeThinkingLevel(req.OutputConfig["effort"])
 	devMode := map[string]interface{}{
 		"selectedModel":                  postmanModel,
 		"isParallelToolCallingSupported": parallel,
@@ -136,11 +136,54 @@ func (p *Provider) buildBody(req *ChatRequest, tokens *Tokens, postmanModel stri
 		"supportsAskUser":                false,
 		"supportsActionRecommendations":  true,
 		"useThinkingModeIfAvailable":     true,
-		"thinkingLevel":                  thinkingLevel,
 		"enableWebAccess":                true,
 		"isLoopApprovalEnabled":          true,
+		// 2026-11-11：12.36.2 客户端已删除 thinkingLevel 字段（devModeOptions 构造器
+		// 中不再出现），多发属于指纹差异，停发。effort 仍可经 query 侧映射（如有需要）。
 	}
 	body["devModeOptions"] = devMode
+
+	// skills 双通道注入（12.36.2 逆向）：目录进顶层 availableSkills，挂载进 input.skills。
+	// 无技能时保持空数组，与真实客户端「无技能」出站形态一致。
+	if len(req.Skills) > 0 {
+		avail := make([]interface{}, 0, len(req.Skills))
+		for _, s := range req.Skills {
+			entry := map[string]interface{}{"name": s.Name}
+			desc := s.Description
+			if desc == "" {
+				desc = fmt.Sprintf("Skill %s.", s.Name)
+			}
+			entry["description"] = desc
+			origin := s.Origin
+			if origin == "" {
+				origin = "postman"
+			}
+			entry["origin"] = origin
+			source := s.Source
+			if source == "" {
+				source = "postman"
+			}
+			entry["source"] = source
+			avail = append(avail, entry)
+		}
+		body["availableSkills"] = avail
+		if !req.SkillsCatalogOnly {
+			mounted := make([]interface{}, 0, len(req.Skills))
+			for _, s := range req.Skills {
+				entry := map[string]interface{}{"name": s.Name}
+				source := s.Source
+				if source == "" {
+					source = "postman"
+				}
+				entry["source"] = source
+				if s.Body != "" {
+					entry["body"] = s.Body
+				}
+				mounted = append(mounted, entry)
+			}
+			input["skills"] = mounted
+		}
+	}
 	if useNativeResponse {
 		input["chatType"] = "TOOL_RESPONSE"
 		input["query"] = ""

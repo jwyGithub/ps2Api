@@ -29,6 +29,11 @@ type AnthropicReq struct {
 	// 上游（Postman chat）不承载该字段，由网关本地审查并在响应回填 safeguard_results，
 	// 使新版客户端认为服务器审查可达（不再弹 classifier billing 提示）。见 provider/safeguards.go。
 	Safeguards []provider.SafeguardEntry `json:"safeguards"`
+	// Skills 透传出站 skills 注入（顶层 availableSkills + input.skills 双通道，
+	// 12.36.2 逆向形态）。缺省不发，出站保持空数组。
+	Skills []provider.UpstreamSkill `json:"skills"`
+	// SkillsCatalogOnly 为 true 时只发顶层目录、不预挂载正文（input.skills 不发）。
+	SkillsCatalogOnly bool `json:"skills_catalog_only"`
 }
 type AnthropicMsg struct {
 	Role    string          `json:"role"`
@@ -151,7 +156,8 @@ func anthropicToOpenAI(a AnthropicReq) provider.ChatRequest {
 	for _, m := range a.Messages {
 		msgs = append(msgs, anthropicMessageToOpenAI(m))
 	}
-	req := provider.ChatRequest{Model: normalizeModel(a.Model), Messages: msgs, Tools: mapsToInterfaces(a.Tools), ToolChoice: a.ToolChoice, OutputConfig: a.OutputConfig}
+	req := provider.ChatRequest{Model: normalizeModel(a.Model), Messages: msgs, Tools: mapsToInterfaces(a.Tools), ToolChoice: a.ToolChoice, OutputConfig: a.OutputConfig,
+		Skills: a.Skills, SkillsCatalogOnly: a.SkillsCatalogOnly}
 	// output_config 缺省时，把 Anthropic 标准的 thinking.budget_tokens 映射成思考档位。
 	if req.OutputConfig == nil {
 		if effort := thinkingBudgetToEffort(a.Thinking); effort != "" {

@@ -166,3 +166,71 @@ func TestWafSignatureSummaryCountsEscapedAndRaw(t *testing.T) {
 		t.Fatal("empty body should return empty summary")
 	}
 }
+
+// TestBuildBodySkillsInjection 钉住 skills 双通道出站形态（12.36.2 逆向，2026-11-11）：
+// 顶层 availableSkills = {name,description,origin,source}；input.skills = {name,source,body?}。
+// 缺省值回填：origin/source 空 → postman。SkillsCatalogOnly=true 时 input.skills 不发。
+func TestBuildBodySkillsInjection(t *testing.T) {
+	p := New()
+	base := []ChatMessage{{Role: "user", Content: rawText(t, "hi")}}
+	tokens := &Tokens{AccessToken: "tok", UserID: "u", WorkspaceID: "ws"}
+
+	skills := []UpstreamSkill{
+		{Name: "add-visualization-to-request", Description: "Write a Postman response visualization.", Origin: "", Source: ""},
+		{Name: "my-local-skill", Origin: "repository", Source: "repository", Body: "# do things"},
+	}
+
+	// 双通道全开
+	req := &ChatRequest{Model: "gpt-5.6-sol", Endpoint: "openai", Messages: base, Skills: skills}
+	body := p.buildBody(req, tokens, "GPT_56_SOL", 1)
+	avail, ok := body["availableSkills"].([]interface{})
+	if !ok || len(avail) != 2 {
+		t.Fatalf("availableSkills = %#v, want 2 entries", body["availableSkills"])
+	}
+	first := avail[0].(map[string]interface{})
+	if first["name"] != "add-visualization-to-request" || first["origin"] != "postman" || first["source"] != "postman" {
+		t.Fatalf("availableSkills[0] = %#v, want defaults backfilled to postman", first)
+	}
+	if first["description"] == "" {
+		t.Fatal("description must be present in catalog entries")
+	}
+	input := body["input"].(map[string]interface{})
+	mounted, ok := input["skills"].([]interface{})
+	if !ok || len(mounted) != 2 {
+		t.Fatalf("input.skills = %#v, want 2 entries", input["skills"])
+	}
+	m0 := mounted[0].(map[string]interface{})
+	if _, has := m0["body"]; has {
+		t.Fatalf("entry without Body must not carry body key: %#v", m0)
+	}
+	m1 := mounted[1].(map[string]interface{})
+	if m1["body"] != "# do things" {
+		t.Fatalf("mounted body lost: %#v", m1)
+	}
+
+	// catalog-only：input.skills 不发
+	req2 := &ChatRequest{Model: "gpt-5.6-sol", Endpoint: "openai", Messages: base, Skills: skills, SkillsCatalogOnly: true}
+	body2 := p.buildBody(req2, tokens, "GPT_56_SOL", 1)
+	if _, ok := body2["input"].(map[string]interface{})["skills"]; ok {
+		t.Fatal("SkillsCatalogOnly must suppress input.skills")
+	}
+	if len(body2["availableSkills"].([]interface{})) != 2 {
+		t.Fatal("catalog must still be present in catalog-only mode")
+	}
+
+	// 无技能：保持空数组（真实客户端「无技能」形态），且 input.skills 不出现
+	req3 := &ChatRequest{Model: "gpt-5.6-sol", Endpoint: "openai", Messages: base}
+	body3 := p.buildBody(req3, tokens, "GPT_56_SOL", 1)
+	if got := body3["availableSkills"].([]interface{}); len(got) != 0 {
+		t.Fatalf("default availableSkills = %#v, want empty", got)
+	}
+	if _, ok := body3["input"].(map[string]interface{})["skills"]; ok {
+		t.Fatal("input.skills must be absent when no skills are given")
+	}
+
+	// thinkingLevel 已随 12.36.2 客户端删除，出站不得再发
+	dm := body["devModeOptions"].(map[string]interface{})
+	if _, ok := dm["thinkingLevel"]; ok {
+		t.Fatal("devModeOptions.thinkingLevel was removed in 12.36.2 client; must not be sent")
+	}
+}

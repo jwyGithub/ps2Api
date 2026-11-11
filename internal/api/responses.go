@@ -36,6 +36,9 @@ type ResponsesReq struct {
 	OutputConfig map[string]interface{} `json:"output_config"`
 	// Reasoning 是 OpenAI Responses 标准的思考强度字段（reasoning.effort），output_config 缺省时回退到它。
 	Reasoning map[string]interface{} `json:"reasoning"`
+	// Skills 透传出站 skills 注入（12.36.2 逆向双通道）。缺省不发。
+	Skills            []provider.UpstreamSkill `json:"skills"`
+	SkillsCatalogOnly bool                     `json:"skills_catalog_only"`
 }
 
 // respInputItem 是 input 数组里的一项(message / function_call / function_call_output / reasoning)。
@@ -148,6 +151,8 @@ func responsesToOpenAI(rr ResponsesReq) (provider.ChatRequest, map[string]bool) 
 		ToolChoice:        rr.ToolChoice,
 		ParallelToolCalls: rr.ParallelToolCalls,
 		OutputConfig:      rr.OutputConfig,
+		Skills:            rr.Skills,
+		SkillsCatalogOnly: rr.SkillsCatalogOnly,
 	}
 	// output_config 缺省时回退到标准的 reasoning.effort。
 	if req.OutputConfig == nil && rr.Reasoning != nil {
